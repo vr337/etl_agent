@@ -34,6 +34,7 @@ Thumbs.db
 
 # ---- WorkBuddy 会话数据 ----
 .workbuddy/
+.workbuddy-ai/
 
 # ---- 日志 ----
 *.log
