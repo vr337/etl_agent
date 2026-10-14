@@ -1,8 +1,8 @@
-"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理路由）。
+"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理 / 连接路由）。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B / 第 4.3 章进程与入口 / 第 6.4 章错误码
-覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）
-对应 AC：AC-11（生产启动强制校验）、AC-12（多租户隔离）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-C / 第 4.3 章进程与入口 / 第 6.4 章错误码
+覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）、FR-04/05/11（连接路由）
+对应 AC：AC-11（生产启动强制校验）、AC-12（多租户隔离）、AC-02（凭据零明文）
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from etl_agent.auth.errors import AppError
 from etl_agent.auth.middleware import AuthMiddleware
 from etl_agent.config import Settings
 from etl_agent.config import settings as default_settings
+from etl_agent.connections.router import router as connections_router
 from etl_agent.infrastructure.database import engine
 from etl_agent.infrastructure.redis_client import close_redis_client, create_redis_client
 from etl_agent.projects.router import router as projects_router
@@ -24,11 +25,13 @@ from etl_agent.projects.router import router as projects_router
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动：生产强制校验（AC-11）+ Bootstrap 配置校验 + Redis 客户端；关闭：优雅释放连接池。"""
+    """启动：生产强制校验（AC-11）+ Bootstrap/SecretProvider 配置校验 + Redis 客户端；关闭：优雅释放连接池。"""
     settings: Settings = app.state.settings
     # 生产缺失配置即拒绝启动，不降级放行（AC-11 / SPEC 4.4-3）
     settings.validate_production()
     settings.validate_bootstrap()
+    # SecretProvider 配置校验（FR-06：fernet key / vault 地址缺失即拒绝启动）
+    settings.validate_secrets()
     app.state.redis = create_redis_client(settings.resolved_redis_url)
     yield
     await close_redis_client(app.state.redis)
@@ -60,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=exc.http_status, content=exc.to_content(trace_id))
 
     app.include_router(projects_router)
+    app.include_router(connections_router)
     return app
 
 

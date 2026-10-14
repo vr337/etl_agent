@@ -17,7 +17,20 @@ from etl_agent.infrastructure.base import Base
 from etl_agent.infrastructure.database import async_session_factory, engine
 from etl_agent.infrastructure.models import Project, ProjectMembership, ProjectRoleGrant, User
 from etl_agent.infrastructure.redis_client import close_redis_client
-from tests.helpers import SeededWorkspace, build_test_app
+from tests.helpers import (
+    SeededWorkspace,
+    build_test_app,
+    dev_pg_credentials,
+    make_settings,
+    reset_test_secrets,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_secrets_cache() -> AsyncIterator[None]:
+    """每个测试前重置 Fernet key 缓存，保证测试间密钥互不泄露。"""
+    reset_test_secrets()
+    yield
 
 
 @pytest.fixture
@@ -91,3 +104,29 @@ async def seeded(db_session: AsyncSession) -> SeededWorkspace:
         admin_b_user_id=admin_b.id,
         outsider_user_id=outsider.id,
     )
+
+
+@pytest.fixture
+async def seeded_connection(db_session: AsyncSession, seeded: SeededWorkspace):
+    """项目 A 下一条指向开发库 PostgreSQL 的连接（Secret 引用制，凭据来自 infra/.env）。
+
+    返回 (connection, settings)：settings 供 Provider/探针使用（与 app fixture 同源配置）。
+    """
+    from etl_agent.connections.register import register_connection
+    from etl_agent.connections.schemas import ConnectionRegisterRequest
+
+    settings = make_settings()
+    pg = dev_pg_credentials()
+    payload = ConnectionRegisterRequest(
+        name=f"pg-dev-{uuid.uuid4()}",
+        connector_type="POSTGRESQL",
+        host=str(pg["host"]),
+        port=int(pg["port"]),  # type: ignore[arg-type]
+        database_name=str(pg["database_name"]),
+        username=str(pg["username"]),
+        password=str(pg["password"]),
+    )
+    connection = await register_connection(
+        db_session, project_id=seeded.project_a_id, payload=payload, settings=settings
+    )
+    return connection, settings
