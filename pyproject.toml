@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "生产级 ETL-Agent 数据集成平台"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "aiomysql>=0.3.2",
     "alembic",
     "asyncpg",
     "celery[redis]",
     "cryptography",
     "fastapi",
     "httpx",
+    "hvac>=2.4.0",
     "langgraph",
     "langgraph-checkpoint-postgres",
     "opentelemetry-distro",
@@ -37,6 +39,7 @@ dev = [
 [project.scripts]
 etl-agent-api = "etl_agent.main:main"
 etl-agent-checkpoint-setup = "etl_agent.checkpoint_setup:main"
+etl-agent-scan-credentials = "etl_agent.secrets.expiry:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -56,6 +59,11 @@ ignore = ["B008"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# 驱动/客户端库无类型存根（asyncpg / aiomysql / hvac）；strict 模式下跳过其类型检查
+[[tool.mypy.overrides]]
+module = ["asyncpg", "aiomysql", "hvac"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

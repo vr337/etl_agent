@@ -1,8 +1,8 @@
-"""M-A 认证鉴权 — 应用配置加载与生产启动强制校验。
+"""M-A/M-C 横切配置 — 应用配置加载、生产启动强制校验与 SecretProvider 配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点
-覆盖 FR：FR-58（身份注入）、FR-65（认证双模式）、FR-01（Bootstrap Token）
-对应 AC：AC-11（认证边界：生产缺失配置拒绝启动）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）
+对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）
 """
 from __future__ import annotations
 
@@ -12,9 +12,13 @@ from etl_agent.infrastructure.database import settings as infra_settings
 
 AUTH_MODES = frozenset({"dev-header", "trusted-gateway"})
 ENVIRONMENTS = frozenset({"dev", "staging", "prod"})
+SECRET_PROVIDERS = frozenset({"fernet-db", "vault-kv-v2"})
 
 # 生产强制项（AC-11 / SPEC 4.4-3）：HMAC 密钥与 Bootstrap Token 的最小长度
 MIN_SECRET_LENGTH = 32
+
+# Fernet key 的 base64 解码后固定 32 字节（cryptography.fernet 规范）
+FERNET_KEY_BYTES = 32
 
 
 class ProductionConfigError(RuntimeError):
@@ -47,6 +51,18 @@ class Settings(BaseSettings):
     # ---- 工作区初始化（FR-01）----
     bootstrap_enabled: bool = False
     bootstrap_token: str = ""
+
+    # ---- SecretProvider（FR-06 / ADR-05）----
+    secret_provider: str = "fernet-db"
+    fernet_key: str = ""
+    fernet_key_version: int = 1
+    # 历史主密钥（逗号分隔）：密钥轮换后旧密文仍可读（MultiFernet 解密集合）
+    fernet_previous_keys: str = ""
+    vault_addr: str = ""
+    vault_token: str = ""
+    vault_mount: str = "secret"
+    # 凭据告警 Webhook（FR-10；未配置则扫描只生成预警记录、不投递）
+    alert_webhook_url: str = ""
 
     # ---- 直连覆盖（.env.example 形态，优先级高于连接件拼装）----
     database_url: str | None = None
@@ -115,6 +131,48 @@ class Settings(BaseSettings):
             raise ProductionConfigError(
                 f"ETL_AGENT_BOOTSTRAP_ENABLED=true 时 ETL_AGENT_BOOTSTRAP_TOKEN 必须 ≥{MIN_SECRET_LENGTH} 字节（FR-01）"
             )
+
+    def validate_secrets(self) -> None:
+        """SecretProvider 配置校验（FR-06 / ADR-05）。
+
+        - provider 取值限定 fernet-db / vault-kv-v2；
+        - fernet-db：FERNET_KEY 必须存在且为合法 Fernet key（base64 32 字节）——
+          禁止硬编码密钥（S3 禁止事项 18），启动期缺失即拒绝；
+        - vault-kv-v2：VAULT_ADDR 必填（Q5/S-Q7 待定，未部署时不要选该模式）。
+        """
+        if self.secret_provider not in SECRET_PROVIDERS:
+            raise ProductionConfigError(
+                f"ETL_AGENT_SECRET_PROVIDER 非法: {self.secret_provider!r}，可选 {sorted(SECRET_PROVIDERS)}"
+            )
+        if self.secret_provider == "fernet-db":
+            self._validate_fernet_key()
+        if self.secret_provider == "vault-kv-v2" and not self.vault_addr.strip():
+            raise ProductionConfigError(
+                "ETL_AGENT_SECRET_PROVIDER=vault-kv-v2 时 ETL_AGENT_VAULT_ADDR 必填（FR-06 / Q5 待定）"
+            )
+
+    def _validate_fernet_key(self) -> None:
+        """校验 Fernet key 格式（base64 编码的 32 字节）。"""
+        import base64
+        import binascii
+
+        if not self.fernet_key.strip():
+            raise ProductionConfigError(
+                "ETL_AGENT_FERNET_KEY 未配置（FR-06 / S3 禁止事项 18：禁止硬编码，必须从环境变量读取）"
+            )
+        try:
+            raw = base64.urlsafe_b64decode(self.fernet_key.encode("utf-8"))
+        except (binascii.Error, ValueError) as exc:
+            raise ProductionConfigError("ETL_AGENT_FERNET_KEY 不是合法 base64") from exc
+        if len(raw) != FERNET_KEY_BYTES:
+            raise ProductionConfigError(
+                f"ETL_AGENT_FERNET_KEY 解码后须为 {FERNET_KEY_BYTES} 字节，实际 {len(raw)}"
+            )
+
+    @property
+    def fernet_previous_keys_list(self) -> list[str]:
+        """历史主密钥列表（逗号分隔，空项过滤）。"""
+        return [item.strip() for item in self.fernet_previous_keys.split(",") if item.strip()]
 
 
 settings = Settings()

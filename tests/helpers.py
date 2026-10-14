@@ -12,30 +12,72 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.config import Settings
 from etl_agent.infrastructure.database import get_session
+from etl_agent.infrastructure.database import settings as infra_settings
 from etl_agent.infrastructure.redis_client import create_redis_client
 from etl_agent.main import create_app
 
 TEST_GATEWAY_SECRET: str = "test-gateway-secret-0123456789abcdef"
 TEST_BOOTSTRAP_TOKEN: str = "test-bootstrap-token-0123456789abcdef"
 
+# 单测内 Fernet key 缓存：保证同一测试里 register（加密）/ app（解密）/ provider（解密）
+# 使用同一把密钥——否则跨调用新生成密钥会导致 InvalidToken。每个测试前由 conftest 重置。
+_cached_fernet_key: str | None = None
+
+
+def make_fernet_key() -> str:
+    """生成测试用 Fernet key（运行时生成，不硬编码任何密钥材料）。"""
+    return Fernet.generate_key().decode()
+
+
+def _fernet_key_for_test() -> str:
+    """返回本测试内稳定的 Fernet key（首次调用生成并缓存）。"""
+    global _cached_fernet_key
+    if _cached_fernet_key is None:
+        _cached_fernet_key = make_fernet_key()
+    return _cached_fernet_key
+
+
+def reset_test_secrets() -> None:
+    """每个测试前重置 Fernet key 缓存（conftest 自动调用）。"""
+    global _cached_fernet_key
+    _cached_fernet_key = None
+
 
 def make_settings(**overrides: object) -> Settings:
-    """构造测试用 Settings（init 参数优先级高于 infra/.env）。"""
+    """构造测试用 Settings（init 参数优先级高于 infra/.env）。
+
+    fernet_key 在单个测试内稳定复用（除非显式覆盖），保证加密/解密同源。
+    """
     base: dict[str, object] = {
         "env": "dev",
         "auth_mode": "dev-header",
         "gateway_hmac_secret": TEST_GATEWAY_SECRET,
         "bootstrap_enabled": True,
         "bootstrap_token": TEST_BOOTSTRAP_TOKEN,
+        "secret_provider": "fernet-db",
+        "fernet_key": overrides.get("fernet_key", _fernet_key_for_test()),
+        "fernet_key_version": 1,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
+
+
+def dev_pg_credentials() -> dict[str, object]:
+    """开发库 PostgreSQL 连接参数（来自 infra/.env；探针成功路径用）。"""
+    return {
+        "host": infra_settings.postgres_host,
+        "port": infra_settings.postgres_port,
+        "database_name": infra_settings.postgres_db,
+        "username": infra_settings.postgres_user,
+        "password": infra_settings.postgres_password,
+    }
 
 
 async def build_test_app(db_session: AsyncSession, **overrides: object) -> FastAPI:
