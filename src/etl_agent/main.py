@@ -1,7 +1,7 @@
-"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理 / 连接路由）。
+"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理 / 连接 / 探查 / 文件资产路由）。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-C / 第 4.3 章进程与入口 / 第 6.4 章错误码
-覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）、FR-04/05/11（连接路由）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-C/M-D/M-E / 第 4.3 章进程与入口 / 第 6.4 章错误码
+覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）、FR-04/05/11（连接路由）、FR-12/14/15（探查路由）、FR-13（文件资产路由）
 对应 AC：AC-11（生产启动强制校验）、AC-12（多租户隔离）、AC-02（凭据零明文）
 """
 from __future__ import annotations
@@ -18,8 +18,10 @@ from etl_agent.auth.middleware import AuthMiddleware
 from etl_agent.config import Settings
 from etl_agent.config import settings as default_settings
 from etl_agent.connections.router import router as connections_router
+from etl_agent.files.router import router as file_assets_router
 from etl_agent.infrastructure.database import engine
 from etl_agent.infrastructure.redis_client import close_redis_client, create_redis_client
+from etl_agent.profiles.router import router as profiles_router
 from etl_agent.projects.router import router as projects_router
 
 
@@ -64,6 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(projects_router)
     app.include_router(connections_router)
+    app.include_router(profiles_router)
+    app.include_router(file_assets_router)
     return app
 
 

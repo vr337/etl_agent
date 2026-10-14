@@ -14,15 +14,19 @@ dependencies = [
     "hvac>=2.4.0",
     "langgraph",
     "langgraph-checkpoint-postgres",
+    "openpyxl>=3.1.5",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp",
     "opentelemetry-instrumentation-fastapi",
     "opentelemetry-instrumentation-httpx",
     "opentelemetry-instrumentation-sqlalchemy",
+    "pdfplumber>=0.11.10",
     "psycopg[binary]>=3.3.6",
+    "pyarrow>=26.0.0",
     "pydantic",
     "pydantic-settings",
     "pyjwt",
+    "python-multipart>=0.0.32",
     "redis",
     "sqlalchemy[asyncio]",
     "uvicorn[standard]",
@@ -61,8 +65,9 @@ python_version = "3.12"
 strict = true
 
 # 驱动/客户端库无类型存根（asyncpg / aiomysql / hvac）；strict 模式下跳过其类型检查
+# S4 追加：文件格式适配器依赖的 pyarrow / openpyxl / pdfplumber 同样无存根
 [[tool.mypy.overrides]]
-module = ["asyncpg", "aiomysql", "hvac"]
+module = ["asyncpg", "aiomysql", "hvac", "pyarrow.*", "openpyxl.*", "pdfplumber.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
