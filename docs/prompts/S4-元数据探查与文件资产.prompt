@@ -1,0 +1,782 @@
+# ============================================================
+# WorkBuddy — S4 阶段执行指令
+# 阶段：元数据探查与文件资产（T-07 + T-08）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001 + AMEND-002
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S4
+- 阶段名称：元数据探查与文件资产
+- 覆盖任务：T-07（M-D 元数据探查与数据分级）、T-08（M-E 文件资产）
+- 依赖：S1（数据模型）、S2（认证）、S3（连接与 SecretProvider）
+- 对应 AC：AC-02（全链路无敏感明文泄露）
+- SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-D/M-E、第 5.2 章（data_profiles / file_assets）、第 6.1 章 API-04、第 6.4 章错误码、第 8 章「安全 · 凭据保护/多租户」、附录 A.1、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-12/13/14/15/64 + AC-02
+- 追加件：AMEND-001（Bootstrap）、AMEND-002（连接域）
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S4-profiles |
+| 上游 tag | stage-S3-done |
+
+## 三、前置检查（执行前必须完成）
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S4-profiles
+3. git log --oneline -5 显示 S3 合并 + AMEND-002 提交
+4. 工作区干净：git status 无 tracked 变更（.workbuddy/、infra/.env 允许 untracked）
+5. 上游 tag 存在：git tag --list | Select-String "stage-S3-done"
+6. 容器健康：docker compose -f infra\docker-compose.yml ps
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. S1 数据模型已落地（2 张 S4 表）：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\dt" | Select-String -Pattern "data_profiles|file_assets"
+   → 2 张表全部存在
+9. S3 产出已就位：
+   Test-Path src\etl_agent\connections\  → True
+   Test-Path src\etl_agent\secrets\      → True
+10. 基线文件 + 追加件：
+    docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+    docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+    docs\spec\amendments\AMEND-001-bootstrap-error-codes.md（Accepted）
+    docs\spec\amendments\AMEND-002-connection-error-codes.md（Accepted）
+11. 代码规范文件：docs\conventions\code-comments.md
+12. infra\.env 已含 FERNET_KEY（S3 已配）
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 四、S3 → S4 吸收清单（本阶段必须遵循）
+
+### 4.1 S3 遗留吸收（来自 S3 阶段报告）
+
+1. **SecretProvider 双模式接口**（`secrets/provider.py` Protocol）S4 复用，不重写；
+2. **连接域错误码**（`connections/errors.py` 4 个）S4 若引用需一致（AMEND-002 已 Accepted）；
+3. **中间件分层**（`require_project_member` 依赖）S4 新端点沿用，不在中间件查业务表；
+4. **凭据治理状态机契约**已固化，S4 不改动；
+5. **AC-02 零明文红线**（响应 / 日志 / 库）S4 全链路沿用；新增对外响应须通过 `test_zero_plaintext` 类扫描。
+
+### 4.2 `.env` 修改规则（S4 起强制）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新（入 Git） | 每阶段新增变量时 |
+| `infra/.env` | **人类** | 引入新密钥 / 覆盖默认值时；**禁止 WorkBuddy 修改** |
+
+**例外处理**：若 S4 引入新密钥，WorkBuddy 应输出「需人类补充的变量清单」+ 生成命令，**等待人类配置完成后再继续**；若必须生成临时 key 用于测试，**只能在测试进程环境变量中设置，不得写入 `infra/.env`**。
+
+### 4.3 目录结构显式含 errors.py
+
+S4 起，所有领域模块目录结构**必须显式列出 `errors.py`**（S3 教训：提示词漏列 `connections/errors.py`）。
+
+## 五、连接信息（从 infra\.env 读取）
+
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=etl_agent
+PG_PASSWORD=dev_local_2026
+PG_DB_MAIN=etl_agent
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=dev_redis_2026
+
+ETL_AGENT_SECRET_PROVIDER=fernet-db
+ETL_AGENT_FERNET_KEY=<S3 已配>
+
+# S4 新增（.env.example 同步；.env 只在需要时人类手动加）
+ETL_AGENT_FILE_ASSET_ROOT=D:/Documents/Docker/volume/app/etl_agent/file_assets
+ETL_AGENT_FILE_ASSET_MAX_SIZE_MB=25
+ETL_AGENT_FILE_ASSET_MAX_ROWS=100000
+ETL_AGENT_PROFILE_SAMPLE_LIMIT_DEFAULT=100
+```
+
+## 六、任务清单
+
+### T-07 M-D 元数据探查与数据分级
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-07.1 | Profile 探查服务（表级只读） | src\etl_agent\profiles\service.py |
+| T-07.2 | 表结构读取（Schema / 类型 / 主键，**不执行全表 COUNT**） | src\etl_agent\profiles\introspect.py |
+| T-07.3 | 近似统计（采样而非全表） | src\etl_agent\profiles\statistics.py |
+| T-07.4 | 脱敏样本采样（列名启发式脱敏） | src\etl_agent\profiles\masking.py |
+| T-07.5 | 字段级 6 级分级推断（显式优先 → 同名传播 → 显式映射传播） | src\etl_agent\profiles\classification.py |
+| T-07.6 | 分级报告（带 SHA256） | src\etl_agent\profiles\report.py |
+| T-07.7 | API 路由 + Pydantic schemas | src\etl_agent\profiles\router.py、schemas.py |
+| T-07.8 | 领域错误码 | src\etl_agent\profiles\errors.py |
+
+### T-08 M-E 文件资产
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-08.1 | 文件上传（9 种格式；25 MiB / 100,000 行上限） | src\etl_agent\files\service.py |
+| T-08.2 | 文件格式适配器（CSV / JSON / JSONL / XLSX / Parquet + ORC / XML / MD / PDF） | src\etl_agent\files\readers\ |
+| T-08.3 | 文件探查（Schema 推断 + 样本行脱敏） | src\etl_agent\files\probe.py |
+| T-08.4 | 存储路径管理（引擎只读挂载路径，不暴露 API） | src\etl_agent\files\storage.py |
+| T-08.5 | API 路由 + Pydantic schemas | src\etl_agent\files\router.py、schemas.py |
+| T-08.6 | 领域错误码 | src\etl_agent\files\errors.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API 路由注册（挂到 main.py） | src\etl_agent\main.py（更新） |
+| config.py 新增文件资产配置 | src\etl_agent\config.py（更新） |
+| 端到端测试 | tests\profiles\、tests\files\ |
+
+## 七、目录结构（S4 结束时必须存在）
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S4 变量）
+├── pyproject.toml                      （新增：pandas/pyarrow/openpyxl/pdfplumber 等，按需）
+├── uv.lock
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 profiles/files 路由）
+│   ├── config.py                       （更新：新增 FILE_ASSET_* / PROFILE_* 配置）
+│   ├── auth\                           （S2，不动）
+│   ├── projects\                       （S2，不动）
+│   ├── connections\                    （S3，不动）
+│   ├── secrets\                        （S3，不动）
+│   ├── profiles\                       （新增：M-D）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── introspect.py
+│   │   ├── statistics.py
+│   │   ├── masking.py
+│   │   ├── classification.py
+│   │   ├── report.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── errors.py                   （显式列出）
+│   ├── files\                          （新增：M-E）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── probe.py
+│   │   ├── storage.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   ├── errors.py                   （显式列出）
+│   │   └── readers\                    （格式适配器）
+│   │       ├── __init__.py
+│   │       ├── base.py
+│   │       ├── csv_reader.py
+│   │       ├── json_reader.py          （JSON + JSONL）
+│   │       ├── excel_reader.py         （XLSX）
+│   │       ├── parquet_reader.py       （Parquet + ORC）
+│   │       ├── xml_reader.py
+│   │       ├── markdown_reader.py
+│   │       └── pdf_reader.py
+│   └── infrastructure\                 （S1/S2，不动）
+└── tests\
+    ├── conftest.py                     （S4 扩展 fixtures）
+    ├── helpers.py                      （S4 扩展工具）
+    ├── auth\                           （S2，不动）
+    ├── projects\                       （S2，不动）
+    ├── connections\                    （S3，不动）
+    ├── secrets\                        （S3，不动）
+    ├── profiles\                       （新增）
+    │   ├── __init__.py
+    │   ├── test_introspect.py
+    │   ├── test_masking.py
+    │   ├── test_classification.py
+    │   ├── test_report.py
+    │   ├── test_router.py
+    │   └── test_zero_plaintext.py      （AC-02）
+    └── files\                          （新增）
+        ├── __init__.py
+        ├── test_readers.py
+        ├── test_probe.py
+        ├── test_limits.py
+        ├── test_router.py
+        └── test_zero_plaintext.py      （AC-02）
+```
+
+## 八、配置项（config.py 新增）
+
+```python
+ETL_AGENT_FILE_ASSET_ROOT              # 文件资产根目录（默认 D:/Documents/Docker/volume/app/etl_agent/file_assets）
+ETL_AGENT_FILE_ASSET_MAX_SIZE_MB       # 默认 25
+ETL_AGENT_FILE_ASSET_MAX_ROWS          # 默认 100000
+ETL_AGENT_PROFILE_SAMPLE_LIMIT_DEFAULT # 默认 100（采样上限 1–100）
+```
+
+**更新 `.env.example`**：新增上述 4 个变量（占位值）。**不修改 `infra\.env`**（沿用默认值）。
+
+## 九、核心实现要点
+
+### 9.1 Profile 探查（T-07.1 ~ T-07.3）
+
+**API-04**：`POST /api/v1/projects/{project_id}/profiles`
+
+```
+Body: {
+  "connection_id": "uuid",
+  "endpoint_role": "SOURCE|SINK",
+  "schema_name": "string",
+  "table_name": "string",
+  "sample_limit": 100          # 1–100，默认 100
+}
+```
+
+**流程**：
+1. 校验 `require_project_member`（S2 依赖）+ connection 属于当前项目（跨项目 403）；
+2. 从 `connections/register` 读取连接凭据（SecretProvider 解密，**内存短暂持有**）；
+3. 读表结构（`introspect.py`）：
+   - **禁止全表 COUNT**（FR-12 红线）；
+   - 只读 `information_schema` / `pg_catalog`（PG 探针）或等价（MySQL 探针）；
+4. 近似统计（`statistics.py`）：
+   - 行数用 `pg_class.reltuples`（PG 近似值）；
+   - 列基数 / 空值率用采样（`TABLESAMPLE` 或 `LIMIT N`）；
+5. 脱敏样本（`masking.py`）：
+   - 采样 N 行（默认 100，上限 100）；
+   - 按列名启发式脱敏：`password / token / secret / *name / *id / phone / email / address` 等；
+   - 脱敏后存 `data_profiles.masked_samples`（JSON）；
+6. 分级推断（`classification.py`）：
+   - 6 级：`PUBLIC / INTERNAL / CONFIDENTIAL / RESTRICTED / SECRET / UNKNOWN`；
+   - 显式声明优先 → 同名传播（同列名在其他 Profile 的分级）→ 显式映射传播；
+   - `UNKNOWN` 按**保守等级**（默认 `CONFIDENTIAL`）参与策略；
+7. 分级报告（`report.py`）：
+   - 输出 JSON + SHA256；
+   - 存 `data_profiles.classification_report_sha256`；
+8. 存 `data_profiles` 表；**过期时间**默认 24h。
+
+**响应体**：
+```json
+{
+  "id": "uuid",
+  "connection_id": "uuid",
+  "endpoint_role": "SOURCE",
+  "schema_name": "public",
+  "table_name": "orders",
+  "columns": [...],
+  "masked_samples": [...],       // 已脱敏
+  "classification_report_sha256": "64-hex",
+  "expires_at": "ISO8601"
+}
+```
+
+**红线**：`masked_samples` **绝不含明文**（AC-02）。脱敏策略由 `masking.py` 统一实现，测试须断言。
+
+### 9.2 分级推断（T-07.5）
+
+**6 级优先级（高到低）**：
+1. **显式声明**：若调用方传入 `classification` 字段，直接用；
+2. **同名传播**：同列名在其他 Profile 已有分级 → 继承最高级；
+3. **显式映射传播**：若列在 `data_profiles.columns` 的 `classification` 有值 → 用该值；
+4. **默认**：`UNKNOWN`（保守按 `CONFIDENTIAL` 参与策略）。
+
+**依据**：PRD FR-15 / SPEC 3.2 M-D。
+
+### 9.3 文件上传（T-08.1）
+
+**API**：`POST /api/v1/projects/{project_id}/file-assets`
+
+**multipart/form-data** 上传：
+- 字段：`file`（二进制）
+- 校验：
+  - 大小 ≤ 25 MiB（超限 → `BIZ_422_FILE_TOO_LARGE`）；
+  - 格式 ∈ 9 种（按扩展名 + 内容嗅探）；
+  - 行数 ≤ 100,000（读取时增量计数，超限中断 → `BIZ_422_FILE_TOO_MANY_ROWS`）；
+- 存储：写到 `ETL_AGENT_FILE_ASSET_ROOT/{project_id}/{asset_id}.{ext}`；
+- **上传路径不暴露 API**（`storage_path` 只在 DB 存，响应只返回 `asset_id`）。
+
+**响应体**：
+```json
+{
+  "id": "uuid",
+  "format": "CSV",
+  "size_bytes": 12345,
+  "row_count": 1000,
+  "created_at": "ISO8601"
+}
+```
+
+### 9.4 文件探查（T-08.3）
+
+**API**：`GET /api/v1/projects/{project_id}/file-assets/{asset_id}`
+
+**响应**：Schema + 样本行（脱敏）
+```json
+{
+  "id": "uuid",
+  "format": "CSV",
+  "columns": [
+    {"name": "order_id", "type": "integer", "nullable": false},
+    {"name": "customer_email", "type": "string", "nullable": true, "masked": true}
+  ],
+  "masked_samples": [...]        // 脱敏
+}
+```
+
+**脱敏逻辑复用 `profiles/masking.py`**（不重写）。
+
+### 9.5 引擎只读挂载路径
+
+- 文件资产存 `ETL_AGENT_FILE_ASSET_ROOT`（默认 `D:/Documents/Docker/volume/app/etl_agent/file_assets`）；
+- SeaTunnel 容器（S7 起）挂载此目录到 `/data/file-assets:ro`；
+- **S4 只需保证存储路径正确**，容器挂载在 S7 加。
+
+### 9.6 错误码（S4 新增）
+
+**新增（S4 若引用，将生成 AMEND-003 草稿）**：
+```
+BIZ_404_PROFILE_NOT_FOUND          404
+BIZ_404_FILE_ASSET_NOT_FOUND       404
+BIZ_422_FILE_TOO_LARGE             422
+BIZ_422_FILE_TOO_MANY_ROWS         422
+BIZ_422_FILE_FORMAT_UNSUPPORTED    422
+BIZ_422_SAMPLE_LIMIT_OUT_OF_RANGE  422
+```
+
+**复用**：
+```
+AUTH_401_* / AUTH_403_*                        （S2）
+BIZ_400_VALIDATION                             （SPEC 6.4）
+BIZ_403_BOOTSTRAP_*                            （AMEND-001）
+BIZ_404_CONNECTION_NOT_FOUND                   （AMEND-002）
+BIZ_409_CONNECTION_NAME_DUPLICATE              （AMEND-002）
+BIZ_422_CONNECTOR_UNSUPPORTED                  （AMEND-002）
+BIZ_422_PROBE_FAILED                           （AMEND-002）
+```
+
+## 十、测试清单
+
+### tests/profiles/
+
+| 用例 | 断言 |
+|------|------|
+| test_introspect_schema | 读表结构正确，无全表 COUNT |
+| test_introspect_pg_catalog_only | SQL 语句不包含 `SELECT COUNT(*) FROM <table>`（正则断言） |
+| test_masking_password | 列名 `password` 的值脱敏 |
+| test_masking_email | 列名 `email` 的值脱敏 |
+| test_masking_generic | 非敏感列不脱敏 |
+| test_classification_explicit | 显式声明优先 |
+| test_classification_propagation | 同名传播生效 |
+| test_classification_default_unknown | 无声明 → UNKNOWN，保守参与 |
+| test_report_sha256 | 报告 SHA256 稳定（同输入同输出） |
+| test_router_cross_project_403 | 跨项目 → 403 |
+| test_sample_limit_range | 越界 → 400 |
+| test_zero_plaintext_profile_response | **AC-02**：Profile 响应不含明文 |
+
+### tests/files/
+
+| 用例 | 断言 |
+|------|------|
+| test_csv_reader | CSV 读取正确 |
+| test_json_reader | JSON / JSONL 读取正确 |
+| test_excel_reader | XLSX 读取正确 |
+| test_parquet_reader | Parquet 读取正确 |
+| test_unsupported_format | 未支持格式 → 422 |
+| test_size_limit | > 25 MiB → 422 |
+| test_row_limit | > 100,000 行 → 422（增量中断） |
+| test_probe_masked_samples | 样本已脱敏 |
+| test_storage_path_not_in_response | 响应不含 `storage_path` |
+| test_router_cross_project_403 | 跨项目 → 403 |
+| test_zero_plaintext_file_response | **AC-02**：文件探查响应不含明文 |
+
+## 十一、验收命令（DoD 必须附输出，PowerShell）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -5
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S4 不新增，S1 的 2 张 S4 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\profiles\ tests\files\ -v
+uv run pytest tests\auth\ tests\projects\ tests\infrastructure\ tests\connections\ tests\secrets\ -v   # 回归
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\profiles\ src\etl_agent\files\ src\etl_agent\config.py
+
+# 6. 凭据零明文核对（AC-02）
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 7. 代码注释合规抽检（DoD-13）
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 8. .env 未被修改核对（S4 起强制）
+Get-Content infra\.env | Select-String "FERNET_KEY"
+# 期望：仍为 S3 时的值，未被 S4 修改
+
+# 9. 无全表 COUNT 核对（FR-12 红线）
+Select-String -Path src\etl_agent\profiles\*.py -Pattern "COUNT\(\*\)"
+# 期望：无匹配（或仅用于采样子查询的注释说明）
+```
+
+## 十二、DoD（16 项，必须全过）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在（含 profiles/errors.py、files/errors.py）
+[ ] DoD-2  Alembic 可升可降：第十一节命令 3 全部成功
+[ ] DoD-3  Profile 测试通过：tests/profiles/ 全绿
+[ ] DoD-4  文件资产测试通过：tests/files/ 全绿
+[ ] DoD-5  回归测试通过：
+       tests/infrastructure/ 25 passed
+       tests/auth/ 17 passed
+       tests/projects/ 17 passed
+       tests/connections/ 与 tests/secrets/ 保持 S3 水平
+[ ] DoD-6  AC-02 凭据零明文：
+       - Profile 响应 masked_samples 无明文
+       - 文件探查响应 masked_samples 无明文
+       - 两个 test_zero_plaintext_* 全绿
+[ ] DoD-7  FR-12 无全表 COUNT：
+       - introspect.py 无 `COUNT(*)` 全表扫描
+       - 近似统计用 pg_class.reltuples 或等价
+[ ] DoD-8  脱敏策略：
+       - password / email / phone / *name / token 等列名启发式脱敏
+       - 非敏感列不脱敏
+[ ] DoD-9  分级推断：
+       - 6 级推断正确
+       - 显式声明优先 / 同名传播 / 显式映射传播 / UNKNOWN 保守
+[ ] DoD-10 文件资产限制：
+       - 9 种格式
+       - ≤ 25 MiB（超限 422）
+       - ≤ 100,000 行（超限 422）
+[ ] DoD-11 存储路径不暴露：
+       - 上传 / 查询响应不含 storage_path
+[ ] DoD-12 Lint / Type 干净：第十一节命令 5 无新增错误
+[ ] DoD-13 代码注释合规：第十一节命令 7 无 MISSING HEADER
+[ ] DoD-14 上下文读取确认：阶段报告开头列出 8 个文件读取状态
+[ ] DoD-15 遗留问题分类归档：阶段报告末尾输出「S5 吸收清单」+「AMEND-003 草稿」（如新增错误码）
+[ ] DoD-16 .env 未被修改：
+       - infra\.env 中 FERNET_KEY 与 S3 一致
+       - git status 中 infra\.env 不在 tracked 变更
+```
+
+DoD 全过 → 调 git_ship；任一不过 → 输出阻塞报告，禁止调用 git_ship。
+
+## 十三、git_ship 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S4-profiles
+  base_branch: master
+  commit_message: |
+    feat(S4): 元数据探查与文件资产 [SPEC v1.0.3-Baseline + AMEND-001/002]
+
+    覆盖任务：T-07（M-D 元数据探查与数据分级）、T-08（M-E 文件资产）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-07 / ADR-08
+    追加件：AMEND-001 / AMEND-002
+    对应 AC：AC-02（无敏感明文泄露）
+    DoD：16 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    - src/etl_agent/main.py
+    - src/etl_agent/config.py
+    - src/etl_agent/profiles/__init__.py
+    - src/etl_agent/profiles/service.py
+    - src/etl_agent/profiles/introspect.py
+    - src/etl_agent/profiles/statistics.py
+    - src/etl_agent/profiles/masking.py
+    - src/etl_agent/profiles/classification.py
+    - src/etl_agent/profiles/report.py
+    - src/etl_agent/profiles/router.py
+    - src/etl_agent/profiles/schemas.py
+    - src/etl_agent/profiles/errors.py
+    - src/etl_agent/files/__init__.py
+    - src/etl_agent/files/service.py
+    - src/etl_agent/files/probe.py
+    - src/etl_agent/files/storage.py
+    - src/etl_agent/files/router.py
+    - src/etl_agent/files/schemas.py
+    - src/etl_agent/files/errors.py
+    - src/etl_agent/files/readers/__init__.py
+    - src/etl_agent/files/readers/base.py
+    - src/etl_agent/files/readers/csv_reader.py
+    - src/etl_agent/files/readers/json_reader.py
+    - src/etl_agent/files/readers/excel_reader.py
+    - src/etl_agent/files/readers/parquet_reader.py
+    - src/etl_agent/files/readers/xml_reader.py
+    - src/etl_agent/files/readers/markdown_reader.py
+    - src/etl_agent/files/readers/pdf_reader.py
+    - tests/conftest.py
+    - tests/helpers.py
+    - tests/profiles/__init__.py
+    - tests/profiles/test_introspect.py
+    - tests/profiles/test_masking.py
+    - tests/profiles/test_classification.py
+    - tests/profiles/test_report.py
+    - tests/profiles/test_router.py
+    - tests/profiles/test_zero_plaintext.py
+    - tests/files/__init__.py
+    - tests/files/test_readers.py
+    - tests/files/test_probe.py
+    - tests/files/test_limits.py
+    - tests/files/test_router.py
+    - tests/files/test_zero_plaintext.py
+    - .env.example
+    - pyproject.toml
+    - uv.lock
+  tag: stage-S4-done
+  push: true
+  auto_pr: false
+```
+
+## 十四、github_ops 参数
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S4-profiles
+      base: master
+      title: "[S4] 元数据探查与文件资产"
+      body: |
+        ## 阶段
+        S4 — 元数据探查与文件资产
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001（Bootstrap）/ AMEND-002（连接域）
+
+        ## 覆盖任务
+        T-07（M-D 元数据探查与数据分级）、T-08（M-E 文件资产）
+
+        ## 对应 AC
+        - AC-02（无敏感明文泄露）
+
+        ## DoD 结果
+        - [x] 16 项全部通过（详见阶段报告）
+
+        ## 关键红线
+        - FR-12：无全表 COUNT
+        - AC-02：脱敏样本无明文
+        - 25 MiB / 100,000 行上限
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S5；AMEND-003 草稿见阶段报告末尾>
+      labels:
+        - "stage:S4"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-02"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-07 M-D 元数据探查与数据分级"
+        - "T-08 M-E 文件资产"
+```
+
+## 十五、阶段报告模板（执行完成后必须输出）
+
+```
+=== 阶段报告 ===
+阶段编号：S4
+阶段名称：元数据探查与文件资产
+完成时间：<ISO8601>
+
+【读取上下文确认】
+- docs/conventions/code-comments.md                       已读 / 未找到
+- docs/prd/etl_agent-PRD_v1.1.1-Baseline.md               已读 / 未找到
+- docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md             已读 / 未找到
+- docs/spec/amendments/AMEND-001-bootstrap-error-codes.md 已读 / 未找到
+- docs/spec/amendments/AMEND-002-connection-error-codes.md 已读 / 未找到
+- docs/prompts/S3-连接与凭据治理.prompt                   已读 / 未找到
+- docs/stages/S3-连接与凭据治理-阶段报告.md               已读 / 未找到
+
+【产出文件清单】
+<逐文件路径>
+
+【DoD 逐项结果】
+- [x] DoD-1  产出文件齐全 —— 证据：<输出摘要>
+- [x] DoD-2  Alembic 可升可降 —— 证据：<输出摘要>
+- [x] DoD-3  Profile 测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-4  文件资产测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-5  回归测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-6  AC-02 凭据零明文 —— 证据：<逐条>
+- [x] DoD-7  FR-12 无全表 COUNT —— 证据：<正则扫描 + 代码说明>
+- [x] DoD-8  脱敏策略 —— 证据：<测试摘要>
+- [x] DoD-9  分级推断 —— 证据：<测试摘要>
+- [x] DoD-10 文件资产限制 —— 证据：<测试摘要>
+- [x] DoD-11 存储路径不暴露 —— 证据：<测试摘要>
+- [x] DoD-12 Lint/Type 干净 —— 证据：<输出摘要>
+- [x] DoD-13 代码注释合规 —— 证据：<抽检 3 文件头>
+- [x] DoD-14 上下文读取确认 —— 证据：见本报告开头
+- [x] DoD-15 遗留问题分类归档 —— 证据：见下方「S5 吸收清单」+「AMEND-003 草稿」
+- [x] DoD-16 .env 未被修改 —— 证据：FERNET_KEY 与 S3 一致
+
+【AC-02 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| Profile 响应 masked_samples | 无明文 | ... |
+| 文件探查响应 masked_samples | 无明文 | ... |
+| 日志 / 数据库 | 无明文 | ... |
+| test_zero_plaintext_profile_response | 全绿 | ... |
+| test_zero_plaintext_file_response | 全绿 | ... |
+
+【FR-12 验证（无全表 COUNT）】
+| 检查 | 结果 |
+|------|------|
+| introspect.py 无 COUNT(*) 全表 | ... |
+| statistics.py 用 pg_class.reltuples 或等价 | ... |
+
+【S5 吸收清单】
+（本阶段遗留中影响后续阶段的条目）
+1. <条目 1>
+2. <条目 2>
+...
+
+【AMEND-003 草稿】
+（本阶段新增错误码 → 类型 C 自动生成；状态 Draft，不自动提交）
+文件路径：docs/spec/amendments/AMEND-003-<slug>.md
+内容：
+────────────────────────
+<完整内容>
+────────────────────────
+**审核动作**：人类确认后 git add + git commit，状态改为 Accepted。
+
+【git_ship 结果】
+- branch: feat/S4-profiles
+- commit: <hash>
+- tag: stage-S4-done
+- push: 成功 / 失败
+
+【github_ops 结果】
+- PR URL: <URL>
+- milestone 更新: 成功 / 失败
+
+【遗留问题】
+- <问题>（阻塞 S5：是 / 否）
+
+【下一阶段建议】
+<建议启动 S5 / 建议先解决遗留 / 建议暂停>
+
+=== 阶段报告结束 ===
+```
+
+## 十六、代码注释要求（沿用 S2）
+
+所有 `.py` 产出必须遵循 **`docs/conventions/code-comments.md`**（3 层注释）：
+
+### S4 关键决策点清单（必须注释）
+- `profiles/introspect.py`：**禁全表 COUNT**（FR-12）；只用 information_schema / pg_catalog
+- `profiles/statistics.py`：近似统计原理（pg_class.reltuples / TABLESAMPLE）
+- `profiles/masking.py`：列名启发式脱敏规则；**脱敏不可逆**
+- `profiles/classification.py`：6 级优先级（显式 > 同名 > 映射 > UNKNOWN 保守）
+- `profiles/report.py`：SHA256 稳定性
+- `files/service.py`：25 MiB / 100,000 行上限；**增量计数中断**
+- `files/storage.py`：**上传路径不暴露 API**（引擎只读挂载）
+- `files/readers/pdf_reader.py`：PDF 文本抽取限制说明
+
+## 十七、遗留问题分类归档（半自动流程，沿用 S3）
+
+阶段报告生成后，**自动**对每条遗留问题分类：
+
+| 类型 | 判断标准 | 处理动作 |
+|------|---------|---------|
+| **A. 本阶段可收尾** | 已在本阶段处理完 | 阶段报告里标注"✅ 已处理" |
+| **B. 影响后续阶段** | 涉及架构/接口/目录结构 | 输出「S5 吸收清单」 |
+| **C. 涉及基线/契约** | 新增/变更 SPEC 定义的接口、错误码、状态机、数据模型 | **自动生成 `docs/spec/amendments/AMEND-003-<slug>.md` 草稿**（状态 Draft） |
+
+**输出要求**：
+- 阶段报告末尾必须含「S5 吸收清单」和「AMEND-003 草稿」（如适用）；
+- **AMEND 草稿不自动提交**，由人类审核后手动 `git add` / `git commit`。
+
+## 十八、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文 / 脱敏前样本写入任何提交内容（**AC-02 核心红线**）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**；所有 Python 命令必须通过 `uv run` 执行。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止在 profiles 探查中执行全表 COUNT**（FR-12 红线）；用 `pg_class.reltuples` 或 `TABLESAMPLE`。
+15. **禁止在 files 探查中一次性加载超过 100,000 行**（增量读取 + 超限中断）。
+16. **禁止把 `storage_path` 暴露到 API 响应**（引擎只读挂载路径）。
+17. **禁止 WorkBuddy 修改 `infra\.env`**（S4 起强制）；只能改 `.env.example`。
+18. 禁止复述代码行为的冗余注释。
+19. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+20. 禁止在 S4 实现 S5 的生成引擎 / LangGraph 状态机。
+
+## 十九、启动指令
+
+收到 `START S4` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-12/13/14/15/64、AC-02）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-D/M-E、5.2、6.1 API-04、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001-bootstrap-error-codes.md
+5. 读 docs/spec/amendments/AMEND-002-connection-error-codes.md
+6. 读 docs/prompts/S3-连接与凭据治理.prompt
+7. 读 docs/stages/S3-连接与凭据治理-阶段报告.md
+```
+
+**读取确认**：阶段报告开头列出 7 个文件读取状态。
+
+### 第二步：执行前置检查（第三节）
+
+### 第三步：输出任务清单（第六节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档（第十五、十七节）
+
+### 第七步：自动提交阶段报告
+
+```powershell
+git add docs/stages/S4-元数据探查与文件资产-阶段报告.md
+git commit -m "docs(S4): 阶段报告 [SPEC v1.0.3-Baseline]"
+git push origin feat/S4-profiles
+```
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-003 草稿**，由人类审核后手动提交。
+
+现在，等待 `START S4` 指令。

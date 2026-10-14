@@ -1,8 +1,8 @@
 """S2 测试共享辅助：Settings 构造、ASGI 客户端、种子数据模型。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B
-覆盖 FR：FR-01/02/03/58/65/66
-对应 AC：AC-11（认证边界）、AC-12（多租户隔离）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-D/M-E
+覆盖 FR：FR-01/02/03/58/65/66（S2/S3）、FR-12/13/14/15（S4 探查与文件资产）
+对应 AC：AC-11（认证边界）、AC-12（多租户隔离）、AC-02（脱敏样本零明文）
 
 测试密钥 / Token 均 ≥32 字节（FR-01/65），仅测试用途，非任何真实凭据。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet
@@ -20,11 +21,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from etl_agent.config import Settings
 from etl_agent.infrastructure.database import get_session
 from etl_agent.infrastructure.database import settings as infra_settings
-from etl_agent.infrastructure.redis_client import create_redis_client
+from etl_agent.infrastructure.redis_client import close_redis_client, create_redis_client
 from etl_agent.main import create_app
 
 TEST_GATEWAY_SECRET: str = "test-gateway-secret-0123456789abcdef"
 TEST_BOOTSTRAP_TOKEN: str = "test-bootstrap-token-0123456789abcdef"
+
+# S4 脱敏验证用样本值（构造值，非真实个人信息）：必须出现在源表、绝不能出现在响应
+SAMPLE_EMAILS: tuple[str, ...] = (
+    "alice@example.com",
+    "bob@example.com",
+    "carol@example.com",
+)
 
 # 单测内 Fernet key 缓存：保证同一测试里 register（加密）/ app（解密）/ provider（解密）
 # 使用同一把密钥——否则跨调用新生成密钥会导致 InvalidToken。每个测试前由 conftest 重置。
@@ -90,6 +98,16 @@ async def build_test_app(db_session: AsyncSession, **overrides: object) -> FastA
     application.dependency_overrides[get_session] = _override_get_session
     application.state.redis = create_redis_client()
     return application
+
+
+@asynccontextmanager
+async def built_app(db_session: AsyncSession, **overrides: object) -> AsyncIterator[FastAPI]:
+    """构造带自定义配置的测试应用，退出时释放 Redis 客户端（S4：文件资产上限覆盖）。"""
+    application = await build_test_app(db_session, **overrides)
+    try:
+        yield application
+    finally:
+        await close_redis_client(application.state.redis)
 
 
 def make_client(application: object) -> AsyncClient:

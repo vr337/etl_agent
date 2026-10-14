@@ -1,7 +1,7 @@
-"""M-A/M-C 横切配置 — 应用配置加载、生产启动强制校验与 SecretProvider 配置。
+"""M-A/M-C/M-D/M-E 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider 与文件资产配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点
-覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）
 对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）
 """
 from __future__ import annotations
@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     # 凭据告警 Webhook（FR-10；未配置则扫描只生成预警记录、不投递）
     alert_webhook_url: str = ""
 
+    # ---- M-D 元数据探查（FR-12）----
+    # 采样上限默认值：单次 Profile 最多采样的行数（1–100），越界由 profiles 域拒绝
+    profile_sample_limit_default: int = 100
+
+    # ---- M-E 文件资产（FR-13）----
+    # 文件资产根目录：S7 起 SeaTunnel 容器以只读方式挂载到 /data/file-assets（FR-13）
+    file_asset_root: str = "D:/Documents/Docker/volume/app/etl_agent/file_assets"
+    # 单文件大小上限（MiB）与行数上限（FR-13：25 MiB / 100,000 行）
+    file_asset_max_size_mb: int = 25
+    file_asset_max_rows: int = 100000
+
     # ---- 直连覆盖（.env.example 形态，优先级高于连接件拼装）----
     database_url: str | None = None
     checkpoint_database_url: str | None = None
@@ -93,6 +104,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def file_asset_max_bytes(self) -> int:
+        """单文件字节上限（MiB → 字节，FR-13：默认 25 MiB）。"""
+        return self.file_asset_max_size_mb * 1024 * 1024
 
     def validate_production(self) -> None:
         """生产启动强制校验（AC-11 / SPEC 4.2 prod 行 / 4.4-3）。
