@@ -1,10 +1,13 @@
 """S2 测试共享辅助：Settings 构造、ASGI 客户端、种子数据模型。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-D/M-E
-覆盖 FR：FR-01/02/03/58/65/66（S2/S3）、FR-12/13/14/15（S4 探查与文件资产）
-对应 AC：AC-11（认证边界）、AC-12（多租户隔离）、AC-02（脱敏样本零明文）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-D/M-E/M-F
+覆盖 FR：FR-01/02/03/58/65/66（S2/S3）、FR-12/13/14/15（S4 探查与文件资产）、FR-16/17/67（S5 生成与状态隔离）
+对应 AC：AC-11（认证边界）、AC-12（多租户隔离）、AC-02（脱敏样本零明文）、AC-03（生成中断与恢复）
 
 测试密钥 / Token 均 ≥32 字节（FR-01/65），仅测试用途，非任何真实凭据。
+S5 追加：`build_test_app` 默认注入 `InMemorySaver`——单测不依赖 `etl_checkpoint` 库，
+但状态机语义（interrupt / resume / 跨请求恢复）与生产一致；Checkpoint 双库隔离由
+`tests/generation/test_checkpoint_isolation.py` 用真实 Postgres Checkpointer 单独验证。
 """
 from __future__ import annotations
 
@@ -12,10 +15,12 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.config import Settings
@@ -88,8 +93,20 @@ def dev_pg_credentials() -> dict[str, object]:
     }
 
 
-async def build_test_app(db_session: AsyncSession, **overrides: object) -> FastAPI:
-    """装配应用并注入测试会话 / 真实 Redis 客户端（不触发 lifespan）。"""
+async def build_test_app(
+    db_session: AsyncSession, checkpointer: Any = None, **overrides: object
+) -> FastAPI:
+    """装配应用并注入测试会话 / 真实 Redis 客户端（不触发 lifespan）。
+
+    Args:
+        db_session: 测试会话（覆盖 `get_session` 依赖）。
+        checkpointer: LangGraph Checkpointer；缺省用 `InMemorySaver`（单测不依赖
+            `etl_checkpoint` 库，但 interrupt / resume 语义与生产一致）。
+        **overrides: Settings 覆盖项。
+
+    Returns:
+        FastAPI: 可被 `make_client` 驱动的应用实例。
+    """
     application = create_app(make_settings(**overrides))
 
     async def _override_get_session() -> AsyncIterator[AsyncSession]:
@@ -97,13 +114,16 @@ async def build_test_app(db_session: AsyncSession, **overrides: object) -> FastA
 
     application.dependency_overrides[get_session] = _override_get_session
     application.state.redis = create_redis_client()
+    application.state.checkpointer = checkpointer or InMemorySaver()
     return application
 
 
 @asynccontextmanager
-async def built_app(db_session: AsyncSession, **overrides: object) -> AsyncIterator[FastAPI]:
+async def built_app(
+    db_session: AsyncSession, checkpointer: Any = None, **overrides: object
+) -> AsyncIterator[FastAPI]:
     """构造带自定义配置的测试应用，退出时释放 Redis 客户端（S4：文件资产上限覆盖）。"""
-    application = await build_test_app(db_session, **overrides)
+    application = await build_test_app(db_session, checkpointer=checkpointer, **overrides)
     try:
         yield application
     finally:

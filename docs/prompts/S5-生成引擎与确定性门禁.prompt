@@ -1,0 +1,884 @@
+# ============================================================
+# WorkBuddy — S5 阶段执行指令
+# 阶段：生成引擎与确定性门禁（T-09 + T-10）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001/002/003
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S5
+- 阶段名称：生成引擎与确定性门禁
+- 覆盖任务：T-09（M-F 生成引擎）、T-10（M-G 确定性门禁与有限修复）
+- 依赖：S1（数据模型）、S2（认证）、S3（连接与凭据）、S4（探查与文件资产）
+- 对应 AC：AC-03（LangGraph 中断与恢复）、AC-04（门禁 + 有限修复；不可变版本冻结部分留 S6 完成）
+- SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-F/M-G、第 5.2 章（agent_runs / pipeline_versions / pipeline_artifacts）、第 6.1 章 API-05/06/07、第 6.4 章错误码、第 8 章「性能 · LLM 生成」「安全 · 凭据保护」、附录 A.1、ADR-03、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-16/17/18/19/20/21 + AC-03/04
+- 追加件：AMEND-001（Bootstrap）、AMEND-002（连接域）、AMEND-003（探查域）
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S5-generation |
+| 上游 tag | stage-S4-done |
+
+## 三、前置手动动作（人类执行）
+
+**在执行 `START S5` 之前，人类需完成以下动作**：
+
+### 动作 1：获取 LLM API Key（或选择 Mock）
+
+**两个选项，任选其一**：
+
+| 选项 | 说明 | 适用 |
+|------|------|------|
+| **A. 真实 LLM** | 准备一个 OpenAI 兼容的 API Key（DeepSeek / 豆包 / Kimi / 智谱 / OpenAI 任一） | 想验证真实生成 |
+| **B. Mock Provider** | 不配 Key；S5 提供 Mock Provider，测试用固定响应 | 只想验证状态机流转 |
+
+### 动作 2：编辑 `infra\.env`（选 A 时）
+
+在 `infra\.env` 末尾追加：
+
+```ini
+# S5：LLM Provider
+ETL_AGENT_LLM_PROVIDER=openai          # openai | deepseek | doubao | kimi | zhipu | custom | mock
+ETL_AGENT_LLM_API_KEY=sk-xxx           # 选 A 时必填；选 B 时留空
+ETL_AGENT_LLM_BASE_URL=https://api.deepseek.com/v1   # 按 provider 调整
+ETL_AGENT_LLM_MODEL=deepseek-chat      # 按 provider 调整
+ETL_AGENT_LLM_TIMEOUT_SECONDS=180      # 默认 180
+ETL_AGENT_LLM_MAX_CANDIDATES=3         # 有限修复预算（含初始候选，SPEC FR-21 硬上限）
+```
+
+**选 B 时**：只配 `ETL_AGENT_LLM_PROVIDER=mock`，其余留空。
+
+### 动作 3：验证 .env 加载
+
+```powershell
+cd D:\Desktop\code\etl_agent
+uv run python -c "from etl_agent.config import settings; print(settings.llm_provider)"
+# 期望：openai 或 mock
+```
+
+**完成后再让 WorkBuddy 发 `START S5`。**
+
+## 四、前置检查（WorkBuddy 执行）
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S5-generation
+3. git log --oneline -3 显示 S4 合并提交
+4. 工作区干净：git status 无 tracked 变更（.workbuddy/、infra/.env 允许 untracked）
+5. 上游 tag 存在：git tag --list | Select-String "stage-S4-done"
+6. 容器健康：docker compose -f infra\docker-compose.yml ps
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. 双库可访问：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "SELECT 1"
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_checkpoint -c "SELECT 1"
+   → 均返回 1
+9. S1 数据模型已落地（3 张 S5 表）：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\dt" | Select-String -Pattern "agent_runs|pipeline_versions|pipeline_artifacts"
+   → 3 张表全部存在
+10. S4 产出已就位：
+    Test-Path src\etl_agent\profiles\  → True
+    Test-Path src\etl_agent\files\     → True
+11. 基线文件 + 追加件：
+    docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+    docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+    docs\spec\amendments\AMEND-001-bootstrap-error-codes.md（Accepted）
+    docs\spec\amendments\AMEND-002-connection-error-codes.md（Accepted）
+    docs\spec\amendments\AMEND-003-profile-file-error-codes.md（Accepted）
+12. infra\.env 已含 LLM 配置：
+    uv run python -c "from etl_agent.config import settings; print(settings.llm_provider)"
+    → 输出 openai 或 mock
+13. 代码规范文件：docs\conventions\code-comments.md
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 五、S4 → S5 吸收清单（本阶段必须遵循）
+
+来自 S4 阶段报告的 7 项吸收：
+
+1. **`profiles.masking` 是两域共用的唯一脱敏出口**：S5 若生成期 Schema 映射预览产生新样本，必须复用 `mask_samples` / `sensitive_columns_of`，不得另写一份；
+2. **`files.storage` 根目录即引擎只读挂载源**：S5 的文件源契约按「路径不暴露、只回 asset_id」设计，不再引入对外路径字段；
+3. **文件适配器协议为增量迭代器**（`FileReader.iter_rows`）：S5 若新增格式沿用「迭代器 + 调用方计数中断」；
+4. **Profile 的 `columns` JSON 为 `{approximate_row_count, columns[]}` 包裹结构**：S5 生成期的 Profile 拓扑校验用 `classification.iter_column_entries` / `approximate_row_count_of` 访问器；
+5. **连接器探查通道当前仅 PG / MySQL**：S5 生成期注意「探查不可用 ≠ 表不存在」；
+6. **AC-02 零明文红线继续适用**：S5 新增对外响应须补 `test_zero_plaintext` 类扫描；
+7. **错误码清单** = SPEC 6.4 + AMEND-001 + AMEND-002 + AMEND-003；S5 新增错误码生成 AMEND-004 草稿。
+
+## 六、`.env` 修改规则（S4 起强制，S5 沿用）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新（入 Git） | 每阶段新增变量时 |
+| `infra/.env` | **人类**（第三节已完成） | 引入新密钥 / 覆盖默认值时；**禁止 WorkBuddy 修改** |
+
+## 七、连接信息（从 infra\.env 读取）
+
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=etl_agent
+PG_PASSWORD=dev_local_2026
+PG_DB_MAIN=etl_agent
+PG_DB_CHECKPOINT=etl_checkpoint
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=dev_redis_2026
+
+ETL_AGENT_SECRET_PROVIDER=fernet-db
+ETL_AGENT_FERNET_KEY=<S3 已配>
+
+# S5 新增（人类已在第三节配好）
+ETL_AGENT_LLM_PROVIDER=<openai | mock>
+ETL_AGENT_LLM_API_KEY=<key 或空>
+ETL_AGENT_LLM_BASE_URL=<url>
+ETL_AGENT_LLM_MODEL=<model>
+ETL_AGENT_LLM_TIMEOUT_SECONDS=180
+ETL_AGENT_LLM_MAX_CANDIDATES=3
+```
+
+## 八、任务清单
+
+### T-09 M-F 生成引擎
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-09.1 | LLM Provider 抽象（含 mock） | src\etl_agent\llm\provider.py |
+| T-09.2 | OpenAI 兼容 Provider（httpx 异步） | src\etl_agent\llm\openai_provider.py |
+| T-09.3 | Mock Provider（测试用） | src\etl_agent\llm\mock_provider.py |
+| T-09.4 | Provider 工厂（按 `ETL_AGENT_LLM_PROVIDER` 选择） | src\etl_agent\llm\factory.py |
+| T-09.5 | LangGraph 状态机（澄清 → 生成 → 门禁 → 修复 → 等审批） | src\etl_agent\generation\graph.py |
+| T-09.6 | LangGraph Postgres Checkpointer 集成（`etl_checkpoint` 库） | src\etl_agent\generation\checkpoint.py |
+| T-09.7 | 状态节点：意图解析 + 澄清中断 | src\etl_agent\generation\nodes\intent.py |
+| T-09.8 | 状态节点：EtlPlan + HOCON 生成 | src\etl_agent\generation\nodes\generate.py |
+| T-09.9 | 状态节点：门禁校验调用 | src\etl_agent\generation\nodes\gate.py |
+| T-09.10 | 状态节点：有限修复 | src\etl_agent\generation\nodes\repair.py |
+| T-09.11 | AgentRun 生命周期服务（QUEUED/RUNNING/WAITING_INPUT/WAITING_APPROVAL/FAILED） | src\etl_agent\generation\service.py |
+| T-09.12 | 生成遥测（计数 / 耗时 / 非敏感诊断） | src\etl_agent\generation\telemetry.py |
+| T-09.13 | API 路由 + Pydantic schemas | src\etl_agent\generation\router.py、schemas.py |
+| T-09.14 | 领域错误码 | src\etl_agent\generation\errors.py |
+
+### T-10 M-G 确定性门禁与有限修复
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-10.1 | 门禁契约接口 + 14 项规则注册表 | src\etl_agent\gate\contracts.py |
+| T-10.2 | 规则：禁明文凭据 | src\etl_agent\gate\rules\no_plaintext_credentials.py |
+| T-10.3 | 规则：受支持连接器 / 转换契约 | src\etl_agent\gate\rules\supported_connectors.py |
+| T-10.4 | 规则：质量契约四要素（sink / routing / traceability / predicates） | src\etl_agent\gate\rules\quality_contract.py |
+| T-10.5 | 规则：Profile 拓扑 | src\etl_agent\gate\rules\profile_topology.py |
+| T-10.6 | 规则：受管文件源 | src\etl_agent\gate\rules\managed_file_source.py |
+| T-10.7 | 规则：HDFS 文件契约 | src\etl_agent\gate\rules\hdfs_contract.py |
+| T-10.8 | 规则：数据库端点 | src\etl_agent\gate\rules\database_endpoints.py |
+| T-10.9 | 规则：目标 Schema 对齐 | src\etl_agent\gate\rules\target_schema.py |
+| T-10.10 | 规则：增量契约 | src\etl_agent\gate\rules\incremental_contract.py |
+| T-10.11 | 规则：逐行 LLM 契约 | src\etl_agent\gate\rules\row_llm_contract.py |
+| T-10.12 | 引擎检查抽象 + 本地 stub（真实 SeaTunnel 检查在 S7 补） | src\etl_agent\gate\engine_check.py |
+| T-10.13 | 门禁服务 + 有限修复预算（≤3，含初始） | src\etl_agent\gate\service.py |
+| T-10.14 | 领域错误码 | src\etl_agent\gate\errors.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API 路由注册（挂到 main.py） | src\etl_agent\main.py（更新） |
+| config.py 新增 LLM 配置 | src\etl_agent\config.py（更新） |
+| 端到端测试 | tests\generation\、tests\gate\ |
+
+## 九、目录结构（S5 结束时必须存在）
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S5 LLM 变量）
+├── pyproject.toml                      （新增：langgraph / langgraph-checkpoint-postgres / httpx）
+├── uv.lock
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 generation 路由）
+│   ├── config.py                       （更新：新增 LLM_* 配置）
+│   ├── auth\                           （S2，不动）
+│   ├── projects\                       （S2，不动）
+│   ├── connections\                    （S3，不动）
+│   ├── secrets\                        （S3，不动）
+│   ├── profiles\                       （S4，不动）
+│   ├── files\                          （S4，不动）
+│   ├── llm\                            （新增：M-F LLM Provider）
+│   │   ├── __init__.py
+│   │   ├── provider.py                 （抽象接口）
+│   │   ├── openai_provider.py
+│   │   ├── mock_provider.py
+│   │   ├── factory.py
+│   │   └── errors.py
+│   ├── generation\                     （新增：M-F 生成引擎）
+│   │   ├── __init__.py
+│   │   ├── graph.py                    （LangGraph 状态机）
+│   │   ├── checkpoint.py               （Postgres Checkpointer）
+│   │   ├── service.py                  （AgentRun 生命周期）
+│   │   ├── telemetry.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   ├── errors.py
+│   │   └── nodes\
+│   │       ├── __init__.py
+│   │       ├── intent.py
+│   │       ├── generate.py
+│   │       ├── gate.py
+│   │       └── repair.py
+│   └── gate\                           （新增：M-G 门禁）
+│       ├── __init__.py
+│       ├── contracts.py
+│       ├── engine_check.py             （本地 stub）
+│       ├── service.py
+│       ├── errors.py
+│       └── rules\
+│           ├── __init__.py
+│           ├── no_plaintext_credentials.py
+│           ├── supported_connectors.py
+│           ├── quality_contract.py
+│           ├── profile_topology.py
+│           ├── managed_file_source.py
+│           ├── hdfs_contract.py
+│           ├── database_endpoints.py
+│           ├── target_schema.py
+│           ├── incremental_contract.py
+│           └── row_llm_contract.py
+└── tests\
+    ├── conftest.py                     （S5 扩展 fixtures）
+    ├── helpers.py                      （S5 扩展工具）
+    ├── auth\ projects\ connections\ secrets\ profiles\ files\  （S2~S4，不动）
+    ├── generation\                     （新增）
+    │   ├── __init__.py
+    │   ├── test_state_machine.py       （LangGraph 流转）
+    │   ├── test_interrupt_resume.py    （AC-03 核心）
+    │   ├── test_checkpoint_isolation.py（对话状态不在业务库）
+    │   ├── test_telemetry.py           （Prompt 不落库）
+    │   ├── test_llm_provider.py
+    │   └── test_router.py
+    └── gate\                           （新增）
+        ├── __init__.py
+        ├── test_rules.py               （14 项规则）
+        ├── test_service.py             （含有限修复预算 ≤3）
+        ├── test_engine_check_stub.py
+        └── test_router.py
+```
+
+## 十、配置项（config.py 新增）
+
+```python
+ETL_AGENT_LLM_PROVIDER          # openai | deepseek | doubao | kimi | zhipu | custom | mock
+ETL_AGENT_LLM_API_KEY           # 选真实 Provider 时必填
+ETL_AGENT_LLM_BASE_URL          # OpenAI 兼容端点
+ETL_AGENT_LLM_MODEL             # 模型名
+ETL_AGENT_LLM_TIMEOUT_SECONDS   # 默认 180
+ETL_AGENT_LLM_MAX_CANDIDATES    # 默认 3（含初始候选，SPEC FR-21 硬上限）
+
+# Checkpoint 库连接（S1 已配）
+ETL_AGENT_CHECKPOINT_DATABASE_URL
+```
+
+**更新 `.env.example`**：新增上述 6 个变量（占位值）。**不修改 `infra\.env`**（人类已在第三节配置）。
+
+## 十一、核心实现要点
+
+### 11.1 LLM Provider 抽象（T-09.1）
+
+```python
+class LLMProvider(Protocol):
+    async def generate_etl_plan(
+        self, requirement: str, source_profile: dict, sink_profile: dict, feedback: str | None = None
+    ) -> GeneratedCandidate: ...
+```
+
+**返回 `GeneratedCandidate`**：`{etl_plan: dict, hocon: str, backend: str, model: str}`。
+
+**禁用**：Provider 内部**不得**把 requirement 完整内容写入日志；只记计数 / 耗时。
+
+### 11.2 Mock Provider（T-09.3）
+
+- 返回固定 EtlPlan + HOCON（可配置）；
+- 用于 S5 测试与无 Key 环境；
+- 通过 `ETL_AGENT_LLM_PROVIDER=mock` 启用。
+
+### 11.3 LangGraph 状态机（T-09.5）
+
+```
+START
+  │
+  ▼
+[intent] ← 意图解析
+  │
+  ├─ 参数缺失 → interrupt("pending_question") → 用户回答 → 恢复
+  │
+  ▼
+[generate] ← 生成 EtlPlan + HOCON
+  │
+  ▼
+[gate] ← 调用 M-G 门禁
+  │
+  ├─ 通过 → END（进入等审批，S6 接管）
+  │
+  └─ 不通过 → [repair]（预算内）→ 回 [generate]
+                │
+                └─ 预算耗尽 → END(FAILED)
+```
+
+**Checkpoint**：`langgraph-checkpoint-postgres`，连 `etl_checkpoint` 库；`thread_id = AgentRun.thread_id`。
+
+**interrupt / resume**：LangGraph 原生 `interrupt()` + `Command(resume=...)`；同 `thread_id` 跨请求恢复。
+
+### 11.4 生成遥测（T-09.12）
+
+**只记**：`generation_backend / generation_model / candidate_count / repair_count / duration_ms / failure_category`。
+
+**禁止落库**：`requirement` 全文、`etl_plan` 正文、`hocon` 正文、Prompt 内容。
+
+**依据**：FR-67 / PRD 10.5。
+
+### 11.5 门禁 14 项规则（T-10.1 ~ T-10.11）
+
+每项规则签名：
+
+```python
+class GateRule(Protocol):
+    rule_id: str          # 如 "GATE-001"
+    description: str
+    severity: str         # ERROR | WARN
+    def check(self, plan: EtlPlan, hocon: str, context: dict) -> RuleResult: ...
+```
+
+**14 项规则清单**（与 SPEC 3.2 M-G 一致）：
+
+| # | rule_id | 内容 |
+|---|---------|------|
+| 1 | GATE-001 | 禁明文凭据（HOCON 中无 `password=xxx` 字面量） |
+| 2 | GATE-002 | 受支持连接器契约（connector_type 在白名单） |
+| 3 | GATE-003 | 受支持转换契约（transform 在白名单） |
+| 4 | GATE-004 | 质量契约 sink 路由 |
+| 5 | GATE-005 | 质量契约 routing |
+| 6 | GATE-006 | 质量契约 traceability |
+| 7 | GATE-007 | 质量契约 predicates |
+| 8 | GATE-008 | Profile 拓扑（source/sink profile 存在且角色匹配） |
+| 9 | GATE-009 | 受管文件源（file_asset_id 存在且属当前项目） |
+| 10 | GATE-010 | HDFS 文件契约 |
+| 11 | GATE-011 | 数据库端点（connection 属当前项目） |
+| 12 | GATE-012 | 目标 Schema 对齐（列名 / 类型） |
+| 13 | GATE-013 | 增量契约（水印列存在 / 类型为 TIMESTAMP） |
+| 14 | GATE-014 | 逐行 LLM 契约（rate / host 白名单） |
+
+**任一规则返回 `severity=ERROR` 且 fail → 门禁不通过**。
+
+### 11.6 引擎检查 stub（T-10.12）
+
+**S5 提供接口 + 本地 stub**：
+
+```python
+class EngineChecker(Protocol):
+    async def check(self, hocon: str) -> EngineCheckResult: ...
+
+class LocalStubEngineChecker:
+    # 只做基础语法检查（HOCON 可解析即可）
+    # 返回脱敏摘要（不含凭据）
+```
+
+**真实 SeaTunnel `--check` 在 S7 补**（SeaTunnel 容器 S7 才起）。
+
+### 11.7 有限修复（T-10.13）
+
+**预算**：`ETL_AGENT_LLM_MAX_CANDIDATES=3`（含初始候选）。
+
+**流程**：
+```
+候选 1（初始）→ 门禁 → 不通过 → 生成反馈 → 候选 2 → 门禁 → ...
+                                                      ... 最多 3 份
+                                                      预算耗尽 → FAILED
+```
+
+**失败反馈**：只把**失败的规则 ID + 脱敏摘要**反馈给 LLM，**不反馈完整 HOCON**（防止 prompt 膨胀）。
+
+### 11.8 错误码（S5 新增）
+
+**新增（S5 若引用，将生成 AMEND-004 草稿）**：
+```
+BIZ_404_AGENT_RUN_NOT_FOUND        404
+BIZ_409_AGENT_RUN_STATE_CONFLICT   409
+BIZ_422_GATE_FAILED                422（SPEC 6.4 已有，复用）
+BIZ_422_LLM_PROVIDER_ERROR         422
+BIZ_422_LLM_BUDGET_EXHAUSTED       422
+BIZ_422_INTERRUPT_NOT_PENDING      422
+```
+
+**复用**：
+```
+AUTH_401_* / AUTH_403_*                     （S2）
+BIZ_400_VALIDATION                          （SPEC 6.4）
+BIZ_403_BOOTSTRAP_*                         （AMEND-001）
+BIZ_404_* / BIZ_409_* / BIZ_422_*           （AMEND-002/003）
+```
+
+### 11.9 API 端点
+
+**API-05：创建生成运行**
+
+```
+POST /api/v1/projects/{project_id}/agent-runs
+Body: {
+  "requirement": "string",
+  "source_profile_ids": ["uuid"],
+  "sink_profile_ids": ["uuid"],
+  "file_asset_ids": ["uuid"]?
+}
+Response: { "id": "uuid", "thread_id": "string", "status": "QUEUED" }
+```
+
+**API-06：澄清回答并恢复**
+
+```
+POST /api/v1/agent-runs/{run_id}/messages
+Body: { "answer": "string" }
+Response: { "id": "uuid", "status": "RUNNING|WAITING_INPUT|WAITING_APPROVAL|FAILED" }
+```
+
+**API-07：冻结不可变版本（S5 只做 SHA256 计算；完整版本链 S6）**
+
+```
+POST /api/v1/pipeline-versions/{version_id}/freeze
+Response: { "artifact_sha256": "64-hex", "status": "VALIDATED" }
+```
+
+**说明**：S5 只做"通过门禁后冻结 SHA256"这一步；**完整版本链状态机（DRAFT→PROFILING→...→APPROVED）与派生版本在 S6 完成**。
+
+## 十二、测试清单
+
+### tests/generation/
+
+| 用例 | 断言 |
+|------|------|
+| test_state_machine_happy_path | 参数齐全 → 生成 → 门禁通过 → END |
+| test_state_machine_missing_param | 缺参数 → WAITING_INPUT |
+| test_interrupt_resume | **AC-03 核心**：中断 → 回答 → 同 thread_id 恢复 |
+| test_interrupt_not_pending | 非中断态收到回答 → 422 |
+| test_checkpoint_isolation | 对话历史在 `etl_checkpoint` 库，不在业务库 |
+| test_telemetry_no_prompt | AgentRun 无 prompt / candidate 字段；遥测只含计数/耗时 |
+| test_llm_provider_mock | mock provider 返回固定 EtlPlan |
+| test_llm_provider_openai_skip | 无 API Key 时 skip（不 fail） |
+| test_llm_timeout | 超时 → 422 LLM_PROVIDER_ERROR |
+| test_router_cross_project_403 | 跨项目 → 403 |
+
+### tests/gate/
+
+| 用例 | 断言 |
+|------|------|
+| test_all_14_rules_registered | 14 项规则全注册 |
+| test_rule_no_plaintext_credentials | HOCON 含 `password=xxx` → fail |
+| test_rule_unsupported_connector | 未知 connector → fail |
+| test_rule_quality_contract_missing_sink | 缺 sink → fail |
+| test_rule_profile_topology | profile 角色错配 → fail |
+| test_rule_target_schema_mismatch | 列名不匹配 → fail |
+| test_rule_incremental_contract | 水印列缺失 → fail |
+| test_engine_check_stub | stub 返回固定结果 |
+| test_finite_repair_budget_3 | 3 份候选耗尽 → FAILED |
+| test_finite_repair_success_on_2 | 第 2 份通过 → 成功 |
+| test_freeze_sha256 | 通过门禁后计算 SHA256 |
+| test_zero_plaintext_generation_response | **AC-02**：生成响应不含明文 |
+
+## 十三、验收命令（DoD 必须附输出，PowerShell）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S5 不新增，S1 的 3 张 S5 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 双库可访问（S5 关键）
+docker exec etl_agent_postgres psql -U etl_agent -d etl_checkpoint -c "SELECT 1"
+
+# 5. 单元测试
+uv run pytest tests\generation\ tests\gate\ -v
+uv run pytest tests\auth\ tests\projects\ tests\infrastructure\ tests\connections\ tests\secrets\ tests\profiles\ tests\files\ -v   # 回归
+
+# 6. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\llm\ src\etl_agent\generation\ src\etl_agent\gate\ src\etl_agent\config.py
+
+# 7. 凭据零明文核对（AC-02）
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 8. Prompt / 候选正文不落业务库核对（FR-67）
+docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\d agent_runs" | Select-String -Pattern "prompt|candidate|hocon"
+# 期望：无匹配
+
+# 9. 对话状态在 Checkpoint 库核对（FR-67/68）
+docker exec etl_agent_postgres psql -U etl_agent -d etl_checkpoint -c "\dt" | Select-String -Pattern "checkpoint"
+# 期望：有 checkpoint 表（LangGraph 自动建）
+
+# 10. 代码注释合规抽检
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 11. .env 未被修改核对
+Get-Content infra\.env | Select-String "FERNET_KEY|LLM_PROVIDER"
+# 期望：FERNET_KEY 与 S3 一致；LLM_PROVIDER 为人类配置的值
+```
+
+## 十四、DoD（17 项，必须全过）
+
+```
+[ ] DoD-1  产出文件齐全：第九节目录结构全部存在（含 llm/errors.py / generation/errors.py / gate/errors.py）
+[ ] DoD-2  Alembic 可升可降：第十三节命令 3 全部成功
+[ ] DoD-3  生成引擎测试通过：tests/generation/ 全绿
+[ ] DoD-4  门禁测试通过：tests/gate/ 全绿
+[ ] DoD-5  回归测试通过：S1~S4 全部测试保持（infrastructure 25 / auth 17 / projects 17 / connections 18 / secrets 28+1skip / profiles 31 / files 25）
+[ ] DoD-6  AC-03 LangGraph 中断与恢复：
+       - 参数缺失 → WAITING_INPUT
+       - 回答 → 同 thread_id 恢复
+       - 非中断态收到回答 → 422
+[ ] DoD-7  AC-04（部分）门禁 + 有限修复：
+       - 14 项规则全注册
+       - 至少 6 项规则有对应失败用例
+       - 候选预算 ≤3（含初始）
+       - 通过门禁后计算 SHA256（完整版本链留 S6）
+[ ] DoD-8  AC-02 凭据零明文：生成响应 / 门禁摘要不含明文
+[ ] DoD-9  FR-67 Prompt / 候选正文不落业务库：agent_runs 无 prompt / candidate / hocon 字段
+[ ] DoD-10 FR-67/68 对话状态在 Checkpoint 库：etl_checkpoint 有 checkpoint 表；业务库 agent_runs 无对话历史
+[ ] DoD-11 生成遥测：只含计数 / 耗时 / 非敏感诊断
+[ ] DoD-12 引擎检查 stub：本地 stub 可用；真实 SeaTunnel 检查留 S7
+[ ] DoD-13 Lint / Type 干净：第十三节命令 6 无新增错误
+[ ] DoD-14 未修改基线：git diff --name-only 中无 *-Baseline 文件
+[ ] DoD-15 代码注释合规：第十三节命令 10 无 MISSING HEADER
+[ ] DoD-16 上下文读取确认：阶段报告开头列出 9 个文件读取状态
+[ ] DoD-17 遗留问题分类归档：阶段报告末尾输出「S6 吸收清单」+「AMEND-004 草稿」（如新增错误码）
+[ ] DoD-18 .env 未被修改：FERNET_KEY 与 S3 一致；LLM 配置为人类设的值
+```
+
+DoD 全过 → 调 git_ship；任一不过 → 输出阻塞报告，禁止调用 git_ship。
+
+## 十五、git_ship 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S5-generation
+  base_branch: master
+  commit_message: |
+    feat(S5): 生成引擎与确定性门禁 [SPEC v1.0.3-Baseline + AMEND-001/002/003]
+
+    覆盖任务：T-09（M-F 生成引擎）、T-10（M-G 确定性门禁与有限修复）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-03 / ADR-07 / ADR-08
+    追加件：AMEND-001 / AMEND-002 / AMEND-003
+    对应 AC：AC-03（LangGraph 中断与恢复）、AC-04（门禁 + 有限修复；不可变版本冻结部分留 S6）
+    DoD：18 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    # 由 WorkBuddy 根据实际产出自动列出，主要包含：
+    - src/etl_agent/main.py
+    - src/etl_agent/config.py
+    - src/etl_agent/llm/__init__.py
+    - src/etl_agent/llm/provider.py
+    - src/etl_agent/llm/openai_provider.py
+    - src/etl_agent/llm/mock_provider.py
+    - src/etl_agent/llm/factory.py
+    - src/etl_agent/llm/errors.py
+    - src/etl_agent/generation/__init__.py
+    - src/etl_agent/generation/graph.py
+    - src/etl_agent/generation/checkpoint.py
+    - src/etl_agent/generation/service.py
+    - src/etl_agent/generation/telemetry.py
+    - src/etl_agent/generation/router.py
+    - src/etl_agent/generation/schemas.py
+    - src/etl_agent/generation/errors.py
+    - src/etl_agent/generation/nodes/__init__.py
+    - src/etl_agent/generation/nodes/intent.py
+    - src/etl_agent/generation/nodes/generate.py
+    - src/etl_agent/generation/nodes/gate.py
+    - src/etl_agent/generation/nodes/repair.py
+    - src/etl_agent/gate/__init__.py
+    - src/etl_agent/gate/contracts.py
+    - src/etl_agent/gate/engine_check.py
+    - src/etl_agent/gate/service.py
+    - src/etl_agent/gate/errors.py
+    - src/etl_agent/gate/rules/__init__.py
+    - src/etl_agent/gate/rules/no_plaintext_credentials.py
+    - src/etl_agent/gate/rules/supported_connectors.py
+    - src/etl_agent/gate/rules/quality_contract.py
+    - src/etl_agent/gate/rules/profile_topology.py
+    - src/etl_agent/gate/rules/managed_file_source.py
+    - src/etl_agent/gate/rules/hdfs_contract.py
+    - src/etl_agent/gate/rules/database_endpoints.py
+    - src/etl_agent/gate/rules/target_schema.py
+    - src/etl_agent/gate/rules/incremental_contract.py
+    - src/etl_agent/gate/rules/row_llm_contract.py
+    - tests/conftest.py
+    - tests/helpers.py
+    - tests/generation/__init__.py
+    - tests/generation/test_state_machine.py
+    - tests/generation/test_interrupt_resume.py
+    - tests/generation/test_checkpoint_isolation.py
+    - tests/generation/test_telemetry.py
+    - tests/generation/test_llm_provider.py
+    - tests/generation/test_router.py
+    - tests/gate/__init__.py
+    - tests/gate/test_rules.py
+    - tests/gate/test_service.py
+    - tests/gate/test_engine_check_stub.py
+    - tests/gate/test_router.py
+    - .env.example
+    - pyproject.toml
+    - uv.lock
+  tag: stage-S5-done
+  push: true
+  auto_pr: false
+```
+
+## 十六、github_ops 参数
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S5-generation
+      base: master
+      title: "[S5] 生成引擎与确定性门禁"
+      body: |
+        ## 阶段
+        S5 — 生成引擎与确定性门禁
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001 / AMEND-002 / AMEND-003
+
+        ## 覆盖任务
+        T-09（M-F 生成引擎）、T-10（M-G 确定性门禁与有限修复）
+
+        ## 对应 AC
+        - AC-03（LangGraph 中断与恢复）
+        - AC-04（门禁 + 有限修复；不可变版本冻结部分留 S6）
+
+        ## DoD 结果
+        - [x] 18 项全部通过（详见阶段报告）
+
+        ## 关键红线
+        - FR-67：Prompt / 候选正文不落业务库
+        - FR-67/68：对话状态在 Checkpoint 库（双库分离）
+        - 有限修复预算 ≤3（含初始）
+        - 14 项门禁规则全注册
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S6；AMEND-004 草稿见阶段报告末尾>
+      labels:
+        - "stage:S5"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-03"
+        - "ac:AC-04"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-09 M-F 生成引擎"
+        - "T-10 M-G 确定性门禁与有限修复"
+```
+
+## 十七、阶段报告模板
+
+```
+=== 阶段报告 ===
+阶段编号：S5
+阶段名称：生成引擎与确定性门禁
+完成时间：<ISO8601>
+
+【读取上下文确认】
+- docs/conventions/code-comments.md                        已读 / 未找到
+- docs/prd/etl_agent-PRD_v1.1.1-Baseline.md                已读 / 未找到
+- docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md              已读 / 未找到
+- docs/spec/amendments/AMEND-001-bootstrap-error-codes.md  已读 / 未找到
+- docs/spec/amendments/AMEND-002-connection-error-codes.md 已读 / 未找到
+- docs/spec/amendments/AMEND-003-profile-file-error-codes.md 已读 / 未找到
+- docs/prompts/S4-元数据探查与文件资产.prompt               已读 / 未找到
+- docs/stages/S4-元数据探查与文件资产-阶段报告.md           已读 / 未找到
+
+【产出文件清单】
+<逐文件路径>
+
+【DoD 逐项结果】
+- [x] DoD-1 ~ DoD-18 —— 逐项附证据
+
+【AC-03 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| 参数缺失 | WAITING_INPUT | ... |
+| 中断后回答 | 同 thread_id 恢复 | ... |
+| 非中断态回答 | 422 | ... |
+
+【AC-04 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| 14 项规则全注册 | 全注册 | ... |
+| 不合规候选拦截 | 门禁不通过 | ... |
+| 有限修复预算 | ≤3 | ... |
+| 通过后冻结 SHA256 | SHA256 生成 | ... |
+| 完整版本链 | 留 S6 | — |
+
+【FR-67 / FR-67-68 验证】
+| 检查 | 结果 |
+|------|------|
+| agent_runs 无 prompt/candidate/hocon 字段 | ✅ |
+| etl_checkpoint 有 checkpoint 表 | ✅ |
+| 业务库无对话历史 | ✅ |
+
+【S6 吸收清单】
+（本阶段遗留中影响后续阶段的条目）
+1. <条目 1>
+2. <条目 2>
+
+【AMEND-004 草稿】
+（如新增错误码；状态 Draft，不自动提交）
+文件路径：docs/spec/amendments/AMEND-004-<slug>.md
+
+【git_ship 结果】
+- branch: feat/S5-generation
+- commit: <hash>
+- tag: stage-S5-done
+- push: 成功 / 失败
+
+【github_ops 结果】
+- PR URL: <URL>
+- milestone 更新: 成功 / 失败
+
+【遗留问题】
+- <问题>（阻塞 S6：是 / 否）
+
+【下一阶段建议】
+<建议启动 S6 / 建议先解决遗留 / 建议暂停>
+
+=== 阶段报告结束 ===
+```
+
+## 十八、代码注释要求（沿用 S2/S3/S4）
+
+所有 `.py` 产出必须遵循 **`docs/conventions/code-comments.md`**（3 层注释）。
+
+### S5 关键决策点清单（必须注释）
+
+- `llm/provider.py`：抽象接口；**不落 Prompt 全文**（FR-67）
+- `llm/openai_provider.py`：超时（默认 180s）；**不记 Prompt**；失败分类
+- `llm/mock_provider.py`：仅测试用；生产拒绝启用
+- `generation/graph.py`：LangGraph 状态机节点顺序；interrupt / resume 语义
+- `generation/checkpoint.py`：**双库分离**（`etl_checkpoint`）；对话状态不在业务库（ADR-03 / FR-67）
+- `generation/telemetry.py`：**只记计数 / 耗时 / 非敏感诊断**；不记 Prompt / 候选正文
+- `generation/nodes/gate.py`：门禁失败反馈只传**规则 ID + 脱敏摘要**，不传完整 HOCON
+- `gate/contracts.py`：14 项规则注册表；任一 ERROR 且 fail → 不通过
+- `gate/service.py`：**有限修复预算 ≤3**（含初始候选，SPEC FR-21）；耗尽 → FAILED
+- `gate/engine_check.py`：本地 stub；真实 SeaTunnel 检查留 S7
+- `gate/rules/no_plaintext_credentials.py`：HOCON 中禁 `password=xxx` 字面量
+
+## 十九、遗留问题分类归档（半自动流程，沿用 S3/S4）
+
+阶段报告生成后**自动**分类：
+
+| 类型 | 判断标准 | 处理动作 |
+|------|---------|---------|
+| **A. 本阶段可收尾** | 已处理完 | 阶段报告里标注"✅ 已处理" |
+| **B. 影响后续阶段** | 涉及架构 / 接口 / 目录结构 | 输出「S6 吸收清单」 |
+| **C. 涉及基线 / 契约** | 新增 / 变更 SPEC 定义的接口 / 错误码 / 状态机 / 数据模型 | **自动生成 `docs/spec/amendments/AMEND-004-<slug>.md` 草稿**（状态 Draft） |
+
+## 二十、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文 / **完整 Prompt / 完整候选正文** 写入任何提交内容（**AC-02 / FR-67 核心红线**）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  **禁止在 `agent_runs` 表加 prompt / candidate / hocon 字段**（FR-67）。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**；所有 Python 命令必须通过 `uv run` 执行。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止把对话历史 / LangGraph Checkpoint 存入业务库 `etl_agent`**（ADR-03 / FR-67）；必须用 `etl_checkpoint` 库。
+15. **禁止有限修复预算超过 3**（SPEC FR-21 硬上限）。
+16. **禁止把门禁失败反馈的完整 HOCON 传给 LLM**；只传规则 ID + 脱敏摘要。
+17. **禁止 WorkBuddy 修改 `infra\.env`**；只能改 `.env.example`。
+18. 禁止复述代码行为的冗余注释。
+19. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+20. 禁止在 S5 实现 S6 的版本链完整状态机 / 审批流 / Harness 内核（PDP / Prepare / Commit / Capability / Outbox）。
+21. 禁止在 S5 实现真实 SeaTunnel `--check`（留 S7）。
+
+## 二十一、启动指令
+
+收到 `START S5` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-16~21、AC-03/04）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-F/M-G、5.2、6.1 API-05/06/07、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001-bootstrap-error-codes.md
+5. 读 docs/spec/amendments/AMEND-002-connection-error-codes.md
+6. 读 docs/spec/amendments/AMEND-003-profile-file-error-codes.md
+7. 读 docs/prompts/S4-元数据探查与文件资产.prompt
+8. 读 docs/stages/S4-元数据探查与文件资产-阶段报告.md
+```
+
+**读取确认**：阶段报告开头列出 8 个文件读取状态。
+
+### 第二步：执行前置检查（第四节）
+
+### 第三步：输出任务清单（第八节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+```powershell
+git add docs/stages/S5-生成引擎与确定性门禁-阶段报告.md
+git commit -m "docs(S5): 阶段报告 [SPEC v1.0.3-Baseline]"
+git push origin feat/S5-generation
+```
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-004 草稿**，由人类审核后手动提交。
+
+现在，等待 `START S5` 指令。
