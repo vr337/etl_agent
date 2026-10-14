@@ -1,8 +1,8 @@
-"""M-A/M-C/M-D/M-E 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider 与文件资产配置。
+"""M-A/M-C/M-D/M-E/M-F 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider 配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点
-覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）
-对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）
+对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）
 """
 from __future__ import annotations
 
@@ -13,9 +13,16 @@ from etl_agent.infrastructure.database import settings as infra_settings
 AUTH_MODES = frozenset({"dev-header", "trusted-gateway"})
 ENVIRONMENTS = frozenset({"dev", "staging", "prod"})
 SECRET_PROVIDERS = frozenset({"fernet-db", "vault-kv-v2"})
+# OpenAI 兼容多供应商（SPEC 2.2）+ mock（仅测试 / 无 Key 环境，S5 提示词 11.2）
+LLM_PROVIDERS = frozenset(
+    {"openai", "deepseek", "doubao", "kimi", "zhipu", "custom", "mock"}
+)
 
 # 生产强制项（AC-11 / SPEC 4.4-3）：HMAC 密钥与 Bootstrap Token 的最小长度
 MIN_SECRET_LENGTH = 32
+
+# 有限修复候选预算硬上限（SPEC FR-21 / S5 禁止事项 15）：含初始候选最多 3 份
+LLM_MAX_CANDIDATES_HARD_CAP = 3
 
 # Fernet key 的 base64 解码后固定 32 字节（cryptography.fernet 规范）
 FERNET_KEY_BYTES = 32
@@ -75,6 +82,18 @@ class Settings(BaseSettings):
     file_asset_max_size_mb: int = 25
     file_asset_max_rows: int = 100000
 
+    # ---- M-F 生成引擎 · LLM Provider（FR-18/24）----
+    # 默认 mock：无 Key 环境与测试可直接跑通状态机；生产禁止 mock（validate_llm 拒绝启动）。
+    # 人类在 infra/.env 显式设置真实 provider 后即覆盖此默认值。
+    llm_provider: str = "mock"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = ""
+    # 单次生成请求超时（SPEC 8「性能 · LLM 生成」：≤180s 可配置）
+    llm_timeout_seconds: int = 180
+    # 有限修复预算（FR-21）：含初始候选，硬上限 3（validate_llm 越界即拒绝启动）
+    llm_max_candidates: int = LLM_MAX_CANDIDATES_HARD_CAP
+
     # ---- 直连覆盖（.env.example 形态，优先级高于连接件拼装）----
     database_url: str | None = None
     checkpoint_database_url: str | None = None
@@ -104,6 +123,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def is_mock_llm(self) -> bool:
+        """是否使用 mock provider（测试 / 无 Key 环境；生产被 validate_llm 拒绝）。"""
+        return self.llm_provider == "mock"
 
     @property
     def file_asset_max_bytes(self) -> int:
@@ -165,6 +189,48 @@ class Settings(BaseSettings):
         if self.secret_provider == "vault-kv-v2" and not self.vault_addr.strip():
             raise ProductionConfigError(
                 "ETL_AGENT_SECRET_PROVIDER=vault-kv-v2 时 ETL_AGENT_VAULT_ADDR 必填（FR-06 / Q5 待定）"
+            )
+
+    def validate_llm(self) -> None:
+        """LLM Provider 配置校验（FR-18 / FR-21 / S5 提示词 11.2）。
+
+        启动期 fail-fast 的三条红线：
+        1. provider 取值必须在白名单内；
+        2. 候选预算 1–3（含初始候选）——越界直接拒绝启动，避免运行期突破 FR-21 硬上限；
+        3. mock provider 仅限非生产：生产环境用固定响应等于关闭生成能力（11.2「生产拒绝启用」）。
+        真实 Provider 还要求 API Key / BASE_URL / MODEL 齐备，否则请求必然失败。
+        """
+        if self.llm_provider not in LLM_PROVIDERS:
+            raise ProductionConfigError(
+                f"ETL_AGENT_LLM_PROVIDER 非法: {self.llm_provider!r}，可选 {sorted(LLM_PROVIDERS)}"
+            )
+        if not 1 <= self.llm_max_candidates <= LLM_MAX_CANDIDATES_HARD_CAP:
+            raise ProductionConfigError(
+                f"ETL_AGENT_LLM_MAX_CANDIDATES 必须为 1–{LLM_MAX_CANDIDATES_HARD_CAP}（含初始候选，FR-21 硬上限），"
+                f"当前为 {self.llm_max_candidates}"
+            )
+        if self.llm_provider == "mock":
+            if self.is_production:
+                raise ProductionConfigError(
+                    "ENV=prod 禁止 ETL_AGENT_LLM_PROVIDER=mock（S5 提示词 11.2：mock 仅测试用）"
+                )
+            return
+        missing = [
+            name
+            for name, value in (
+                ("ETL_AGENT_LLM_API_KEY", self.llm_api_key),
+                ("ETL_AGENT_LLM_BASE_URL", self.llm_base_url),
+                ("ETL_AGENT_LLM_MODEL", self.llm_model),
+            )
+            if not value.strip()
+        ]
+        if missing:
+            raise ProductionConfigError(
+                f"ETL_AGENT_LLM_PROVIDER={self.llm_provider} 时 {' / '.join(missing)} 必填（FR-18）"
+            )
+        if self.llm_timeout_seconds <= 0:
+            raise ProductionConfigError(
+                f"ETL_AGENT_LLM_TIMEOUT_SECONDS 必须为正数，当前为 {self.llm_timeout_seconds}"
             )
 
     def _validate_fernet_key(self) -> None:

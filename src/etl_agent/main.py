@@ -1,8 +1,8 @@
-"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理 / 连接 / 探查 / 文件资产路由）。
+"""控制面入口：FastAPI 应用装配（认证中间件 + 项目治理 / 连接 / 探查 / 文件资产 / 生成路由）。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-C/M-D/M-E / 第 4.3 章进程与入口 / 第 6.4 章错误码
-覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）、FR-04/05/11（连接路由）、FR-12/14/15（探查路由）、FR-13（文件资产路由）
-对应 AC：AC-11（生产启动强制校验）、AC-12（多租户隔离）、AC-02（凭据零明文）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B/M-C/M-D/M-E/M-F / 第 4.3 章进程与入口 / 第 6.4 章错误码
+覆盖 FR：FR-59（/health）、FR-65（认证中间件挂载）、FR-01/02/03（项目治理路由）、FR-04/05/11（连接路由）、FR-12/14/15（探查路由）、FR-13（文件资产路由）、FR-16/17/26（生成与冻结路由）
+对应 AC：AC-11（生产启动强制校验）、AC-12（多租户隔离）、AC-02（凭据零明文）、AC-03（中断与恢复）
 """
 from __future__ import annotations
 
@@ -19,23 +19,35 @@ from etl_agent.config import Settings
 from etl_agent.config import settings as default_settings
 from etl_agent.connections.router import router as connections_router
 from etl_agent.files.router import router as file_assets_router
+from etl_agent.generation.checkpoint import open_checkpointer
+from etl_agent.generation.router import router as generation_router
 from etl_agent.infrastructure.database import engine
 from etl_agent.infrastructure.redis_client import close_redis_client, create_redis_client
+from etl_agent.llm.factory import create_provider
 from etl_agent.profiles.router import router as profiles_router
 from etl_agent.projects.router import router as projects_router
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动：生产强制校验（AC-11）+ Bootstrap/SecretProvider 配置校验 + Redis 客户端；关闭：优雅释放连接池。"""
+    """启动：生产强制校验（AC-11）+ Bootstrap/SecretProvider/LLM 配置校验 + Redis + Checkpointer。
+
+    关闭：先释放 Checkpointer（etl_checkpoint 库连接），再释放 Redis 与业务库连接池。
+    """
     settings: Settings = app.state.settings
     # 生产缺失配置即拒绝启动，不降级放行（AC-11 / SPEC 4.4-3）
     settings.validate_production()
     settings.validate_bootstrap()
     # SecretProvider 配置校验（FR-06：fernet key / vault 地址缺失即拒绝启动）
     settings.validate_secrets()
+    # LLM Provider 校验（FR-18/21：provider 白名单、预算 1–3、生产禁 mock）
+    settings.validate_llm()
     app.state.redis = create_redis_client(settings.resolved_redis_url)
-    yield
+    app.state.llm_provider = create_provider(settings)
+    # 双库分离（ADR-03）：Checkpointer 只连 etl_checkpoint，物理上写不到业务库
+    async with open_checkpointer(settings) as checkpointer:
+        app.state.checkpointer = checkpointer
+        yield
     await close_redis_client(app.state.redis)
     await engine.dispose()
 
@@ -68,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(connections_router)
     app.include_router(profiles_router)
     app.include_router(file_assets_router)
+    app.include_router(generation_router)
     return app
 
 

@@ -7,11 +7,17 @@
 S4 追加：文件资产根目录隔离（`asset_root`）、跨项目连接（`seeded_connection_b`）、
 以及**已提交**的探查源表（`profile_source_table`）——asyncpg 探查连接看不到
 未提交数据，故脱敏验证必须用独立事务提交后建表，用例结束即 DROP。
+
+S5 追加：`seeded_profiles`（来源 / 目标画像）与 `seeded_pipeline_version`（生成目标版本），
+供生成状态机与门禁用例复用；事件循环策略在导入期切到 Selector（psycopg 异步要求）。
 """
 from __future__ import annotations
 
+import asyncio
+import sys
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -20,8 +26,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.infrastructure.base import Base
-from etl_agent.infrastructure.database import async_session_factory, engine
-from etl_agent.infrastructure.models import Project, ProjectMembership, ProjectRoleGrant, User
+from etl_agent.infrastructure.database import engine
+from etl_agent.infrastructure.models import (
+    DataProfile,
+    Pipeline,
+    PipelineVersion,
+    Project,
+    ProjectMembership,
+    ProjectRoleGrant,
+    User,
+)
 from etl_agent.infrastructure.redis_client import close_redis_client
 from tests.helpers import (
     SAMPLE_EMAILS,
@@ -31,6 +45,11 @@ from tests.helpers import (
     make_settings,
     reset_test_secrets,
 )
+
+# langgraph-checkpoint-postgres 基于 psycopg（v3）：异步模式在 Windows 上不兼容默认的
+# ProactorEventLoop，必须显式切 Selector（uvicorn 生产侧已默认切换，测试侧需自行设置）。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 @pytest.fixture(autouse=True)
@@ -42,14 +61,26 @@ def _reset_secrets_cache() -> AsyncIterator[None]:
 
 @pytest.fixture
 async def db_session() -> AsyncIterator[AsyncSession]:
-    """业务库会话：幂等建表 → 交付 → 关闭即回滚。"""
+    """业务库会话：幂等建表 → 交付 → 关闭即回滚。
+
+    S5 起用「外层事务 + savepoint」模式（`join_transaction_mode="create_savepoint"`）：
+    生成服务内部会 `commit()`（运行状态 / 遥测必须落库），若直接提交会连测试夹具的
+    种子数据一起提交、污染后续用例；savepoint 模式下应用侧 commit 只释放 savepoint，
+    外层事务仍由本夹具统一回滚——用例之间依旧零残留。
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    session = async_session_factory()
+    connection = await engine.connect()
+    transaction = await connection.begin()
+    session = AsyncSession(
+        bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
+    )
     try:
         yield session
     finally:
         await session.close()
+        await transaction.rollback()
+        await connection.close()
         await engine.dispose()
 
 
@@ -166,6 +197,89 @@ async def seeded_connection_b(db_session: AsyncSession, seeded: SeededWorkspace)
 def asset_root(tmp_path: Path) -> str:
     """文件资产根目录（隔离到 tmp_path，不触碰 ETL_AGENT_FILE_ASSET_ROOT 默认值）。"""
     return str(tmp_path / "file_assets")
+
+
+# ============================================================
+# S5：生成状态机 / 门禁用例的共享夹具
+# ============================================================
+
+# 画像列（来源含时间列，供 GATE-013 增量契约；目标列与来源同构，供 GATE-012 对齐）
+SOURCE_PROFILE_COLUMNS: list[dict[str, object]] = [
+    {"name": "id", "type": "bigint", "nullable": False, "is_primary_key": True},
+    {"name": "amount", "type": "numeric", "nullable": True, "is_primary_key": False},
+    {"name": "updated_at", "type": "timestamptz", "nullable": True, "is_primary_key": False},
+]
+SINK_PROFILE_COLUMNS: list[dict[str, object]] = [
+    {"name": "id", "type": "bigint", "nullable": False, "is_primary_key": True},
+    {"name": "amount", "type": "numeric", "nullable": True, "is_primary_key": False},
+    {"name": "updated_at", "type": "timestamptz", "nullable": True, "is_primary_key": False},
+]
+
+
+def _profile_columns(columns: list[dict[str, object]]) -> dict[str, object]:
+    """构造 `data_profiles.columns` 的包裹结构（S4 吸收 4）。"""
+    return {
+        "approximate_row_count": 1000,
+        "columns": [
+            {
+                **column,
+                "null_rate": 0.0,
+                "distinct_estimate": 100,
+                "classification": "UNKNOWN",
+                "effective_classification": "CONFIDENTIAL",
+            }
+            for column in columns
+        ],
+    }
+
+
+@pytest.fixture
+async def seeded_profiles(
+    db_session: AsyncSession, seeded: SeededWorkspace, seeded_connection: tuple
+) -> dict[str, uuid.UUID]:
+    """项目 A 下的来源 / 目标 Profile（直接建行，避免依赖真实库表的探查通道）。
+
+    返回 `{"source": id, "sink": id}`；两者共用同一连接（生成期只读结构，不做数据搬运）。
+    """
+    connection, _ = seeded_connection
+    expires_at = datetime.now(UTC) + timedelta(hours=24)
+    source = DataProfile(
+        connection_id=connection.id,
+        endpoint_role="SOURCE",
+        schema_name="public",
+        table_name="orders",
+        columns=_profile_columns(SOURCE_PROFILE_COLUMNS),
+        masked_samples=[],
+        classification_report_sha256="a" * 64,
+        expires_at=expires_at,
+    )
+    sink = DataProfile(
+        connection_id=connection.id,
+        endpoint_role="SINK",
+        schema_name="public",
+        table_name="orders_wide",
+        columns=_profile_columns(SINK_PROFILE_COLUMNS),
+        masked_samples=[],
+        classification_report_sha256="b" * 64,
+        expires_at=expires_at,
+    )
+    db_session.add_all([source, sink])
+    await db_session.flush()
+    return {"source": source.id, "sink": sink.id}
+
+
+@pytest.fixture
+async def seeded_pipeline_version(
+    db_session: AsyncSession, seeded: SeededWorkspace
+) -> uuid.UUID:
+    """项目 A 下的 DRAFT 版本（生成目标；S5 不做版本链管理，S6 接管）。"""
+    pipeline = Pipeline(project_id=seeded.project_a_id, name=f"pipe-{uuid.uuid4().hex[:8]}")
+    db_session.add(pipeline)
+    await db_session.flush()
+    version = PipelineVersion(pipeline_id=pipeline.id, version_number=1, status="DRAFT")
+    db_session.add(version)
+    await db_session.flush()
+    return version.id
 
 
 @pytest.fixture
