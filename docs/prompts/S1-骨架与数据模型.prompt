@@ -1,0 +1,611 @@
+# ============================================================
+# WorkBuddy — S1 阶段执行指令
+# 阶段：骨架与数据模型（T-01 + T-02）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S1
+- 阶段名称：骨架与数据模型
+- 覆盖任务：T-01（基础设施）、T-02（数据模型）
+- 依赖：无（起始阶段）
+- 对应 AC：无（为 S2~S10 提供基础）
+- SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 4 章、第 5 章、第 9 章、附录 A、ADR-03、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline 第 8 章（ER 初稿）
+- 原型图依据：docs\prototype\etl_agent-prototype.pen（5 大视图，S1 只做数据模型对照）
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（替代 pip + venv，ADR-08） |
+| venv 位置 | D:\Desktop\code\etl_agent\.venv（uv 自动管理） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| Python 包名 | etl_agent |
+| 源码目录 | src\etl_agent\ |
+| 原型图 | docs\prototype\etl_agent-prototype.pen |
+| 冻结基线 | docs\prd\etl_agent-PRD_v1.1.1-Baseline.md；docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md |
+
+## 三、前置检查（执行前必须完成）
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 master
+3. 工作区无未提交变更（git status 干净；infra/ 允许为 untracked）
+4. docker ps 通过（无 sudo，Docker Desktop 已启动）
+5. docker compose -f infra\docker-compose.yml ps 显示：
+   - etl_agent_postgres (healthy)
+   - etl_agent_redis (healthy)
+6. 两库存在：
+   docker exec etl_agent_postgres psql -U etl_agent -l
+   可见 etl_agent、etl_checkpoint
+7. Redis 通：
+   docker exec etl_agent_redis redis-cli -a dev_redis_2026 ping
+   返回 PONG
+8. uv 已安装：uv --version 输出 0.4.x 或更高
+   （若未安装：powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"）
+9. 数据卷目录存在：
+   D:\Documents\Docker\volume\app\etl_agent\pg_data
+   D:\Documents\Docker\volume\app\etl_agent\redis_data
+10. 原型图存在：docs\prototype\etl_agent-prototype.pen
+11. 基线文件存在：
+    docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+    docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 四、连接信息（S1 从 infra\.env 读取）
+
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=etl_agent
+PG_PASSWORD=dev_local_2026
+PG_DB_MAIN=etl_agent
+PG_DB_CHECKPOINT=etl_checkpoint
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=dev_redis_2026
+REDIS_DB=0
+```
+
+## 五、任务清单
+
+### T-01 基础设施
+
+| 子任务 | 内容 | 产出文件 | 状态 |
+|--------|------|---------|------|
+| T-01.1 | Docker Compose（bind mount 到 D 盘） | infra\docker-compose.yml | 已建 |
+| T-01.2 | PG 初始化脚本（建 etl_checkpoint） | infra\postgres-init.sql | 已建 |
+| T-01.3 | Compose 环境变量 | infra\.env | 已建 |
+| T-01.4 | 项目脚手架：pyproject.toml、uv.lock、.python-version、src 目录 | 见第六节 | 本阶段生成 |
+| T-01.5 | Alembic 初始化 | alembic.ini、alembic\env.py | 本阶段生成 |
+| T-01.6 | Checkpoint 初始化入口 | src\etl_agent\checkpoint_setup.py | 本阶段生成 |
+| T-01.7 | uv 工程环境建立 | uv sync --extra dev；uv python pin 3.12 | 本阶段执行 |
+
+### T-02 数据模型
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-02.1 | SQLAlchemy 基类与 mixin | src\etl_agent\infrastructure\base.py |
+| T-02.2 | 30 张核心表模型 | src\etl_agent\infrastructure\models.py |
+| T-02.3 | 首版 Alembic 迁移 | alembic\versions\0001_initial_schema.py |
+| T-02.4 | 数据库会话工厂 | src\etl_agent\infrastructure\database.py |
+| T-02.5 | 模型单元测试 | tests\infrastructure\test_models.py |
+
+### T-02.6 UI 原型对照（新增）
+
+| 内容 | 产出 |
+|------|------|
+| 对照 5 大视图与 30 张表，输出「原型字段对照表」 | 阶段报告附录 |
+| 缺失字段分类处理（核心 → 补进 models.py；增强 → 待补清单） | 阶段报告 + 代码 |
+
+## 六、目录结构（S1 结束时必须存在）
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example
+├── .gitignore
+├── .python-version                 （uv 固定 3.12）
+├── alembic.ini
+├── pyproject.toml
+├── uv.lock                          （uv 依赖锁定）
+├── README.md
+├── alembic\
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions\
+│       └── 0001_initial_schema.py
+├── docs\
+│   ├── prd\
+│   │   ├── etl_agent-PRD_v1.1.1-Baseline.md   （已有）
+│   │   └── archive\                            （已有）
+│   ├── spec\
+│   │   ├── etl_agent-SPEC_v1.0.3-Baseline.md  （已有）
+│   │   └── archive\                            （已有）
+│   ├── prototype\
+│   │   └── etl_agent-prototype.pen             （已有）
+│   └── prompts\
+│       └── S1-骨架与数据模型.prompt             （本文件）
+├── infra\
+│   ├── docker-compose.yml             （已存在）
+│   ├── postgres-init.sql              （已存在）
+│   └── .env                           （已存在）
+├── src\
+│   └── etl_agent\
+│       ├── __init__.py
+│       ├── main.py
+│       ├── checkpoint_setup.py
+│       └── infrastructure\
+│           ├── __init__.py
+│           ├── base.py
+│           ├── database.py
+│           └── models.py
+└── tests\
+    ├── __init__.py
+    └── infrastructure\
+        ├── __init__.py
+        └── test_models.py
+```
+
+## 七、pyproject.toml 骨架（uv 友好）
+
+```toml
+[project]
+name = "etl_agent"
+version = "0.1.0"
+description = "生产级 ETL-Agent 数据集成平台"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    "httpx>=0.27",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "cryptography>=43",
+    "pyjwt>=2.9",
+    "opentelemetry-distro>=0.49b0",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-instrumentation-httpx>=0.49b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
+    "opentelemetry-exporter-otlp>=1.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "types-redis>=4.6",
+]
+
+[project.scripts]
+etl-agent-api = "etl_agent.main:main"
+etl-agent-checkpoint-setup = "etl_agent.checkpoint_setup:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/etl_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+```
+
+**说明**：上面的依赖版本是建议区间；执行时用 `uv add <pkg>` 让 uv 解析最新兼容版，不要手写死。
+
+## 八、.env.example 内容
+
+```ini
+# ============ PostgreSQL ============
+ETL_AGENT_POSTGRES_USER=etl_agent
+ETL_AGENT_POSTGRES_PASSWORD=CHANGE_ME
+ETL_AGENT_POSTGRES_DB=etl_agent
+ETL_AGENT_POSTGRES_PORT=5432
+
+# ============ Redis ============
+ETL_AGENT_REDIS_PASSWORD=CHANGE_ME
+ETL_AGENT_REDIS_PORT=6379
+
+# ============ 应用连接串 ============
+ETL_AGENT_DATABASE_URL=postgresql+asyncpg://etl_agent:CHANGE_ME@localhost:5432/etl_agent
+ETL_AGENT_CHECKPOINT_DATABASE_URL=postgresql+asyncpg://etl_agent:CHANGE_ME@localhost:5432/etl_checkpoint
+ETL_AGENT_REDIS_URL=redis://:CHANGE_ME@localhost:6379/0
+
+# ============ 认证（S2 使用） ============
+ETL_AGENT_AUTH_MODE=dev-header
+ETL_AGENT_GATEWAY_HMAC_SECRET=
+ETL_AGENT_HARNESS_PUBLIC_KEYS=
+```
+
+## 九、数据模型建表清单（SPEC 5.2，共 30 张表）
+
+### 9.1 M1 项目与工作区治理（4 张）
+- `users`：id uuid PK、subject string UK、display_name string
+- `projects`：id uuid PK、name string、created_at
+- `project_memberships`：id、project_id FK、user_id FK、role string；**UK (project_id, user_id)**
+- `project_role_grants`：id、project_id FK、user_id FK、role string、granted_by uuid
+
+### 9.2 M2 数据连接与凭据治理（8 张）
+- `data_connections`：id、project_id FK、name、connector_type string、status string、secret_ref FK、credential_max_age_days int（默认 90）、credential_warning_days int（默认 14）；**UK (project_id, name)**
+- `encrypted_secrets`：id、provider string、ciphertext、key_version、vault_path、vault_mount、destroyed_at
+- `secret_rotation_requests`：状态机字段（VALIDATING→WAITING_APPROVAL→APPROVED→ACTIVATING→SUCCEEDED/FAILED）
+- `secret_migration_requests`：源/目标 Provider、目标 UUID（申请时冻结）
+- `secret_rotation_rollback_requests`：恢复旧凭据原始年龄
+- `secret_destruction_requests`：资格判定 + 墓碑
+- `credential_expiry_alerts`：级别 WARNING/OVERDUE、去重键 **UK**、确认/静默/解决
+- `credential_alert_deliveries`：Webhook 投递（退避冷却：预警 24h / 逾期 6h）
+
+### 9.3 M3 元数据探查与文件资产（2 张）
+- `data_profiles`：id、connection_id FK、endpoint_role string（SOURCE/SINK）、schema_name、table_name、columns json、masked_samples json、classification_report_sha256、expires_at
+- `file_assets`：id、project_id FK、format string、size_bytes、row_count、storage_path
+
+### 9.4 M4-M5 生成与版本（6 张）
+- `pipelines`：id、project_id FK、name
+- `pipeline_versions`：id、pipeline_id FK、version_number int、status string、artifact_sha256、parent_version_id FK、lock_version int；**UK (pipeline_id, version_number)**
+- `pipeline_artifacts`：id、pipeline_version_id FK、artifact_type string（plan/hocon/quality_contract）、sha256
+- `agent_runs`：id、pipeline_version_id FK、thread_id **UK**、status string、pending_question、generation_* 遥测字段；**禁止 Prompt / 候选正文字段**
+- `approval_requests`：id、pipeline_version_id FK、artifact_sha256、status、decision、decided_by、reason
+- `pipeline_schedules`：id、pipeline_id FK **UK**、cron、timezone、mode string（BATCH/WATERMARK_INCREMENTAL）、misfire_policy（SKIP/FIRE_ONCE）、watermark_*
+
+### 9.5 M6 Harness 安全执行内核（8 张）
+- `harness_policy_decisions`：id、project_id FK、outcome string（ALLOW/DENY/REQUIRE_APPROVAL/DEFER）、risk_level string（P0-P3）、rule_evidence json、policy_package_id、policy_package_sha256
+- `execution_preparations`：id、policy_decision_id FK **UK**、pipeline_version_id FK、status string、risk_level、input_fingerprint、resource_fingerprint、impact_report json、rollback_plan json、supervision_contract json、required_roles、required_approvals、idempotency_key **UK**、expires_at
+- `harness_approval_decisions`：id、preparation_id FK、role string、decided_by uuid、decision、evidence_sha256；**UK (preparation_id, role)** + **UK (preparation_id, decided_by)**（双唯一）
+- `harness_capability_grants`：token_id uuid PK、preparation_id FK **UK**、token_sha256 **UK**、claims json、expires_at、consumed_at
+- `harness_command_outbox`：id、project_id FK、command_type、payload json、status string（PENDING/SENDING/SENT/FAILED）、retry_count、locked_until
+- `harness_side_effect_preparations`：同 execution_preparations 结构
+- `harness_side_effect_approvals`：同 harness_approval_decisions 结构（双唯一）
+- `harness_side_effect_capability_grants`：同 harness_capability_grants 结构
+
+### 9.6 M7 执行调度与数据面（2 张）
+- `execution_runs`：id、pipeline_version_id FK、harness_preparation_id FK **UK**、status string（QUEUED/SUBMITTED/RUNNING/SUCCEEDED/FAILED/CANCELLING/CANCELLED）、seatunnel_job_id、engine_status、trigger string（MANUAL/SCHEDULED）、source_rows、sink_rows、source_bytes、sink_bytes、table_metrics json、retry_of_run_id、attempt_number、failure_category、failure_stage、retryable、diagnosis、supervision_action、supervision_contract_sha256、quarantined_at
+- `execution_events`：id、run_id FK、level、stage、event_type、message、occurred_at
+
+### 9.7 M8 运行时监督与受管回滚（4 张）
+- `runtime_supervision_snapshots`：id、run_id FK **UK**、action string、risk_level、rule_matches json（仅规则证据）、observed json（仅聚合指标）、snapshot_sha256
+- `quality_reports`：id、run_id FK **UK**、status string（PASSED/WARNING/FAILED/INCOMPLETE）、total_rows、passed_rows、rejected_rows、reject_rate、valid_sink、error_sink、rules json、diagnostics json、generated_at
+- `rollback_requests`：状态机字段、retention_days（默认 7）、capacity_warn_threshold（默认 20）、制品清单状态
+- `rollback_cleanup_requests`：到期清理申请
+
+### 9.8 M9 审计与评测（5 张）
+- `harness_evidence_streams`：id、head_hash
+- `harness_evidence_events`：id、stream_id FK、sequence bigint、payload_sha256、previous_hash、event_hash **UK**、signature_algorithm、signature_key_id、signature_value、occurred_at、actor_id、event_type、risk_level、policy_decision_id、trace_id；**UK (stream_id, sequence)**
+- `benchmark_runs`：id、suite_id、manifest_version、manifest_sha256、status string（PASS/FAIL）、metrics json、report_sha256
+- `safety_improvement_proposals`：id、type string（POLICY/PROMPT/BENCHMARK）、status string（DRAFT→IN_REVIEW→APPROVED/REJECTED→RELEASED）
+- `safety_releases`：id、proposal_id FK **UK**、stage string、canary_percent int（1-10）、manifest_sha256、signature
+
+### 9.9 M11 平台（2 张）
+- `worker_heartbeats`：worker_id PK、last_heartbeat_at、capabilities json
+- `audit_events`：id、project_id FK、actor_id、action、resource_type、resource_id、before json、after json、reason、trace_id
+
+### 9.10 全局约束
+1. **枚举字符串化**：所有 enum 用 `String`，**禁止 PostgreSQL native enum**（ADR-07）
+2. **项目隔离**：项目级资源带 `project_id` FK，并建 `(project_id, status)` 或 `(project_id, created_at)` 索引
+3. **大整数**：`sequence` 等用 `BigInteger`
+4. **时间戳**：统一 `TIMESTAMP WITH TIME ZONE`
+5. **乐观锁**：`pipeline_versions.lock_version` int，默认 0
+6. **双库分离**：业务表在 `etl_agent` 库；Checkpoint 表由 `checkpoint_setup` 建在 `etl_checkpoint` 库（ADR-03）
+7. **禁止业务库存 Prompt / 候选 HOCON 正文 / 凭证明文**（FR-06/67）
+8. **迁移可回滚**：`alembic downgrade base` 必须无错执行
+
+## 十、UI 原型对照（T-02.6）
+
+### 10.1 原型图位置
+
+```
+docs\prototype\etl_agent-prototype.pen    （Pencil 格式，不解析）
+```
+
+若存在 `docs\prototype\images\*.png`（5 大视图导出图），优先读取图片；否则按 PRD 第 7 章页面说明与本节 10.2 的字段清单对照。
+
+### 10.2 5 大视图 → 字段对照要求
+
+**视图 1：总览工作台**
+- 展示：连接数、Pipeline 数、待审批数、运行成功率
+- 来源：`data_connections`、`pipelines`、`execution_preparations`、`execution_runs`
+
+**视图 2：数据源与资产管理页**
+- 展示：连接列表（名称/类型/状态）、Profile（Schema/主键/样本）、文件资产（格式/大小/行数）
+- 来源：`data_connections`、`data_profiles`、`file_assets`、`encrypted_secrets`（仅引用）
+
+**视图 3：Pipeline Studio**
+- 展示：AgentRun 状态、澄清对话（对话历史在 Checkpoint）、EtlPlan、HOCON、DAG、字段映射 Diff、版本 Diff、门禁结果
+- 来源：`agent_runs`、`pipeline_versions`、`pipeline_artifacts`、`approval_requests`
+
+**视图 4：运行中心与审批控制台**
+- 展示：准备单（风险/影响/回滚/审批槽位）、执行监控（吞吐/行数/字节/监督快照/质量分流/诊断）、回滚
+- 来源：`execution_preparations`、`harness_approval_decisions`、`execution_runs`、`execution_events`、`runtime_supervision_snapshots`、`quality_reports`、`rollback_requests`
+
+**视图 5：安全治理与 Benchmark 页**
+- 展示：Benchmark 用例集、门禁指标、安全提案、发布状态
+- 来源：`benchmark_runs`、`safety_improvement_proposals`、`safety_releases`
+
+### 10.3 对照输出要求
+
+阶段报告中输出「原型字段对照表」：
+
+| 视图 | 元素 | 字段 | 所在表 | 状态 |
+|------|------|------|-------|------|
+| ... | ... | ... | ... | 已覆盖 / 本阶段补齐 / 待 S<n> 补 |
+
+**缺失字段处理规则**：
+- 属本期核心能力 → **直接补进 models.py**，报告中记录；
+- 属后期增强 → 列入「待补字段清单」，标注目标阶段，**不阻塞 S1**。
+
+## 十一、验收命令（DoD 必须附输出，全部在 PowerShell 里跑）
+
+```powershell
+# 0. 进项目
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查：容器健康
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 固定 Python 版本
+uv python pin 3.12
+
+# 3. 用 uv 同步依赖
+uv sync --extra dev
+# 产出：.venv 创建、uv.lock 生成、依赖安装
+
+# 4. 迁移（升 + 降 + 再升）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 5. Checkpoint 初始化（幂等）
+uv run python -m etl_agent.checkpoint_setup
+uv run python -m etl_agent.checkpoint_setup
+
+# 6. 单元测试
+uv run pytest tests\infrastructure\ -v
+
+# 7. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\infrastructure\
+
+# 8. 枚举字符串化核对
+docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\d+ data_connections" | Select-String -Pattern "enum"
+# 期望：无 native enum 类型输出
+
+# 9. 凭据零明文核对
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+# 期望：无匹配
+```
+
+## 十二、DoD（9 项，必须全过）
+
+```
+[ ] DoD-1 产出文件齐全：第六节目录结构全部存在（含 .python-version、uv.lock）
+[ ] DoD-2 Alembic 可升可降：第十一节命令 4 全部成功
+[ ] DoD-3 30 张表齐全：\dt 输出与第九节清单一致
+[ ] DoD-4 关键约束生效：测试用例全部通过
+[ ] DoD-5 枚举字符串化：无 native enum
+[ ] DoD-6 凭据零明文：第十一节命令 9 无匹配
+[ ] DoD-7 Lint / Type 干净：第十一节命令 7 无新增错误
+[ ] DoD-8 未修改基线：git diff --name-only 中无 *-Baseline 文件
+[ ] DoD-9 UI 原型对照：已按第十节输出「原型字段对照表」
+```
+
+DoD 全过 → 调 git_ship；任一不过 → 输出阻塞报告，禁止调用 git_ship。
+
+## 十三、git_ship 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S1-skeleton
+  base_branch: master
+  commit_message: |
+    feat(S1): 骨架与数据模型 [SPEC v1.0.3-Baseline]
+
+    覆盖任务：T-01（基础设施）、T-02（数据模型）、T-02.6（原型对照）
+    SPEC 依据：第 4/5/9 章 / 附录 A / ADR-03 / ADR-07 / ADR-08
+    对应 AC：无（为后续 S2~S10 提供基础）
+    DoD：9 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+  files:
+    - .env.example
+    - .gitignore
+    - .python-version
+    - alembic.ini
+    - pyproject.toml
+    - uv.lock
+    - README.md
+    - alembic/env.py
+    - alembic/script.py.mako
+    - alembic/versions/0001_initial_schema.py
+    - src/etl_agent/__init__.py
+    - src/etl_agent/main.py
+    - src/etl_agent/checkpoint_setup.py
+    - src/etl_agent/infrastructure/__init__.py
+    - src/etl_agent/infrastructure/base.py
+    - src/etl_agent/infrastructure/database.py
+    - src/etl_agent/infrastructure/models.py
+    - tests/__init__.py
+    - tests/infrastructure/__init__.py
+    - tests/infrastructure/test_models.py
+  tag: stage-S1-done
+  push: true
+  auto_pr: false
+```
+
+## 十四、github_ops 参数
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S1-skeleton
+      base: master
+      title: "[S1] 骨架与数据模型"
+      body: |
+        ## 阶段
+        S1 — 骨架与数据模型
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+
+        ## 覆盖任务
+        T-01（基础设施）、T-02（数据模型）、T-02.6（原型对照）
+
+        ## 工具链
+        - 包管理：uv（uv.lock 已锁定）
+        - Python：3.12（.python-version 固定）
+        - Docker：Docker Desktop + WSL 2 后端
+
+        ## DoD 结果
+        - [x] 9 项全部通过（详见阶段报告）
+
+        ## 原型字段对照
+        <引用阶段报告附录>
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S2>
+      labels:
+        - "stage:S1"
+        - "spec:v1.0.3-Baseline"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-01 基础设施"
+        - "T-02 数据模型"
+        - "T-02.6 原型字段对照"
+```
+
+## 十五、阶段报告（执行完成后必须输出）
+
+```
+=== 阶段报告 ===
+阶段编号：S1
+阶段名称：骨架与数据模型
+完成时间：<ISO8601>
+
+【产出文件清单】
+<逐文件路径>
+
+【DoD 逐项结果】
+- [x] DoD-1 产出文件齐全 —— 证据：<输出摘要>
+- [x] DoD-2 Alembic 可升可降 —— 证据：<输出摘要>
+- [x] DoD-3 30 张表齐全 —— 证据：<输出摘要>
+- [x] DoD-4 关键约束生效 —— 证据：<pytest 摘要>
+- [x] DoD-5 枚举字符串化 —— 证据：<输出摘要>
+- [x] DoD-6 凭据零明文 —— 证据：<输出摘要>
+- [x] DoD-7 Lint/Type 干净 —— 证据：<输出摘要>
+- [x] DoD-8 未修改基线 —— 证据：<git diff 摘要>
+- [x] DoD-9 UI 原型对照 —— 证据：见下方「原型字段对照表」
+
+【原型字段对照表】
+| 视图 | 元素 | 字段 | 所在表 | 状态 |
+|------|------|------|-------|------|
+| ... | ... | ... | ... | ... |
+
+【待补字段清单】
+| 字段 | 目标阶段 | 原因 |
+|------|---------|------|
+| ... | ... | ... |
+
+【uv 锁信息】
+- Python: 3.12.x
+- uv.lock sha256: <hash>
+- 依赖数量: <n>
+
+【git_ship 结果】
+- branch: feat/S1-skeleton
+- commit: <hash>
+- tag: stage-S1-done
+- push: 成功 / 失败
+
+【github_ops 结果】
+- PR URL: <URL>
+- milestone 更新: 成功 / 失败
+
+【遗留问题】
+- <问题>（阻塞 S2：是 / 否）
+
+【下一阶段建议】
+<建议启动 S2 / 建议先解决遗留 / 建议暂停>
+
+=== 阶段报告结束 ===
+```
+
+## 十六、禁止事项
+
+1. DoD 未全过时禁止调 git_ship。
+2. 禁止修改任何 `*-Baseline` 文件。
+3. 禁止跳过测试直接提交。
+4. 禁止把凭证明文写入任何提交内容。
+5. 禁止多个阶段混在同一次提交。
+6. 禁止在无任务清单的情况下开始编码。
+7. 禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8. 禁止把 S11（条件数据源）纳入主线。
+9. 禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件（工具不兼容）；原型对照按第十节规则执行。
+11. **禁止用 pip 替代 uv**；所有 Python 命令必须通过 `uv run` 执行。
+12. **禁止手改 uv.lock**；依赖变更通过 `uv add` / `uv remove` / `uv lock` 完成。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+
+## 十七、uv 常用命令速查（执行时参考）
+
+| 操作 | 命令 |
+|------|------|
+| 装 uv | `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` |
+| 固定 Python | `uv python pin 3.12` |
+| 同步依赖 | `uv sync --extra dev` |
+| 加依赖 | `uv add fastapi` |
+| 加 dev 依赖 | `uv add --dev pytest` |
+| 删依赖 | `uv remove <pkg>` |
+| 升级依赖 | `uv lock --upgrade` |
+| 跑命令 | `uv run <cmd>` |
+| 跑脚本 | `uv run python <script>` |
+
+## 十八、启动指令
+
+收到 `START S1` 后：
+1. 执行第三节「前置检查」；
+2. 输出第五节「任务清单」；
+3. 按第六节建目录，第九节逐表建模型，第十节做原型对照，第十一节逐条验证；
+4. 执行第十二节 DoD 自检；
+5. DoD 全过 → 调 `git_ship` → 调 `github_ops`；
+6. 输出第十五节「阶段报告」。
+
+现在，等待 `START S1` 指令。

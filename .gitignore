@@ -1,0 +1,39 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- 虚拟环境（uv 管理）----
+.venv/
+venv/
+
+# ---- 测试 / 类型 / Lint 缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- 环境与凭据（零明文：.env 一律不入库，仅 .env.example 模板）----
+.env
+.env.*
+!.env.example
+infra/.env
+
+# ---- IDE / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- WorkBuddy 会话数据 ----
+.workbuddy/
+
+# ---- 日志 ----
+*.log
