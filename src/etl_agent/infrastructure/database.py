@@ -1,5 +1,9 @@
 """数据库引擎、配置与会话工厂（T-02.4）。
 
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 4.4 章初始化与配置要点 / ADR-03
+覆盖 FR：FR-59/65（横切：异步引擎与会话工厂）
+对应 AC：AC-11（配置缺失时失败关闭，不含凭据默认值）
+
 配置读取顺序（pydantic-settings）：
 1. 环境变量 ETL_AGENT_*；
 2. infra/.env（开发期连接件，S1 提示词第四节）；

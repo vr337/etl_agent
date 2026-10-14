@@ -1,5 +1,9 @@
 """业务库（etl_agent）全部 ORM 模型（T-02.2）。
 
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.1/5.2 节（ER 与关键字段）
+覆盖 FR：FR-01/02/03、FR-04~11、FR-12~15、FR-16~28、FR-29~37、FR-38~49、FR-50~52、FR-59/65/66
+对应 AC：AC-01/02/12；ADR-03（双库分离）、ADR-07（枚举字符串化）
+
 权威来源：
 - etl_agent-SPEC_v1.0.3-Baseline 第 5.1/5.2 节（ER 与关键字段）；
 - etl_agent-PRD_v1.1.1-Baseline 第 8 章（ER 初稿）与第 10 章（运行报告字段）。
@@ -15,6 +19,11 @@
 T-02.6（UI 原型对照）本阶段补齐字段：
 - data_connections.host / port / database_name（视图 2 登记连接表单，端点参数随连接登记，凭据仍走 Secret 引用）；
 - agent_runs.source_profile_ids / sink_profile_ids / file_asset_ids（FR-16「绑定 Profile 集合」，视图 3）。
+
+覆盖 FR：FR-01/02/03（M1）、FR-04~11（M2）、FR-12~13/14/15（M3）、FR-16~28（M4-M5）、
+FR-29~37（M6）、FR-38~44（M7）、FR-45~49（M8）、FR-50~52（M9）、FR-59/65/66（M11）
+对应 AC：AC-01（四眼双唯一前置）、AC-02（凭据零明文）、AC-12（多租户隔离字段边界）；
+ADR-03（双库分离：本文件不含 Checkpoint 层表）、ADR-07（枚举字符串化）
 """
 from __future__ import annotations
 
@@ -45,8 +54,12 @@ from etl_agent.infrastructure.base import (
     UUIDPrimaryKeyMixin,
 )
 
+# 枚举字符串化（ADR-07）：全部枚举语义列以 String 持久化，禁止 PG native enum——
+# 原生枚举增删值需重写表、Alembic 迁移难回滚；合法性由应用层校验 + tests/infrastructure 断言兜底
+
 # ============================================================
 # M1 项目与工作区治理（SPEC 5.2.1，4 张）
+# 覆盖 FR-01/02/03；对应 AC-01/AC-12。users.subject 是 FR-58 身份注入的查找键（全局唯一）。
 # ============================================================
 
 
@@ -100,6 +113,7 @@ class ProjectRoleGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 # ============================================================
 # M2 数据连接与凭据治理（SPEC 5.2.2，8 张）
+# 覆盖 FR-04~11；对应 AC-02。凭据零明文：库内只存密文/定位引用（FR-06）。
 # ============================================================
 
 
@@ -266,6 +280,7 @@ class CredentialAlertDelivery(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 # ============================================================
 # M3 元数据探查与文件资产（SPEC 5.2.3，2 张）
+# 覆盖 FR-12/13/14/15；对应 AC-02（脱敏样本无明文）。
 # ============================================================
 
 
@@ -304,6 +319,7 @@ class FileAsset(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
 
 # ============================================================
 # M4-M5 生成与版本（SPEC 5.2.4，6 张）
+# 覆盖 FR-16~28；对应 AC-03/04。agent_runs 禁 Prompt/候选正文（FR-67）。
 # ============================================================
 
 
@@ -338,6 +354,8 @@ class PipelineVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("pipeline_versions.id"), nullable=True
     )
+    # 乐观锁（FR-26）：并发修改同一版本时以 lock_version 冲突重试，
+    # 配合 parent_version_id 派生链保证「不可原地覆盖已冻结版本」
     lock_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
 
@@ -363,6 +381,9 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "agent_runs"
     __table_args__ = (Index("ix_agent_runs_pipeline_version", "pipeline_version_id"),)
 
+    # 无 Prompt / 候选正文字段（FR-67 红线，tests/infrastructure 有专项断言）：
+    # 对话历史由 LangGraph Checkpoint 承载于 etl_checkpoint 库（ADR-03 双库分离），
+    # 业务库只保留 pending_question 与 generation_* 非敏感遥测
     pipeline_version_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("pipeline_versions.id"), nullable=False
     )
@@ -426,6 +447,7 @@ class PipelineSchedule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 # ============================================================
 # M6 Harness 安全执行内核（SPEC 5.2.5，8 张）
+# 覆盖 FR-29~37；对应 AC-05。四眼双唯一（FR-32）是职责分离红线（PRD 2.3）。
 # ============================================================
 
 
@@ -487,6 +509,9 @@ class HarnessApprovalDecision(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     """四眼审批决策（FR-32）：(preparation_id, role) 与 (preparation_id, decided_by) 双唯一。"""
 
     __tablename__ = "harness_approval_decisions"
+    # 双唯一（FR-32 / AC-01 / PRD 2.3 职责分离红线）：
+    # (preparation_id, role) —— 同一职责槽位只能一人，高风险操作禁止一人占多槽；
+    # (preparation_id, decided_by) —— 申请人禁止自批，一人只能占一个审批槽
     __table_args__ = (
         UniqueConstraint("preparation_id", "role", name="uq_harness_approvals_prep_role"),
         UniqueConstraint(
@@ -621,6 +646,7 @@ class HarnessSideEffectCapabilityGrant(Base, CreatedAtMixin):
 
 # ============================================================
 # M7 执行调度与数据面（SPEC 5.2.6，2 张）
+# 覆盖 FR-38~44；对应 AC-06/07。控制面只存治理事实与聚合指标（ADR-01）。
 # ============================================================
 
 
@@ -689,6 +715,7 @@ class ExecutionEvent(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
 
 # ============================================================
 # M8 运行时监督与受管回滚（SPEC 5.2.7，4 张）
+# 覆盖 FR-45~49；对应 AC-08。observed 仅聚合指标、rule_matches 仅规则证据（PRD 10.5）。
 # ============================================================
 
 
@@ -768,6 +795,7 @@ class RollbackCleanupRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 # ============================================================
 # M9 审计与评测（SPEC 5.2.8，5 张）
+# 覆盖 FR-50~52/36；对应 AC-09。证据账本只追加、哈希链防篡改（FR-36）。
 # ============================================================
 
 
@@ -867,6 +895,7 @@ class SafetyRelease(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 # ============================================================
 # M11 平台与可观测性（SPEC 5.2.9，2 张）
+# 覆盖 FR-38（心跳）/FR-59/60/65/66；对应 AC-11/12。审计事件全字段留痕（PRD 5 审计行）。
 # ============================================================
 
 
