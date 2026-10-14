@@ -1,0 +1,791 @@
+# ============================================================
+# WorkBuddy — S3 阶段执行指令
+# 阶段：连接与凭据治理（T-05 + T-06）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S3
+- 阶段名称：连接与凭据治理
+- 覆盖任务：T-05（M-C 连接与 SecretProvider）、T-06（M-C 凭据治理）
+- 依赖：S1（数据模型）、S2（认证与项目治理）
+- 对应 AC：AC-02（全链路无敏感明文泄露）
+- SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-C、第 5.2 章（8 张 M-C 表）、第 6.1 章 API-02/03、第 6.4 章错误码、第 8 章「安全 · 凭据保护/多租户」、附录 A.1、ADR-05、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-04~11 + AC-02
+- 追加件：docs/spec/amendments/AMEND-001-bootstrap-error-codes.md
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S3-connections |
+| 上游 tag | stage-S2-done |
+
+## 三、前置检查（执行前必须完成）
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S3-connections
+3. git log --oneline -3 显示 S2 合并提交
+4. 工作区干净：git status 无 tracked 变更（.workbuddy/、infra/.env 允许 untracked）
+5. 上游 tag 存在：git tag --list | Select-String "stage-S2-done"
+6. 容器健康：
+   docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+7. uv 工程环境就绪：
+   uv run python -c "import etl_agent; print('ok')"  → ok
+8. S1 数据模型已落地（8 张 M-C 表）：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\dt" | Select-String -Pattern "data_connections|encrypted_secrets|secret_rotation_requests|secret_migration_requests|secret_rotation_rollback_requests|secret_destruction_requests|credential_expiry_alerts|credential_alert_deliveries"
+   → 8 张表全部存在
+9. S2 产出已就位：
+   Test-Path src\etl_agent\auth\           → True
+   Test-Path src\etl_agent\projects\       → True
+   Test-Path tests\conftest.py              → True
+10. 基线文件 + 追加件存在：
+    docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+    docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+    docs\spec\amendments\AMEND-001-bootstrap-error-codes.md
+11. 代码规范文件存在：docs\conventions\code-comments.md
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 四、S2 修正说明 + S2 → S3 吸收清单
+
+### 4.1 S2 修正（本阶段沿用）
+
+| 项 | S2 确立 | S3 沿用 |
+|----|---------|---------|
+| 中间件分层 | 中间件只验签（注入 `actor_subject`），依赖层做用户/成员/职责解析 | 沿用；S3 新端点也用 `require_project_member` 依赖 |
+| conftest.py / helpers.py | S2 已建共享 fixtures | S3 复用，不重写 |
+| ruff B008 忽略 | pyproject.toml 已配 `ignore = ["B008"]` | 沿用 |
+| 共享 fixture 事务隔离 | 依赖层自建会话，与请求事务一致 | 沿用 |
+
+### 4.2 S2 → S3 吸收清单（来自 S2 阶段报告）
+
+1. **中间件架构（S2 遗留 2）**：S3 新端点复用 `require_project_member` 依赖，不在中间件里查业务表；
+2. **目录结构（S2 遗留 4）**：`tests/conftest.py`、`tests/helpers.py` 为共享文件，S3 目录结构已含；
+3. **错误码引用（S2 遗留 3）**：S3 错误码 = SPEC 6.4 + AMEND-001；S3 若新增错误码，需生成 AMEND-002 草稿；
+4. **ruff 配置（S2 遗留 5）**：沿用 pyproject.toml 现有配置。
+
+## 五、连接信息（从 infra\.env 读取）
+
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=etl_agent
+PG_PASSWORD=dev_local_2026
+PG_DB_MAIN=etl_agent
+PG_DB_CHECKPOINT=etl_checkpoint
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=dev_redis_2026
+REDIS_DB=0
+
+# S3 新增（.env.example 同步）
+ETL_AGENT_FERNET_KEY=<32 字节 base64 编码的 Fernet key，S3 生成>
+ETL_AGENT_VAULT_ADDR=          # 可空（Q5/S-Q7 待定）
+ETL_AGENT_VAULT_TOKEN=         # 可空
+ETL_AGENT_SECRET_PROVIDER=fernet-db   # fernet-db | vault-kv-v2
+```
+
+## 六、任务清单
+
+### T-05 M-C 连接与 SecretProvider
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-05.1 | SecretProvider 抽象（接口） | src\etl_agent\secrets\provider.py |
+| T-05.2 | fernet-db 模式（cryptography.Fernet + key_version 管理） | src\etl_agent\secrets\fernet_provider.py |
+| T-05.3 | vault-kv-v2 模式（hvac 客户端 + 定位引用） | src\etl_agent\secrets\vault_provider.py |
+| T-05.4 | Provider 工厂（按 `ETL_AGENT_SECRET_PROVIDER` 选择） | src\etl_agent\secrets\factory.py |
+| T-05.5 | 连接登记（API-02，8 类连接器，Secret 引用制） | src\etl_agent\connections\register.py |
+| T-05.6 | 连通性测试（API-03，后台执行 + 回写状态） | src\etl_agent\connections\probe.py |
+| T-05.7 | 连接器探针（PG/MySQL 实装；其余类返明确错误） | src\etl_agent\connections\probes\ |
+| T-05.8 | API 路由 + Pydantic schemas | src\etl_agent\connections\router.py、schemas.py |
+
+### T-06 M-C 凭据治理
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-06.1 | 凭据轮换（VALIDATING→WAITING_APPROVAL→APPROVED→ACTIVATING→SUCCEEDED/FAILED） | src\etl_agent\secrets\rotation.py |
+| T-06.2 | 凭据 Provider 迁移（目标 UUID 申请时冻结） | src\etl_agent\secrets\migration.py |
+| T-06.3 | 凭据销毁（轮换源/回滚暂存两类资格判定 + 墓碑） | src\etl_agent\secrets\destruction.py |
+| T-06.4 | 轮换回滚（恢复旧凭据原始年龄） | src\etl_agent\secrets\rotation_rollback.py |
+| T-06.5 | 到期预警（90 天账龄 / 14 天预警，WARNING/OVERDUE 两级 + 去重） | src\etl_agent\secrets\expiry.py |
+| T-06.6 | 告警投递（Webhook 退避冷却：预警 24h / 逾期 6h） | src\etl_agent\secrets\alert_delivery.py |
+| T-06.7 | 轮换策略配置（credential_max_age_days / credential_warning_days） | src\etl_agent\connections\policy.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API 路由注册（挂到 main.py） | src\etl_agent\main.py （更新） |
+| 端到端测试 | tests\connections\、tests\secrets\ |
+
+## 七、目录结构（S3 结束时必须存在）
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S3 变量）
+├── pyproject.toml                      （新增：cryptography、hvac、asyncpg-probe 等）
+├── uv.lock                             （uv 更新）
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 connections 路由）
+│   ├── config.py                       （更新：新增 SECRET_PROVIDER / FERNET_KEY / VAULT_*）
+│   ├── auth\                           （S2 已有，不动）
+│   ├── projects\                       （S2 已有，不动）
+│   ├── connections\                    （新增：M-C 连接）
+│   │   ├── __init__.py
+│   │   ├── register.py
+│   │   ├── probe.py
+│   │   ├── policy.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   ├── service.py
+│   │   └── probes\                     （连接器探针）
+│   │       ├── __init__.py
+│   │       ├── base.py                 （探针接口 + 通用错误）
+│   │       ├── postgres_probe.py
+│   │       ├── mysql_probe.py
+│   │       ├── unsupported.py          （Oracle/SQLServer/Hive/HDFS 等暂未支持）
+│   │       └── local_file_probe.py
+│   ├── secrets\                        （新增：M-C SecretProvider + 凭据治理）
+│   │   ├── __init__.py
+│   │   ├── provider.py                 （抽象接口）
+│   │   ├── fernet_provider.py
+│   │   ├── vault_provider.py
+│   │   ├── factory.py
+│   │   ├── rotation.py
+│   │   ├── rotation_rollback.py
+│   │   ├── migration.py
+│   │   ├── destruction.py
+│   │   ├── expiry.py
+│   │   ├── alert_delivery.py
+│   │   └── errors.py
+│   └── infrastructure\                 （S1/S2 已有，不动）
+└── tests\
+    ├── conftest.py                     （S2 已有，S3 扩展 fixtures）
+    ├── helpers.py                      （S2 已有，S3 扩展工具函数）
+    ├── auth\                           （S2 已有，不动）
+    ├── projects\                       （S2 已有，不动）
+    ├── connections\                    （新增）
+    │   ├── __init__.py
+    │   ├── test_register.py
+    │   ├── test_probe.py
+    │   ├── test_policy.py
+    │   └── test_router.py
+    └── secrets\                        （新增）
+        ├── __init__.py
+        ├── test_fernet_provider.py
+        ├── test_vault_provider.py      （可选，vault 未部署时 skip）
+        ├── test_rotation.py
+        ├── test_migration.py
+        ├── test_destruction.py
+        ├── test_expiry.py
+        ├── test_alert_delivery.py
+        └── test_zero_plaintext.py      （AC-02 核心验证）
+```
+
+## 八、配置项（config.py 新增）
+
+```python
+ETL_AGENT_SECRET_PROVIDER       # fernet-db | vault-kv-v2，默认 fernet-db
+ETL_AGENT_FERNET_KEY            # 32 字节 base64（Fernet key）
+                                # 生成：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+ETL_AGENT_VAULT_ADDR            # 可空；SECRET_PROVIDER=vault-kv-v2 时必填
+ETL_AGENT_VAULT_TOKEN           # 可空
+```
+
+**更新 `.env.example`**：新增上述变量（占位值）。
+
+## 九、核心实现要点
+
+### 9.1 SecretProvider 抽象（T-05.1）
+
+```python
+class SecretProvider(Protocol):
+    async def store(self, project_id: str, plaintext: dict) -> SecretRef: ...
+    async def read(self, secret_ref: str) -> dict: ...
+    async def destroy(self, secret_ref: str) -> None: ...   # 留墓碑
+    async def rotate(self, secret_ref: str, plaintext: dict) -> SecretRef: ...
+```
+
+**返回 `SecretRef`**：只含 `secret_id`（uuid）和 `provider`，**不含任何密钥材料**。
+
+### 9.2 fernet-db 模式（T-05.2）
+
+- 密钥：`ETL_AGENT_FERNET_KEY`（Fernet 32 字节 base64）
+- **key_version 管理**：每个密文带 `key_version` 字段；主密钥轮换时新增版本，旧密文保持可读
+- 存储：`encrypted_secrets.ciphertext` + `key_version`（S1 已建）
+- 明文载荷：JSON 序列化后加密；字段名不落库（如 `{"user": "...", "password": "..."}`）
+
+### 9.3 vault-kv-v2 模式（T-05.3）
+
+- 用 `hvac` 客户端
+- 库内只存 `vault_path` + `vault_mount`（定位引用）；**不存任何秘密**
+- `read` 时通过 `vault_path` 从 Vault 拉取
+- **Q5/S-Q7 待定**：本阶段实现接口 + 连接测试；实际 Vault 部署留到决议后
+
+### 9.4 连接登记（T-05.5，API-02）
+
+```
+POST /api/v1/projects/{project_id}/connections
+Body: {
+  "name": "string",
+  "connector_type": "MYSQL|POSTGRESQL|ORACLE|SQL_SERVER|DORIS|HIVE|HDFS|LOCAL_FILE",
+  "host": "string",
+  "port": int,
+  "database_name": "string",
+  "username": "string",
+  "password": "string",       # 明文只在请求体内传输，不落库
+  "extra": {}                  # 可选
+}
+```
+
+**处理流程**：
+1. 校验 `(project_id, name)` 唯一（DB 层 UK + 应用层预检）；
+2. 把 `username/password` 用 SecretProvider 加密，得到 `secret_ref`；
+3. `data_connections` 表写入：`name / connector_type / status=UNTESTED / secret_ref / host / port / database_name / credential_max_age_days / credential_warning_days`；
+4. **响应体只含 `secret_ref`**，绝无凭证明文（AC-02）。
+
+### 9.5 连通性测试（T-05.6，API-03）
+
+```
+POST /api/v1/projects/{project_id}/connections/{connection_id}/test
+Response: { "status": "TESTING", "started_at": "..." }
+```
+
+**处理流程**：
+1. 状态置 `TESTING`（立即返回）；
+2. **后台任务**（FastAPI `BackgroundTasks`）：
+   - 从 SecretProvider 读取凭据（内存中短暂持有）
+   - 调用对应连接器探针
+   - 回写状态：`READY` 或 `FAILED`（含错误摘要，**脱敏**）
+3. 探针失败时错误信息不得含密码（如 `"connection refused at localhost:5432"` 而非 `"auth failed with password=xxx"`）
+
+### 9.6 探针实现（T-05.7）
+
+**S3 实装**：
+- `postgres_probe.py`：`asyncpg.connect()` + `SELECT 1`
+- `mysql_probe.py`：`asyncmy.connect()` 或 `aiomysql`
+- `local_file_probe.py`：`Path.exists()` + 可读性
+
+**S3 暂不支持**（返回明确错误）：
+- `unsupported.py`：Oracle / SQL Server / Doris / Hive / HDFS → 返回 `"connector type not yet supported for probing"`
+- 理由：这些驱动安装复杂或依赖外部环境；等 Q2/Q8 决议后再补
+
+### 9.7 凭据轮换（T-06.1）
+
+```
+POST /api/v1/projects/{project_id}/connections/{connection_id}/rotations
+Body: { "new_username": "...", "new_password": "...", "reason": "..." }
+Response: { "rotation_id": "...", "status": "VALIDATING" }
+```
+
+**状态机**：
+```
+VALIDATING → WAITING_APPROVAL → APPROVED → ACTIVATING → SUCCEEDED
+                                         └→ FAILED
+```
+
+**约束**：
+- 新凭据先暂存（STAGE），真实连通性验证（VALIDATE）；
+- 激活前继续用旧凭据（读 `data_connections.secret_ref` 的旧值）；
+- 激活失败 → 回滚到旧凭据（保留原始年龄，不刷新过期时间）。
+
+### 9.8 凭据 Provider 迁移（T-06.2）
+
+- fernet-db ↔ vault-kv-v2 迁移；
+- 目标 UUID 申请时冻结（Migration 表中存储目标 secret_id）；
+- Worker 重试写同一路径，避免孤立秘密；
+- 迁移完成后更新 `data_connections.secret_ref` 指向新 Provider。
+
+### 9.9 凭据销毁（T-06.3）
+
+- 资格判定：轮换源（旧凭据）或回滚暂存（未激活）可销毁；
+- 销毁动作：调 Provider 删除密钥材料 + 留墓碑（`encrypted_secrets.destroyed_at`）；
+- **墓碑不含秘密**（S1 已建字段）。
+
+### 9.10 到期预警（T-06.5，T-06.6）
+
+- 默认：`credential_max_age_days=90`、`credential_warning_days=14`；
+- 扫描：`credential_expiry_alerts` 表按去重键生成；
+- 两级：`WARNING`（≤14 天）/ `OVERDUE`（过期）；
+- 告警投递：Webhook 外置（退避冷却：预警 24h / 逾期 6h）；
+- **S3 不实现 Celery Beat**（S7 才建），提供 CLI 命令 `etl-agent-scan-credentials` 手动触发。
+
+### 9.11 轮换策略配置（T-06.7）
+
+```
+PATCH /api/v1/projects/{project_id}/connections/{connection_id}
+Body: { "credential_max_age_days": 90, "credential_warning_days": 14 }
+```
+
+**约束**：
+- `1 ≤ credential_max_age_days ≤ 3650`；
+- `0 < credential_warning_days < credential_max_age_days`。
+
+### 9.12 错误码（S3 新增/复用）
+
+**新增（SPEC 6.4 BIZ_ 段）**：
+```
+BIZ_404_CONNECTION_NOT_FOUND      404
+BIZ_409_CONNECTION_NAME_DUPLICATE 409
+BIZ_422_CONNECTOR_UNSUPPORTED     422
+BIZ_422_PROBE_FAILED              422
+```
+
+**复用**：
+```
+AUTH_401_* / AUTH_403_*           （S2）
+BIZ_400_VALIDATION                （SPEC 6.4）
+BIZ_403_BOOTSTRAP_*               （AMEND-001）
+BIZ_409_UNIQUE_CONSTRAINT         （SPEC 6.4）
+```
+
+**S3 若新增错误码** → 生成 **AMEND-002** 草稿（半自动流程，见第十七节）。
+
+### 9.13 凭据零明文强化（AC-02）
+
+**所有对外响应**必须遵守：
+- 连接详情响应：只含 `secret_ref`，不含 `host` 之外的任何连接参数？→ **包含 host/port/database_name/username**（这些是连接定位信息，非敏感），**只排除 password**；
+- 错误响应：不含 `password` / `secret_value` / `ciphertext` / `fernet_key`；
+- 日志：不含上述字段；
+- **测试强制**：`test_zero_plaintext.py` 对所有 API 响应做正则扫描。
+
+## 十、测试清单
+
+### tests/connections/
+
+| 用例 | 断言 |
+|------|------|
+| test_register_valid | 合法 → 201，响应含 `secret_ref`，不含 `password` |
+| test_register_duplicate_name | 同名 → 409 CONNECTION_NAME_DUPLICATE |
+| test_register_invalid_connector_type | 非法类型 → 400 VALIDATION |
+| test_register_unknown_project | 跨项目 → 403 NOT_PROJECT_MEMBER |
+| test_probe_postgres_success | 后台测试通过 → status=READY |
+| test_probe_failure_masked | 探针失败 → status=FAILED，错误信息**不含密码** |
+| test_probe_unsupported_connector | Oracle 等 → 明确错误，非静默失败 |
+| test_policy_boundaries | max_age 1–3650、warning < max_age |
+| test_policy_invalid | 越界 → 400 VALIDATION |
+
+### tests/secrets/
+
+| 用例 | 断言 |
+|------|------|
+| test_fernet_provider_store_read | 存储 → 读取，明文一致 |
+| test_fernet_provider_destroy | 销毁 → 墓碑；read 抛明确异常 |
+| test_fernet_key_version_rotation | 旧密文仍可读（key_version 管理） |
+| test_vault_provider_skip | Vault 未部署 → skip（不 fail） |
+| test_rotation_state_machine | 5 态全部可达；激活前旧凭据可用 |
+| test_rotation_rollback_restores_age | 回滚恢复旧凭据**原始年龄**（不刷新） |
+| test_migration_target_uuid_frozen | 目标 UUID 申请时冻结，重试写同一路径 |
+| test_destruction_eligibility | 轮换源/回滚暂存可销毁；其他拒绝 |
+| test_expiry_warning_overdue | 14 天内 WARNING，过期 OVERDUE |
+| test_expiry_dedup_key | 同连接同级别只生成一条 |
+| test_alert_delivery_backoff | 预警 24h / 逾期 6h 冷却 |
+| test_zero_plaintext_all_responses | **AC-02 核心**：所有 API 响应正则扫描无凭证明文 |
+
+## 十一、验收命令（DoD 必须附输出，PowerShell）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S3 不新增，S1 的 8 张 M-C 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\connections\ tests\secrets\ -v
+uv run pytest tests\auth\ tests\projects\ tests\infrastructure\ -v   # 回归
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\connections\ src\etl_agent\secrets\ src\etl_agent\config.py
+
+# 6. 凭据零明文核对（AC-02）
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+# 期望：无匹配
+
+# 7. Fernet key 生成 + 存储（首次）
+uv run python -c "from cryptography.fernet import Fernet; print('ETL_AGENT_FERNET_KEY=' + Fernet.generate_key().decode())"
+# 把输出粘到 infra\.env
+
+# 8. 代码注释合规抽检（DoD-12）
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+# 期望：无 MISSING HEADER 输出
+
+# 9. AC-02 专项：所有 API 响应扫描（由 test_zero_plaintext.py 覆盖）
+uv run pytest tests\secrets\test_zero_plaintext.py -v
+```
+
+## 十二、DoD（15 项，必须全过）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降：第十一节命令 3 全部成功
+[ ] DoD-3  连接登记测试通过：tests/connections/ 全绿
+[ ] DoD-4  凭据治理测试通过：tests/secrets/ 全绿
+[ ] DoD-5  S1/S2 回归测试通过：
+       tests/infrastructure/ 25 passed
+       tests/auth/ 17 passed
+       tests/projects/ 17 passed
+[ ] DoD-6  AC-02 凭据零明文：
+       - 连接详情响应不含 password / ciphertext / fernet_key
+       - 探针失败错误信息不含密码
+       - test_zero_plaintext_all_responses 全绿
+[ ] DoD-7  SecretProvider 双模式：
+       - fernet-db 存取一致
+       - vault-kv-v2 接口可用（vault 未部署时 skip，不 fail）
+       - Provider 工厂按 ETL_AGENT_SECRET_PROVIDER 选择
+[ ] DoD-8  凭据治理状态机：
+       - 轮换 5 态可达
+       - 激活前旧凭据可用
+       - 回滚恢复旧凭据原始年龄
+[ ] DoD-9  到期预警：
+       - WARNING / OVERDUE 两级
+       - 去重键生效
+       - Webhook 退避冷却（24h / 6h）
+[ ] DoD-10 轮换策略边界：
+       - max_age 1–3650
+       - warning < max_age
+[ ] DoD-11 Lint / Type 干净：第十一节命令 5 无新增错误
+[ ] DoD-12 未修改基线：git diff --name-only 中无 *-Baseline 文件
+[ ] DoD-13 代码注释合规（docs/conventions/code-comments.md）：
+       - 所有 .py 文件头含 SPEC 版本 / 覆盖 FR / 对应 AC
+       - 关键决策点均有依据注明
+       - 第十一节命令 8 无 MISSING HEADER
+[ ] DoD-14 上下文读取确认：
+       - 阶段报告开头列出 6 个文件读取状态（见第十九节第一步）
+       - 任一"未找到" → DoD 不合格
+[ ] DoD-15 遗留问题分类归档：
+       - 阶段报告末尾输出「S4 吸收清单」
+       - 若新增错误码，生成 AMEND-002 草稿（状态 Draft）
+       - 见第十七节
+```
+
+DoD 全过 → 调 git_ship；任一不过 → 输出阻塞报告，禁止调用 git_ship。
+
+## 十三、git_ship 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S3-connections
+  base_branch: master
+  commit_message: |
+    feat(S3): 连接与凭据治理 [SPEC v1.0.3-Baseline + AMEND-001]
+
+    覆盖任务：T-05（M-C 连接与 SecretProvider）、T-06（M-C 凭据治理）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-05 / ADR-07 / ADR-08
+    追加件：AMEND-001
+    对应 AC：AC-02（无敏感明文泄露）
+    DoD：15 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    - src/etl_agent/main.py
+    - src/etl_agent/config.py
+    - src/etl_agent/connections/__init__.py
+    - src/etl_agent/connections/register.py
+    - src/etl_agent/connections/probe.py
+    - src/etl_agent/connections/policy.py
+    - src/etl_agent/connections/router.py
+    - src/etl_agent/connections/schemas.py
+    - src/etl_agent/connections/service.py
+    - src/etl_agent/connections/probes/__init__.py
+    - src/etl_agent/connections/probes/base.py
+    - src/etl_agent/connections/probes/postgres_probe.py
+    - src/etl_agent/connections/probes/mysql_probe.py
+    - src/etl_agent/connections/probes/local_file_probe.py
+    - src/etl_agent/connections/probes/unsupported.py
+    - src/etl_agent/secrets/__init__.py
+    - src/etl_agent/secrets/provider.py
+    - src/etl_agent/secrets/fernet_provider.py
+    - src/etl_agent/secrets/vault_provider.py
+    - src/etl_agent/secrets/factory.py
+    - src/etl_agent/secrets/rotation.py
+    - src/etl_agent/secrets/rotation_rollback.py
+    - src/etl_agent/secrets/migration.py
+    - src/etl_agent/secrets/destruction.py
+    - src/etl_agent/secrets/expiry.py
+    - src/etl_agent/secrets/alert_delivery.py
+    - src/etl_agent/secrets/errors.py
+    - tests/conftest.py
+    - tests/helpers.py
+    - tests/connections/__init__.py
+    - tests/connections/test_register.py
+    - tests/connections/test_probe.py
+    - tests/connections/test_policy.py
+    - tests/connections/test_router.py
+    - tests/secrets/__init__.py
+    - tests/secrets/test_fernet_provider.py
+    - tests/secrets/test_vault_provider.py
+    - tests/secrets/test_rotation.py
+    - tests/secrets/test_migration.py
+    - tests/secrets/test_destruction.py
+    - tests/secrets/test_expiry.py
+    - tests/secrets/test_alert_delivery.py
+    - tests/secrets/test_zero_plaintext.py
+    - .env.example
+    - pyproject.toml
+    - uv.lock
+  tag: stage-S3-done
+  push: true
+  auto_pr: false
+```
+
+## 十四、github_ops 参数
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S3-connections
+      base: master
+      title: "[S3] 连接与凭据治理"
+      body: |
+        ## 阶段
+        S3 — 连接与凭据治理
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001
+
+        ## 覆盖任务
+        T-05（M-C 连接与 SecretProvider）、T-06（M-C 凭据治理）
+
+        ## 对应 AC
+        - AC-02（无敏感明文泄露）
+
+        ## DoD 结果
+        - [x] 15 项全部通过（详见阶段报告）
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S4；AMEND-002 草稿见阶段报告末尾>
+      labels:
+        - "stage:S3"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-02"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-05 M-C 连接与 SecretProvider"
+        - "T-06 M-C 凭据治理"
+```
+
+## 十五、阶段报告模板（执行完成后必须输出）
+
+```
+=== 阶段报告 ===
+阶段编号：S3
+阶段名称：连接与凭据治理
+完成时间：<ISO8601>
+
+【读取上下文确认】
+- docs/conventions/code-comments.md                       已读 / 未找到
+- docs/prd/etl_agent-PRD_v1.1.1-Baseline.md               已读 / 未找到
+- docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md             已读 / 未找到
+- docs/spec/amendments/AMEND-001-bootstrap-error-codes.md 已读 / 未找到
+- docs/prompts/S2-认证与项目治理.prompt                   已读 / 未找到
+- docs/stages/S2-认证与项目治理-阶段报告.md               已读 / 未找到
+
+【产出文件清单】
+<逐文件路径>
+
+【DoD 逐项结果】
+- [x] DoD-1  产出文件齐全 —— 证据：<输出摘要>
+- [x] DoD-2  Alembic 可升可降 —— 证据：<输出摘要>
+- [x] DoD-3  连接登记测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-4  凭据治理测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-5  回归测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-6  AC-02 凭据零明文 —— 证据：<逐条>
+- [x] DoD-7  SecretProvider 双模式 —— 证据：<逐条>
+- [x] DoD-8  凭据治理状态机 —— 证据：<逐条>
+- [x] DoD-9  到期预警 —— 证据：<逐条>
+- [x] DoD-10 轮换策略边界 —— 证据：<逐条>
+- [x] DoD-11 Lint/Type 干净 —— 证据：<输出摘要>
+- [x] DoD-12 未修改基线 —— 证据：<git diff 摘要>
+- [x] DoD-13 代码注释合规 —— 证据：<抽检 3 文件头>
+- [x] DoD-14 上下文读取确认 —— 证据：见本报告开头
+- [x] DoD-15 遗留问题分类归档 —— 证据：见下方「S4 吸收清单」+「AMEND-002 草稿」
+
+【AC-02 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| 连接登记响应 | 不含 password | ... |
+| 连接详情响应 | 不含 password / ciphertext | ... |
+| 探针失败错误 | 不含密码 | ... |
+| 日志 / 测试快照 | 无凭证明文 | ... |
+| test_zero_plaintext_all_responses | 全绿 | ... |
+
+【S4 吸收清单】
+（本阶段遗留中影响后续阶段的条目）
+1. <条目 1>
+2. <条目 2>
+...
+
+【AMEND-002 草稿】
+（本阶段新增错误码时生成；无则标注"本阶段未新增错误码，无需 AMEND"）
+
+文件路径：docs/spec/amendments/AMEND-002-<slug>.md
+内容：
+────────────────────────
+# AMEND-002：<标题>
+- 状态：Draft
+...
+────────────────────────
+**审核动作**：人类确认后 git add + git commit，状态改为 Accepted。
+
+【git_ship 结果】
+- branch: feat/S3-connections
+- commit: <hash>
+- tag: stage-S3-done
+- push: 成功 / 失败
+
+【github_ops 结果】
+- PR URL: <URL>
+- milestone 更新: 成功 / 失败
+
+【遗留问题】
+- <问题>（阻塞 S4：是 / 否）
+
+【下一阶段建议】
+<建议启动 S4 / 建议先解决遗留 / 建议暂停>
+
+=== 阶段报告结束 ===
+```
+
+## 十六、代码注释要求（沿用 S2）
+
+所有 `.py` 产出必须遵循 **`docs/conventions/code-comments.md`**（3 层注释）：
+
+### S3 关键决策点清单（必须注释）
+- `secrets/fernet_provider.py`：key_version 管理、密文格式
+- `secrets/vault_provider.py`：库内只存定位引用、不存秘密（ADR-05）
+- `secrets/rotation.py`：状态机 5 态、激活前旧凭据可用
+- `secrets/rotation_rollback.py`：恢复旧凭据**原始年龄**（不刷新）
+- `secrets/migration.py`：目标 UUID 申请时冻结（重试写同一路径）
+- `secrets/destruction.py`：墓碑不含秘密
+- `secrets/expiry.py`：两级告警、去重键
+- `secrets/alert_delivery.py`：退避冷却 24h / 6h
+- `connections/probe.py`：后台执行、失败信息脱敏
+- `connections/register.py`：凭据零明文响应（AC-02）
+- `connections/policy.py`：max_age 1–3650、warning < max_age
+
+## 十七、遗留问题分类归档（半自动流程，S3 起生效）
+
+阶段报告生成后，**自动**对每条遗留问题分类：
+
+| 类型 | 判断标准 | 处理动作 |
+|------|---------|---------|
+| **A. 本阶段可收尾** | 已在本阶段处理完，只需记录 | 阶段报告里标注"✅ 已处理" |
+| **B. 影响后续阶段** | 涉及架构/接口/目录结构，后续阶段需遵循 | 输出「S4 吸收清单」（贴阶段报告末尾） |
+| **C. 涉及基线/契约** | 新增/变更 SPEC 定义的接口、错误码、状态机、数据模型 | **自动生成 `docs/spec/amendments/AMEND-<n>-<slug>.md` 草稿**（状态 Draft），贴阶段报告末尾 |
+
+**输出要求**：
+- 阶段报告末尾必须含「S4 吸收清单」和「AMEND 草稿」（如适用）；
+- **AMEND 草稿不自动提交**，由人类审核后手动 `git add` / `git commit`；
+- AMEND 草稿生成路径：`docs/spec/amendments/AMEND-<下一序号>-<kebab-slug>.md`；
+- 下一序号 = 现有 AMEND 文件最大编号 + 1。
+
+## 十八、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（**AC-02 核心红线**）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**；所有 Python 命令必须通过 `uv run` 执行。
+12. **禁止手改 uv.lock**；新增依赖用 `uv add --optional dev` 或 `uv add`。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. 禁止在 S3 实现 Celery Beat 定时扫描（S7 内容）；到期预警提供 CLI `etl-agent-scan-credentials` 手动触发。
+15. 禁止在 S3 实现 Oracle/SQL Server/Doris/Hive/HDFS 探针（Q2/Q8 决议后再补）；统一返回 `unsupported` 明确错误。
+16. 禁止把 SecretProvider 解密后的明文写入任何日志 / 响应 / 数据库；只在内存中短暂持有。
+17. 禁止在 `data_connections` 表存储任何凭据字段（只存 `secret_ref`）。
+18. 禁止硬编码 Fernet key；必须从 `ETL_AGENT_FERNET_KEY` 读取。
+19. 禁止复述代码行为的冗余注释（见 code-comments.md 第二节）。
+20. **禁止 AMEND 草稿自动提交**（第十七节：只生成草稿，人类审核提交）。
+
+## 十九、启动指令
+
+收到 `START S3` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成才能进入下一步）
+
+```
+1. 读 docs/conventions/code-comments.md                        ← 代码注释规范
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md                ← 需求基线（重点 FR-04~11、AC-02）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md              ← 设计基线（重点 3.2 M-C、5.2 八表、6.1 API-02/03、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001-bootstrap-error-codes.md  ← 追加件（错误码清单引用）
+5. 读 docs/prompts/S2-认证与项目治理.prompt                    ← 上游阶段上下文（了解中间件分层）
+6. 读 docs/stages/S2-认证与项目治理-阶段报告.md                ← 上游阶段报告（了解 S2 遗留）
+```
+
+**读取确认**：在阶段报告开头列出 6 个文件的路径 + 读取状态。
+
+### 第二步：执行前置检查（第三节）
+
+### 第三步：输出任务清单（第六节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档（第十五、十七节）
+
+### 第七步：自动提交阶段报告
+
+```powershell
+git add docs/stages/S3-连接与凭据治理-阶段报告.md
+git commit -m "docs(S3): 阶段报告 [SPEC v1.0.3-Baseline]"
+git push origin feat/S3-connections
+```
+
+### 第八步：输出阶段报告（含「S4 吸收清单」+「AMEND-002 草稿」）
+
+**不自动提交 AMEND 草稿**，由人类审核后手动提交。
+
+现在，等待 `START S3` 指令。
