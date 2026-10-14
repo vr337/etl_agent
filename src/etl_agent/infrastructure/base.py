@@ -3,6 +3,10 @@
 约束来源：etl_agent-SPEC_v1.0.3-Baseline 第 5 章 / 9.10 全局约束 / ADR-07：
 - 时间戳统一 TIMESTAMP WITH TIME ZONE；
 - 约束命名统一（保证 Alembic downgrade 可靠回滚）。
+
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.1/5.2 章 / 9.10 全局约束 / ADR-07
+覆盖 FR：横切支撑（M1~M11 全部表的主键 / 时间戳基类）
+对应 AC：AC-01/02/12（约束命名与类型约束是双唯一等断言的基础）
 """
 from __future__ import annotations
 

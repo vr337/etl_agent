@@ -1,0 +1,763 @@
+# ============================================================
+# WorkBuddy — S2 阶段执行指令
+# 阶段：认证与项目治理（T-03 + T-04 + T-03.10）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S2
+- 阶段名称：认证与项目治理
+- 覆盖任务：T-03（M-A 认证鉴权）、T-04（M-B 项目与工作区治理）、T-03.10（S1 核心文件注释回溯）
+- 依赖：S1（已合并到 master，tag stage-S1-done）
+- 对应 AC：AC-11（认证边界）、AC-12（多租户隔离）
+- SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-B、第 4.2 章、第 6.1 章 API-01、第 6.4 章、第 8 章、附录 A.1、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-01/02/03/58/65/66 + AC-11/12
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S2-auth |
+| 上游 tag | stage-S1-done |
+
+## 三、前置检查（执行前必须完成）
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S2-auth
+3. git log --oneline -1 显示 S1 合并提交
+4. 工作区干净：git status 无 tracked 变更（.workbuddy/、infra/.env 允许 untracked）
+5. 上游 tag 存在：git tag --list | Select-String "stage-S1-done"
+6. 容器健康：
+   docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+7. uv 工程环境就绪：
+   Test-Path uv.lock  → True
+   Test-Path .python-version  → True
+   uv run python -c "import etl_agent; print('ok')"  → ok
+8. S1 数据模型已落地：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\dt" | Select-String -Pattern "users|projects|project_memberships|project_role_grants"
+   → 4 张表全部存在
+9. 基线文件存在：
+   docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+   docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+10. 代码规范文件存在：docs\conventions\code-comments.md
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 四、S1 修正说明（本阶段需遵循）
+
+| 项 | S1 遗留 | S2 修正 |
+|----|---------|---------|
+| 1 | 提示词表数「30 张」为笔误，实际 41 张 | S2 起统一写 41 张 |
+| 2 | uv 0.12 `uv add --dev` 写入 `[dependency-groups]` | S2 起统一用 `uv add --optional dev` |
+| 3 | Windows psycopg 异步需 SelectorEventLoop | S2 起所有含 async 的入口脚本沿用 S1 的处理 |
+| 4 | 前置检查 untracked 范围 | S2 起允许 `.workbuddy/`、`infra/.env` 为 untracked |
+
+## 五、连接信息（从 infra\.env 读取）
+
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=etl_agent
+PG_PASSWORD=dev_local_2026
+PG_DB_MAIN=etl_agent
+PG_DB_CHECKPOINT=etl_checkpoint
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=dev_redis_2026
+REDIS_DB=0
+```
+
+## 六、任务清单
+
+### T-03 M-A 认证鉴权
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-03.1 | 配置加载（pydantic-settings） | src\etl_agent\config.py |
+| T-03.2 | dev-header 模式（X-Actor-ID，仅非生产） | src\etl_agent\auth\dev_header.py |
+| T-03.3 | trusted-gateway 模式（HMAC-SHA256 验签） | src\etl_agent\auth\trusted_gateway.py |
+| T-03.4 | Nonce 一次性消费（Redis SET NX） | src\etl_agent\auth\nonce_store.py |
+| T-03.5 | 时钟偏移校验（±60s） | src\etl_agent\auth\trusted_gateway.py |
+| T-03.6 | Actor → 项目成员 / Harness 职责解析 | src\etl_agent\auth\actor_resolver.py |
+| T-03.7 | 生产启动强制校验（缺失配置拒绝启动） | src\etl_agent\config.py |
+| T-03.8 | 认证错误码 + FastAPI 依赖注入 | src\etl_agent\auth\errors.py、dependencies.py |
+| T-03.9 | 认证中间件（挂到 main.py） | src\etl_agent\auth\middleware.py |
+
+### T-03.10 S1 核心文件注释回溯（新增）
+
+按 `docs/conventions/code-comments.md` 补齐以下 2 个 S1 文件的注释（不改任何字段名、表名、约束逻辑，只加注释）：
+
+| 文件 | 补什么 |
+|------|--------|
+| `src/etl_agent/infrastructure/models.py` | ① 文件头（SPEC 5.2 / FR 追溯）；② 41 张表按 M1~M11 分组加段落注释；③ 关键约束加"为什么"注释：双唯一（FR-32 四眼）、乐观锁（FR-26）、枚举字符串化（ADR-07）、无 Prompt 字段（FR-67） |
+| `src/etl_agent/checkpoint_setup.py` | ① 文件头（FR-67/68 三层状态隔离）；② Windows SelectorEventLoop 处理加"为什么"注释（S1 遗留问题 3） |
+
+**约束**：
+- 只加注释，不改任何代码逻辑；
+- 不改 S1 已生成的迁移脚本；
+- 补完后跑 `uv run pytest tests\infrastructure\ -v` 确认 25 个用例仍全过。
+
+### T-04 M-B 项目与工作区治理
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-04.1 | 工作区初始化（API-01，Bootstrap Token ≥32 字节） | src\etl_agent\projects\bootstrap.py |
+| T-04.2 | 成员管理（增删、列表、角色分配） | src\etl_agent\projects\memberships.py |
+| T-04.3 | Harness 职责授予 / 撤销 / 留痕 | src\etl_agent\projects\role_grants.py |
+| T-04.4 | 跨项目访问控制（非成员 403） | src\etl_agent\auth\dependencies.py |
+| T-04.5 | API 路由 + Pydantic schemas | src\etl_agent\projects\router.py、schemas.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| Redis 客户端（连接池、失败关闭语义） | src\etl_agent\infrastructure\redis_client.py |
+| FastAPI 应用入口（挂中间件、注册路由） | src\etl_agent\main.py |
+| 端到端集成测试 | tests\auth\、tests\projects\ |
+
+## 七、目录结构（S2 结束时必须存在）
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                       （更新：新增 S2 相关变量说明）
+├── .gitignore
+├── .python-version
+├── alembic.ini
+├── pyproject.toml
+├── uv.lock                            （uv 更新）
+├── README.md
+├── alembic\versions\0001_initial_schema.py  （不变）
+├── docs\
+│   ├── conventions\code-comments.md   （新增）
+│   └── prompts\S2-认证与项目治理.prompt
+├── infra\
+│   ├── docker-compose.yml             （不变）
+│   ├── postgres-init.sql              （不变）
+│   └── .env                           （不变，不入 Git）
+├── src\etl_agent\
+│   ├── __init__.py
+│   ├── main.py                        （更新）
+│   ├── checkpoint_setup.py            （更新：仅加注释）
+│   ├── config.py                      （新增）
+│   ├── auth\                          （新增：M-A）
+│   │   ├── __init__.py
+│   │   ├── dev_header.py
+│   │   ├── trusted_gateway.py
+│   │   ├── nonce_store.py
+│   │   ├── actor_resolver.py
+│   │   ├── middleware.py
+│   │   ├── dependencies.py
+│   │   └── errors.py
+│   ├── projects\                      （新增：M-B）
+│   │   ├── __init__.py
+│   │   ├── bootstrap.py
+│   │   ├── memberships.py
+│   │   ├── role_grants.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── service.py
+│   └── infrastructure\
+│       ├── __init__.py
+│       ├── base.py                    （不变）
+│       ├── database.py                （不变）
+│       ├── models.py                  （更新：仅加注释）
+│       └── redis_client.py            （新增）
+└── tests\
+    ├── __init__.py
+    ├── infrastructure\                （不变）
+    ├── auth\                          （新增）
+    │   ├── __init__.py
+    │   ├── test_dev_header.py
+    │   ├── test_trusted_gateway.py
+    │   ├── test_nonce_store.py
+    │   └── test_actor_resolution.py
+    └── projects\                      （新增）
+        ├── __init__.py
+        ├── test_bootstrap.py
+        ├── test_memberships.py
+        ├── test_role_grants.py
+        └── test_multi_tenant.py
+```
+
+## 八、配置项（config.py）
+
+```python
+# 统一 ETL_AGENT_ 前缀，pydantic-settings 加载
+ETL_AGENT_ENV                    # dev | staging | prod
+ETL_AGENT_AUTH_MODE              # dev-header | trusted-gateway
+ETL_AGENT_GATEWAY_HMAC_SECRET    # ≥32 字节；trusted-gateway 必填
+ETL_AGENT_HARNESS_PUBLIC_KEYS    # Ed25519 公钥（S6 用，本阶段可占位）
+ETL_AGENT_BOOTSTRAP_ENABLED      # true | false
+ETL_AGENT_BOOTSTRAP_TOKEN        # ≥32 字节；bootstrap_enabled=true 时必填
+ETL_AGENT_DATABASE_URL
+ETL_AGENT_CHECKPOINT_DATABASE_URL
+ETL_AGENT_REDIS_URL
+
+# 生产启动强制校验（AC-11）：
+#   ENV=prod 时：
+#     AUTH_MODE 必须 = trusted-gateway
+#     GATEWAY_HMAC_SECRET 已配置且 ≥32 字节
+#     HARNESS_PUBLIC_KEYS 已配置
+#     任一缺失 → 启动抛出异常，拒绝启动
+```
+
+**更新 `.env.example`**：新增上面列出的 S2 变量（占位值）。
+
+## 九、核心实现要点
+
+### 9.1 dev-header 模式（T-03.2）
+
+- Header：`X-Actor-ID: <uuid-or-subject>`
+- **仅当 `AUTH_MODE=dev-header` 时启用**
+- 生产（`ENV=prod`）启用该模式 → 启动拒绝
+- 解析后注入 `request.state.actor_id`
+- 未知 Actor → `AUTH_401_UNKNOWN_ACTOR`
+
+### 9.2 trusted-gateway 模式（T-03.3 + T-03.4 + T-03.5）
+
+**Header 约定**（S2 定义）：
+
+```
+X-Gateway-Actor:     <subject>
+X-Gateway-Timestamp: <unix-epoch-seconds>
+X-Gateway-Nonce:     <16-128 位安全字符 [A-Za-z0-9_\-]>
+X-Gateway-Signature: <hex(hmac_sha256(secret, canonical_payload))>
+```
+
+**规范载荷**：
+
+```
+{actor}\n{timestamp}\n{nonce}\n{METHOD}\n{path}?{query}
+```
+
+**校验顺序**：
+
+1. 提取 4 个 Header，缺失 → `AUTH_401_BAD_SIGNATURE`
+2. 时间戳与服务器时间偏移 > 60s → `AUTH_401_TIMESTAMP_SKEW`
+3. HMAC-SHA256 验签失败 → `AUTH_401_BAD_SIGNATURE`
+4. Nonce 长度 / 字符集校验 → 不合法 → `AUTH_401_BAD_SIGNATURE`
+5. Redis `SET NX <nonce> <ttl=120s>`
+   - 已存在 → `AUTH_401_BAD_SIGNATURE`（重放）
+   - Redis 不可用 → `AUTH_503_NONCE_STORE_UNAVAILABLE`（**失败关闭**）
+
+### 9.3 Actor 解析（T-03.6）
+
+- 从 `users.subject` 查到 `users.id`
+- 加载该 actor 在目标 `project_id` 下的：
+  - 成员关系（`project_memberships`）→ `role`（ADMIN/DATA_ENGINEER/APPROVER/VIEWER）
+  - Harness 职责（`project_role_grants`）→ `roles`（5 类）
+- 注入 `request.state.actor = ActorContext(user_id, subject, project_id, member_role, harness_roles)`
+
+### 9.4 跨项目访问控制（T-04.4）
+
+**FastAPI 依赖**：`require_project_member(project_id)`：
+- 若非该 `project_id` 成员 → `AUTH_403_NOT_PROJECT_MEMBER`
+- **不泄露项目是否存在**：不存在与无权限统一返回 403
+
+**FastAPI 依赖**：`require_harness_role(*roles)`：
+- 不具备所需 Harness 职责 → `AUTH_403_ROLE_REQUIRED`
+
+> **说明**：AC-12 中「跨项目工具意图由 PDP `HARNESS-P0-CROSS-PROJECT` DENY」属 Harness 内核（S6）；S2 仅实现「非成员访问项目资源 → 403」。
+
+### 9.5 Bootstrap（T-04.1，API-01）
+
+```
+POST /api/v1/bootstrap
+Body: { "project_name": "string", "admin_subject": "string" }
+Header: X-Bootstrap-Token: <token>
+```
+
+- 校验 `ETL_AGENT_BOOTSTRAP_ENABLED=true` → 否则 403
+- 校验 `X-Bootstrap-Token == ETL_AGENT_BOOTSTRAP_TOKEN`（≥32 字节） → 否则 403
+- **幂等**：若已有项目 → 409 `BIZ_409_STATE_CONFLICT`
+- 创建：`projects` + `users`（admin_subject）+ `project_memberships`（ADMIN）
+
+### 9.6 成员管理（T-04.2）
+
+```
+POST   /api/v1/projects/{project_id}/members
+DELETE /api/v1/projects/{project_id}/members/{user_id}
+GET    /api/v1/projects/{project_id}/members
+PATCH  /api/v1/projects/{project_id}/members/{user_id}
+```
+
+**约束**：
+- `(project_id, user_id)` UK → 重复添加 → 409 `BIZ_409_UNIQUE_CONSTRAINT`
+- 不能移除自己
+- 变更角色受 `project_memberships.role` 取值约束（4 类）
+- 写操作需 ADMIN
+
+### 9.7 Harness 职责授予（T-04.3）
+
+```
+POST   /api/v1/projects/{project_id}/role-grants
+DELETE /api/v1/projects/{project_id}/role-grants/{grant_id}
+GET    /api/v1/projects/{project_id}/role-grants
+```
+
+**约束**：
+- `role` ∈ {DATA_ENGINEER, DATA_APPROVER, SECURITY_APPROVER, OPERATOR, AUDITOR}
+- `granted_by` 必填（= 当前 actor 的 user_id）
+- **ADMIN 不隐式升级**：即使 actor 是 ADMIN，无 SECURITY_APPROVER 授予时不能行使安全审批
+
+### 9.8 FastAPI 应用入口（main.py）
+
+- 创建 `FastAPI(title="etl_agent", version="0.1.0")`
+- 挂认证中间件（按 `AUTH_MODE`）
+- 注册路由：
+  - `/health`
+  - `/api/v1/bootstrap`
+  - `/api/v1/projects/{project_id}/members*`
+  - `/api/v1/projects/{project_id}/role-grants*`
+- 启动事件：
+  - 加载配置
+  - **生产校验**（AC-11）：`ENV=prod` 时三项强制，否则 `raise SystemExit`
+  - 初始化数据库会话工厂与 Redis 客户端
+- 关闭事件：优雅关闭连接池
+
+### 9.9 错误码（统一 JSON 响应）
+
+**新增**：
+
+```
+AUTH_401_UNKNOWN_ACTOR            401
+AUTH_401_BAD_SIGNATURE            401
+AUTH_401_TIMESTAMP_SKEW           401
+AUTH_403_NOT_PROJECT_MEMBER       403
+AUTH_403_ROLE_REQUIRED            403
+AUTH_503_NONCE_STORE_UNAVAILABLE  503
+```
+
+**复用**：
+
+```
+BIZ_400_VALIDATION                400
+BIZ_409_STATE_CONFLICT            409
+BIZ_409_UNIQUE_CONSTRAINT         409
+```
+
+**响应体**：
+
+```json
+{ "code": "AUTH_401_BAD_SIGNATURE", "message": "...", "trace_id": "..." }
+```
+
+## 十、测试清单
+
+### tests/auth/
+
+| 用例 | 断言 |
+|------|------|
+| test_dev_header_valid | 合法 X-Actor-ID → 200 |
+| test_dev_header_unknown_actor | 未知 Actor → 401 UNKNOWN_ACTOR |
+| test_dev_header_disabled_in_prod | ENV=prod + dev-header → 启动拒绝 |
+| test_trusted_gateway_valid | 合法签名 → 200 |
+| test_trusted_gateway_bad_signature | 篡改载荷 → 401 BAD_SIGNATURE |
+| test_trusted_gateway_expired_timestamp | 偏移 > 60s → 401 TIMESTAMP_SKEW |
+| test_trusted_gateway_missing_header | 缺任一 Header → 401 BAD_SIGNATURE |
+| test_nonce_replay | 同 Nonce 二次使用 → 401 |
+| test_nonce_redis_unavailable | Redis 不可用 → 503（失败关闭） |
+| test_nonce_length_invalid | 长度越界 → 401 |
+| test_actor_resolver_roles | 职责解析正确 |
+
+### tests/projects/
+
+| 用例 | 断言 |
+|------|------|
+| test_bootstrap_valid | 合法 → 201 |
+| test_bootstrap_invalid_token | Token 错 → 403 |
+| test_bootstrap_disabled | ENABLED=false → 403 |
+| test_bootstrap_idempotent | 二次 → 409 |
+| test_membership_add_remove | 增删成功 |
+| test_membership_duplicate | 重复 → 409 |
+| test_role_grant_granted_by | granted_by 记录正确 |
+| test_role_grant_admin_not_implicit | ADMIN 无 SECURITY_APPROVER 不能行使安全审批 |
+| test_multi_tenant_403 | 非成员 → 403 |
+| test_multi_tenant_cross_project_deny | 跨项目（S2 层）→ 403 |
+
+## 十一、验收命令（DoD 必须附输出，PowerShell）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -1
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S2 不新增，但需验证 S1 表仍在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\auth\ tests\projects\ -v
+uv run pytest tests\infrastructure\ -v   # S1 25 个用例必须仍全过
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\auth\ src\etl_agent\projects\ src\etl_agent\config.py
+
+# 6. 生产启动强制校验（AC-11）
+$env:ETL_AGENT_ENV="prod"; $env:ETL_AGENT_AUTH_MODE="dev-header"
+uv run python -c "from etl_agent.config import settings; settings.validate_production()"
+# 期望：抛异常 / SystemExit
+Remove-Item Env:ETL_AGENT_ENV,Env:ETL_AGENT_AUTH_MODE
+
+# 7. Redis Nonce 失败关闭验证（AC-11）
+docker stop etl_agent_redis
+uv run pytest tests\auth\test_nonce_store.py::test_nonce_redis_unavailable -v
+docker start etl_agent_redis
+
+# 8. 凭据零明文核对
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 9. 代码注释合规抽检（DoD-12）
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+# 期望：无 MISSING HEADER 输出
+```
+
+## 十二、DoD（14 项，必须全过）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降：第十一节命令 3 全部成功
+[ ] DoD-3  认证测试通过：tests/auth/ 全绿
+[ ] DoD-4  项目治理测试通过：tests/projects/ 全绿
+[ ] DoD-5  S1 回归测试通过：tests/infrastructure/ 25 个用例仍全过
+[ ] DoD-6  AC-11 认证边界：
+       - dev-header 在 prod 启动拒绝
+       - trusted-gateway 缺失配置启动拒绝
+       - 伪造签名 / 过期时间戳 / 已消费 Nonce → 401
+       - Redis 不可用 → 503（失败关闭）
+[ ] DoD-7  AC-12 多租户隔离：
+       - 非成员访问项目资源 → 403
+       - 跨项目意图（S2 层）→ 403；PDP DENY 在 S6 补
+[ ] DoD-8  职责分离：
+       - ADMIN 不隐式升级为 SECURITY_APPROVER
+       - (project_id, user_id) UK 生效
+[ ] DoD-9  凭据零明文：第十一节命令 8 无匹配
+[ ] DoD-10 Lint / Type 干净：第十一节命令 5 无新增错误
+[ ] DoD-11 未修改基线：git diff --name-only 中无 *-Baseline 文件
+[ ] DoD-12 代码注释合规（docs/conventions/code-comments.md）：
+       - 所有 .py 文件头含 SPEC 版本 / 覆盖 FR / 对应 AC
+       - 关键决策点均有依据注明
+       - 第十一节命令 9 无 MISSING HEADER
+       - 证据：抽检 3 个文件头
+[ ] DoD-13 S1 核心文件注释回溯（T-03.10）：
+       - models.py 有文件头 + 关键约束"为什么"注释
+       - checkpoint_setup.py 有文件头 + SelectorEventLoop 说明
+       - git diff 只含注释行（无逻辑变更）
+       - tests/infrastructure/ 25 passed
+[ ] DoD-14 上下文读取确认：
+       - 阶段报告开头列出 5 个文件读取状态（见第十九节第一步）
+       - 任一"未找到" → 视为 DoD 不合格
+```
+
+DoD 全过 → 调 git_ship；任一不过 → 输出阻塞报告，禁止调用 git_ship。
+
+## 十三、git_ship 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S2-auth
+  base_branch: master
+  commit_message: |
+    feat(S2): 认证与项目治理 [SPEC v1.0.3-Baseline]
+
+    覆盖任务：T-03（M-A 认证鉴权）、T-04（M-B 项目与工作区治理）、T-03.10（S1 注释回溯）
+    SPEC 依据：第 3.2 / 4.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-07 / ADR-08
+    对应 AC：AC-11（认证边界）、AC-12（多租户隔离）
+    DoD：14 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定；uv add --optional dev）
+    代码规范：遵循 docs/conventions/code-comments.md（3 层注释，含 SPEC/FR/AC 追溯）
+  files:
+    # 由 WorkBuddy 根据实际产出自动列出
+    - docs/conventions/code-comments.md
+    - docs/prompts/S2-认证与项目治理.prompt
+    - src/etl_agent/main.py
+    - src/etl_agent/config.py
+    - src/etl_agent/checkpoint_setup.py                # T-03.10 注释回溯
+    - src/etl_agent/infrastructure/models.py            # T-03.10 注释回溯
+    - src/etl_agent/infrastructure/redis_client.py
+    - src/etl_agent/auth/__init__.py
+    - src/etl_agent/auth/dev_header.py
+    - src/etl_agent/auth/trusted_gateway.py
+    - src/etl_agent/auth/nonce_store.py
+    - src/etl_agent/auth/actor_resolver.py
+    - src/etl_agent/auth/middleware.py
+    - src/etl_agent/auth/dependencies.py
+    - src/etl_agent/auth/errors.py
+    - src/etl_agent/projects/__init__.py
+    - src/etl_agent/projects/bootstrap.py
+    - src/etl_agent/projects/memberships.py
+    - src/etl_agent/projects/role_grants.py
+    - src/etl_agent/projects/router.py
+    - src/etl_agent/projects/schemas.py
+    - src/etl_agent/projects/service.py
+    - tests/auth/__init__.py
+    - tests/auth/test_dev_header.py
+    - tests/auth/test_trusted_gateway.py
+    - tests/auth/test_nonce_store.py
+    - tests/auth/test_actor_resolution.py
+    - tests/projects/__init__.py
+    - tests/projects/test_bootstrap.py
+    - tests/projects/test_memberships.py
+    - tests/projects/test_role_grants.py
+    - tests/projects/test_multi_tenant.py
+    - .env.example
+    - pyproject.toml
+    - uv.lock
+  tag: stage-S2-done
+  push: true
+  auto_pr: false
+```
+
+## 十四、github_ops 参数
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S2-auth
+      base: master
+      title: "[S2] 认证与项目治理"
+      body: |
+        ## 阶段
+        S2 — 认证与项目治理
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+
+        ## 覆盖任务
+        T-03（M-A 认证鉴权）、T-04（M-B 项目与工作区治理）、T-03.10（S1 注释回溯）
+
+        ## 对应 AC
+        - AC-11（认证边界）
+        - AC-12（多租户隔离）
+
+        ## DoD 结果
+        - [x] 14 项全部通过（详见阶段报告）
+
+        ## 代码规范
+        - docs/conventions/code-comments.md（3 层注释）
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S3>
+      labels:
+        - "stage:S2"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-11"
+        - "ac:AC-12"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-03 M-A 认证鉴权"
+        - "T-04 M-B 项目与工作区治理"
+        - "T-03.10 S1 核心文件注释回溯"
+```
+
+## 十五、阶段报告（执行完成后必须输出）
+
+```
+=== 阶段报告 ===
+阶段编号：S2
+阶段名称：认证与项目治理
+完成时间：<ISO8601>
+
+【读取上下文确认】
+- docs/conventions/code-comments.md               已读 / 未找到
+- docs/prd/etl_agent-PRD_v1.1.1-Baseline.md       已读 / 未找到
+- docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md     已读 / 未找到
+- docs/prompts/S1-骨架与数据模型.prompt           已读 / 未找到
+- docs/stages/S1-骨架与数据模型-阶段报告.md       已读 / 未找到
+
+【产出文件清单】
+<逐文件路径>
+
+【DoD 逐项结果】
+- [x] DoD-1  产出文件齐全 —— 证据：<输出摘要>
+- [x] DoD-2  Alembic 可升可降 —— 证据：<输出摘要>
+- [x] DoD-3  认证测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-4  项目治理测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-5  S1 回归测试通过 —— 证据：<pytest 摘要>
+- [x] DoD-6  AC-11 认证边界 —— 证据：<逐条>
+- [x] DoD-7  AC-12 多租户隔离 —— 证据：<逐条>
+- [x] DoD-8  职责分离 —— 证据：<逐条>
+- [x] DoD-9  凭据零明文 —— 证据：<输出摘要>
+- [x] DoD-10 Lint/Type 干净 —— 证据：<输出摘要>
+- [x] DoD-11 未修改基线 —— 证据：<git diff 摘要>
+- [x] DoD-12 代码注释合规 —— 证据：<抽检 3 文件头>
+- [x] DoD-13 S1 核心文件注释回溯 —— 证据：<git diff 只含注释行>
+- [x] DoD-14 上下文读取确认 —— 证据：见本报告开头
+
+【AC-11 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| dev-header 在 prod | 启动拒绝 | ... |
+| trusted-gateway 缺配置 | 启动拒绝 | ... |
+| 伪造签名 | 401 | ... |
+| 过期时间戳（>60s） | 401 | ... |
+| 已消费 Nonce | 401 | ... |
+| Redis 不可用 | 503（失败关闭） | ... |
+
+【AC-12 逐条验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| 非成员访问项目 | 403 | ... |
+| 跨项目意图（S2 层） | 403 | ... |
+| PDP DENY（说明） | 留待 S6 补 | — |
+
+【职责分离验证】
+| 场景 | 期望 | 实际 |
+|------|------|------|
+| ADMIN 无 SECURITY_APPROVER | 不能行使安全审批 | ... |
+| (project_id, user_id) UK | 重复添加 409 | ... |
+
+【T-03.10 S1 注释回溯证据】
+- models.py: 文件头 + N 处关键约束注释（git diff 只含注释行）
+- checkpoint_setup.py: 文件头 + SelectorEventLoop 说明
+- pytest tests/infrastructure/ → 25 passed
+
+【代码注释抽检】
+- <文件 1>：文件头含 SPEC/FR/AC ✅
+- <文件 2>：关键决策点有依据 ✅
+- <文件 3>：无复述注释 ✅
+
+【git_ship 结果】
+- branch: feat/S2-auth
+- commit: <hash>
+- tag: stage-S2-done
+- push: 成功 / 失败
+
+【github_ops 结果】
+- PR URL: <URL>
+- milestone 更新: 成功 / 失败
+
+【遗留问题】
+- <问题>（阻塞 S3：是 / 否）
+
+【下一阶段建议】
+<建议启动 S3 / 建议先解决遗留 / 建议暂停>
+=== 阶段报告结束 ===
+```
+
+## 十六、代码注释要求（本阶段起强制）
+
+所有 `.py` 产出必须遵循 **`docs/conventions/code-comments.md`**：
+
+### 必加（3 层）
+1. **文件头**：模块归属 + SPEC 版本 + 覆盖 FR + 对应 AC
+2. **公共函数 docstring**：Args / Returns / Raises（只给跨模块调用的写）
+3. **关键决策点单行注释**：只写"为什么"，注明依据（FR/AC/SPEC 章节）
+
+### 不加
+- 平凡 getter / setter
+- 复述代码行为的注释
+- 每个函数都写 docstring
+- 简单 schema 字段
+
+### 强制
+- 文件头缺 **SPEC 版本 / 覆盖 FR / 对应 AC** → DoD 不合格，禁止 git_ship
+- 关键安全决策点缺依据注明 → DoD 不合格
+- 注释中出现凭证明文 → 直接阻塞
+
+### 关键决策点清单（S2 必须注释）
+- `trusted_gateway.py`：时钟偏移 ≤60s、Nonce 长度校验、失败关闭
+- `nonce_store.py`：Redis SET NX 语义、失败关闭返回 503
+- `actor_resolver.py`：ADMIN 不隐式升级为安全审批人
+- `dependencies.py`：跨项目访问 403、不泄露项目是否存在
+- `config.py`：生产启动强制校验（缺失配置拒绝启动）
+- `bootstrap.py`：幂等（二次调用 409）、Token ≥32 字节
+
+## 十七、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**；所有 Python 命令必须通过 `uv run` 执行。
+12. **禁止手改 uv.lock**；新增依赖用 `uv add --optional dev`。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. 禁止在 S2 实现 Harness PDP（S6 内容）；AC-12 的 PDP DENY 部分在 S2 只做成员校验 403。
+15. 禁止在 S2 实现 Session / Cookie / 密码登录（认证边界由网关/开发头注入）。
+16. **禁止 T-03.10 引入任何逻辑变更**：S1 的 models.py 与 checkpoint_setup.py 只允许加注释，`git diff` 必须只含 `+` 注释行。
+17. 禁止复述代码行为的冗余注释（见 code-comments.md 第二节）。
+
+## 十八、S1 → S2 过渡提醒
+
+- S1 的 `stage-S1-done` tag 已打，`feat/S1-skeleton` 已合并到 master；
+- S2 从 master 切出 `feat/S2-auth`；
+- S2 **不新增 Alembic 迁移**（S1 已建 41 张表）；
+- S2 对 S1 的 models.py 与 checkpoint_setup.py **只加注释，不改逻辑**；
+- S2 完成后走 PR → Squash and merge → 删除分支 → 打 tag `stage-S2-done`。
+
+## 十九、启动指令
+
+收到 `START S2` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成才能进入下一步）
+
+```
+1. 读 docs/conventions/code-comments.md          ← 代码注释规范（3 层注释）
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md  ← 需求基线（重点 FR-01/02/03/58/65/66、AC-11/12）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md ← 设计基线（重点第 3.2 章 M-A/M-B、第 6.4 章、第 8 章）
+4. 读 docs/prompts/S1-骨架与数据模型.prompt        ← 上游阶段上下文（了解 S1 已落地的约束）
+5. 读 docs/stages/S1-骨架与数据模型-阶段报告.md   ← 上游阶段报告（了解 S1 遗留问题）
+```
+
+**读取确认**：在阶段报告开头列出 5 个文件的路径 + 读取状态（"已读/未找到"）。
+
+### 第二步：执行前置检查（第三节）
+
+### 第三步：输出任务清单（第六节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：执行 T-03.10（S1 核心文件注释回溯）
+
+### 第六步：调 git_ship → github_ops
+
+### 第七步：输出阶段报告（第十五节）
+
+现在，等待 `START S2` 指令。

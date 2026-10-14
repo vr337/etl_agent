@@ -32,7 +32,6 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.0",
-    "types-redis>=4.6.0.20241004",
 ]
 
 [project.scripts]
@@ -49,6 +48,10 @@ packages = ["src/etl_agent"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# B008：Depends() 出现在参数默认值是 FastAPI 依赖注入的惯用写法（ruff 文档对 FastAPI 的推荐处理）
+[tool.ruff.lint]
+ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
