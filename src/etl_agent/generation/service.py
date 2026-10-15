@@ -50,9 +50,7 @@ from etl_agent.llm.errors import LLMBudgetExhausted
 from etl_agent.llm.factory import create_provider
 from etl_agent.llm.provider import LLMProvider
 from etl_agent.profiles.errors import ProfileNotFound
-
-# 允许在其上发起生成的版本状态（APPROVED 等终态必须派生新版本，FR-26）
-GENERATABLE_STATUSES = frozenset({"DRAFT", "PROFILING", "GENERATED"})
+from etl_agent.versions.state import GENERATABLE_STATUSES
 
 
 async def create_run(
@@ -164,6 +162,60 @@ async def load_run(session: AsyncSession, run_id: uuid.UUID) -> tuple[AgentRun, 
     if row is None:
         raise AgentRunNotFound("生成运行不存在")
     return row[0], row[1]
+
+
+async def load_candidate_content(
+    session: AsyncSession,
+    version_id: uuid.UUID,
+    settings: Settings,
+    checkpointer: Any = None,
+) -> dict[str, Any] | None:
+    """从 Checkpoint 取回某版本最近一次运行产出的候选正文。
+
+    FR-67 口径：候选正文只落在 `etl_checkpoint` 库，业务库只有制品摘要。
+    版本 Diff（FR-27）与 API-07 冻结需要正文时，经 `AgentRun.thread_id` 回 Checkpoint
+    读取 `candidate` 通道；取不到（无运行 / Checkpoint 已清理）返回 None，
+    由调用方降级为「仅摘要级」能力，不报错。
+
+    Args:
+        session: 请求级数据库会话。
+        version_id: 目标版本。
+        settings: 应用配置（Checkpoint 连接串来源）。
+        checkpointer: 已打开的 Checkpointer（应用生命周期内复用）；缺省临时打开。
+
+    Returns:
+        dict | None: `{"etl_plan": ..., "hocon": ..., "backend": ..., "model": ...}` 或 None。
+    """
+    run = (
+        (
+            await session.execute(
+                select(AgentRun)
+                .where(AgentRun.pipeline_version_id == version_id)
+                .order_by(AgentRun.created_at.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if run is None:
+        return None
+    config = {"configurable": {"thread_id": run.thread_id}}
+    if checkpointer is not None:
+        return _extract_candidate(await checkpointer.aget_tuple(config))
+    async with open_checkpointer(settings) as saver:
+        return _extract_candidate(await saver.aget_tuple(config))
+
+
+def _extract_candidate(tuple_obj: Any) -> dict[str, Any] | None:
+    """从 CheckpointTuple 的 `channel_values` 取 `candidate` 通道（形态不符返回 None）。"""
+    checkpoint = getattr(tuple_obj, "checkpoint", None)
+    if not isinstance(checkpoint, dict):
+        return None
+    values = checkpoint.get("channel_values")
+    if not isinstance(values, dict):
+        return None
+    candidate = values.get("candidate")
+    return candidate if isinstance(candidate, dict) else None
 
 
 async def _advance(

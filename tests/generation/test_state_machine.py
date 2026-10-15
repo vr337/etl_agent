@@ -68,8 +68,8 @@ async def test_state_machine_happy_path(
         .scalars()
         .all()
     )
-    # 制品只存摘要，不存正文（FR-67）
-    assert {item.artifact_type for item in artifacts} == {"plan", "hocon"}
+    # 制品只存摘要，不存正文（FR-67）；三类制品与 SPEC 5.2 artifact_type 一致
+    assert {item.artifact_type for item in artifacts} == {"plan", "hocon", "quality_contract"}
     assert all(len(item.sha256) == 64 for item in artifacts)
 
 

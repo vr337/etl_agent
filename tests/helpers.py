@@ -130,6 +130,35 @@ async def built_app(
         await close_redis_client(application.state.redis)
 
 
+def attach_harness_services(application: FastAPI) -> FastAPI:
+    """给测试应用注入 Harness 服务（S6：PDP / Prepare / Commit，与 lifespan 装配同源）。
+
+    策略包与密钥取自仓库交付物 + `infra/.env` 的人类配置，测试不新增密钥材料（AC-02）。
+    """
+    from etl_agent.harness.capability.issuer import CapabilityIssuer
+    from etl_agent.harness.commit.service import CommitService
+    from etl_agent.harness.pdp.engine import PdpEngine
+    from etl_agent.harness.policy.package import load_package
+    from etl_agent.harness.prepare.service import PrepareService
+
+    settings = make_settings()
+    package = load_package(
+        settings.policy_package_path,
+        settings.policy_package_signature_path,
+        settings.harness_public_key_list,
+    )
+    application.state.pdp_package = package
+    application.state.prepare_service = PrepareService(
+        PdpEngine(package),
+        requested_ttl_seconds=settings.harness_preparation_ttl_seconds,
+    )
+    application.state.commit_service = CommitService(
+        CapabilityIssuer(settings.harness_signing_key_hex),
+        ttl_seconds=settings.harness_capability_ttl_seconds,
+    )
+    return application
+
+
 def make_client(application: object) -> AsyncClient:
     """ASGI 传输的异步测试客户端（不触发 lifespan，Redis 由 fixture 预置）。"""
     return AsyncClient(transport=ASGITransport(app=application), base_url="http://testserver")  # type: ignore[arg-type]

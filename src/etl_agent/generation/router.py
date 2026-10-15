@@ -1,12 +1,11 @@
-"""M-F 生成引擎 — API 路由（API-05 / API-06 / API-07）。
+"""M-F 生成引擎 — API 路由（API-05 / API-06）。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-05/06/07 / 第 6.2 章接口契约 / 第 8 章「安全 · 多租户」
-覆盖 FR：FR-16（创建运行）、FR-17（澄清恢复）、FR-26（冻结 SHA256）、FR-66（项目隔离）
-对应 AC：AC-03（中断与恢复）、AC-04（门禁 + 冻结）、AC-12（跨项目 403）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-05/06 / 第 6.2 章接口契约 / 第 8 章「安全 · 多租户」
+覆盖 FR：FR-16（创建运行）、FR-17（澄清恢复）、FR-66（项目隔离）
+对应 AC：AC-03（中断与恢复）、AC-12（跨项目 403）
 
-鉴权口径：API-05 有 `project_id` 路径参数，走 `require_project_member` 依赖；
-API-06/07 路径中无 `project_id`，先由资源回溯项目再做成员校验（`_require_membership`），
-两者对「非成员」统一返回 403，不泄露资源是否存在（AC-12）。
+S6 变更：API-07（版本冻结）已迁至 M-H 版本域 `versions/router.py`（S5 吸收 1：
+由幂等读取口升级为写入与状态迁移接口），本文件不再承载版本冻结。
 """
 from __future__ import annotations
 
@@ -15,16 +14,13 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from etl_agent.auth.actor_resolver import ActorContext, resolve_actor
-from etl_agent.auth.dependencies import require_project_member
-from etl_agent.auth.errors import NotProjectMember, StateConflict, UnknownActor
-from etl_agent.generation import artifacts as artifact_service
+from etl_agent.auth.actor_resolver import ActorContext
+from etl_agent.auth.dependencies import require_actor_for_project, require_project_member
 from etl_agent.generation import service as generation_service
 from etl_agent.generation.schemas import (
     AgentRunCreateRequest,
     AgentRunMessageRequest,
     AgentRunResponse,
-    PipelineVersionFreezeResponse,
 )
 from etl_agent.infrastructure.database import get_session
 from etl_agent.infrastructure.models import AgentRun
@@ -50,14 +46,8 @@ def _to_response(run: AgentRun) -> AgentRunResponse:
 async def _require_membership(
     request: Request, session: AsyncSession, project_id: uuid.UUID
 ) -> ActorContext:
-    """资源回溯项目的成员校验（API-06/07 无 project_id 路径参数时的等价依赖）。"""
-    subject = getattr(request.state, "actor_subject", None)
-    if not subject:
-        raise UnknownActor("请求未携带身份声明")
-    actor = await resolve_actor(session, subject, project_id)
-    if actor.member_role is None:
-        raise NotProjectMember()
-    return actor
+    """资源回溯项目的成员校验（API-06 无 project_id 路径参数时的等价依赖）。"""
+    return await require_actor_for_project(request, session, project_id)
 
 
 @router.post(
@@ -109,27 +99,3 @@ async def resume_agent_run(
         checkpointer=getattr(request.app.state, "checkpointer", None),
     )
     return _to_response(run)
-
-
-@router.post(
-    "/pipeline-versions/{version_id}/freeze", response_model=PipelineVersionFreezeResponse
-)
-async def freeze_pipeline_version(
-    version_id: uuid.UUID,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-) -> PipelineVersionFreezeResponse:
-    """返回已冻结的制品摘要（API-07）。
-
-    冻结动作发生在门禁通过时（`generation.nodes.gate` → `artifacts.freeze_version_artifacts`），
-    本端点是幂等读取口：版本尚无摘要说明从未通过门禁 → 409（状态机不允许）。
-    """
-    version, project_id = await artifact_service.load_version_with_project(session, version_id)
-    await _require_membership(request, session, project_id)
-    if not version.artifact_sha256:
-        raise StateConflict("版本尚未通过门禁冻结，无可返回的 SHA256")
-    return PipelineVersionFreezeResponse(
-        id=version.id,
-        artifact_sha256=version.artifact_sha256,
-        status=version.status,
-    )

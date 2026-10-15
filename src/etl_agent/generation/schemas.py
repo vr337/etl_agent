@@ -1,8 +1,10 @@
 """M-F 生成引擎 — API 请求 / 响应模型。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-05/06/07 / 第 6.2 章接口契约 / 第 5.2 章 agent_runs
-覆盖 FR：FR-16（创建运行）、FR-17（澄清回答）、FR-26（版本冻结摘要）、FR-67（响应不含 Prompt / 候选正文）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-05/06 / 第 6.2 章接口契约 / 第 5.2 章 agent_runs
+覆盖 FR：FR-16（创建运行）、FR-17（澄清回答）、FR-67（响应不含 Prompt / 候选正文）
 对应 AC：AC-03（中断与恢复）、AC-02（响应零明文）
+
+S6 变更：API-07 冻结响应模型随端点迁至 `versions/schemas.py`（版本域归属 M-H）。
 
 响应模型**有意缺席**的字段（FR-67 / AC-02 红线）：
 `requirement`、`etl_plan`、`hocon`、任何候选正文与凭据——业务库不存、响应不回。
@@ -48,11 +50,3 @@ class AgentRunResponse(BaseModel):
     generation_candidate_count: int | None = None
     generation_repair_count: int | None = None
     generation_duration_ms: int | None = None
-
-
-class PipelineVersionFreezeResponse(BaseModel):
-    """API-07 冻结响应（S5 只做 SHA256 冻结，完整版本链留 S6）。"""
-
-    id: uuid.UUID
-    artifact_sha256: str
-    status: str

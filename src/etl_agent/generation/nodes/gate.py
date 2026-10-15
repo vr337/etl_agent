@@ -16,7 +16,6 @@ from typing import Any
 from sqlalchemy import select
 
 from etl_agent.gate.service import build_repair_feedback, run_gate
-from etl_agent.generation.artifacts import freeze_version_artifacts
 from etl_agent.generation.state import (
     STATUS_RUNNING,
     STATUS_WAITING_APPROVAL,
@@ -24,10 +23,16 @@ from etl_agent.generation.state import (
     GenerationState,
 )
 from etl_agent.infrastructure.models import DataConnection, FileAsset
+from etl_agent.versions.artifacts import freeze_version_artifacts
+from etl_agent.versions.service import mark_generated
 
 
 async def gate_node(state: GenerationState, deps: GenerationDeps) -> dict[str, Any]:
     """门禁节点：14 项契约 + 引擎检查；通过则冻结 SHA256 并转入等审批。
+
+    冻结走 M-H 版本域（`versions.artifacts`）——S6 起制品冻结的唯一实现；
+    先 `mark_generated`（版本链 DRAFT/PROFILING → GENERATED）再冻结（→ VALIDATED），
+    两步都在同一事务内，保证「候选通过门禁」与「版本摘要冻结」原子可见。
 
     Returns:
         dict: 状态增量（门禁结果 / 修复反馈 / 状态）。
@@ -39,9 +44,9 @@ async def gate_node(state: GenerationState, deps: GenerationDeps) -> dict[str, A
     result = await run_gate(plan, hocon, context, engine_checker=deps.engine_checker)
 
     if result.passed:
-        await freeze_version_artifacts(
-            deps.session, state["pipeline_version_id"], plan, hocon
-        )
+        version_id = state["pipeline_version_id"]
+        await mark_generated(deps.session, uuid.UUID(str(version_id)))
+        await freeze_version_artifacts(deps.session, version_id, plan, hocon)
         # 机器门禁通过才进入人工审批（FR-68：门禁未通过前不进入人工审批中断）
         return {
             "gate_result": result.to_dict(),

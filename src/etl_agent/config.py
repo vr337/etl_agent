@@ -1,8 +1,8 @@
-"""M-A/M-C/M-D/M-E/M-F 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider 配置。
+"""M-A/M-C/M-D/M-E/M-F/M-J 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider / Harness 内核配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」
-覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）
-对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F/M-J / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」/ 第 8 章「安全 · 授权与职责分离」
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）、FR-29/30（PDP 与签名策略包）、FR-31/33（准备单与 Capability TTL）
+对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）、AC-05（单次令牌 TTL ≤900s）
 """
 from __future__ import annotations
 
@@ -21,11 +21,22 @@ LLM_PROVIDERS = frozenset(
 # 生产强制项（AC-11 / SPEC 4.4-3）：HMAC 密钥与 Bootstrap Token 的最小长度
 MIN_SECRET_LENGTH = 32
 
-# 有限修复候选预算硬上限（SPEC FR-21 / S5 禁止事项 15）：含初始候选最多 3 份
+# 有限修复候选预算硬上限（SPEC FR-21 / S6 禁止事项 15）：含初始候选最多 3 份
 LLM_MAX_CANDIDATES_HARD_CAP = 3
 
 # Fernet key 的 base64 解码后固定 32 字节（cryptography.fernet 规范）
 FERNET_KEY_BYTES = 32
+
+# Harness TTL 边界（SPEC 6.2）：准备单 300s–7d 默认 24h；Capability 30–900s 默认 300s
+PREPARATION_TTL_SECONDS_DEFAULT = 24 * 60 * 60
+PREPARATION_TTL_SECONDS_MIN = 300
+PREPARATION_TTL_SECONDS_MAX = 7 * 24 * 60 * 60
+CAPABILITY_TTL_SECONDS_DEFAULT = 300
+CAPABILITY_TTL_SECONDS_MIN = 30
+CAPABILITY_TTL_SECONDS_MAX = 900
+
+# Ed25519 密钥 hex 长度：32 字节（私钥种子与公钥原始点均为 32 字节）
+HARNESS_KEY_HEX_LENGTH = 64
 
 
 class ProductionConfigError(RuntimeError):
@@ -99,6 +110,17 @@ class Settings(BaseSettings):
     checkpoint_database_url: str | None = None
     redis_url: str | None = None
 
+    # ---- M-J Harness 安全执行内核（S6：FR-29/30/31/33）----
+    # 策略包（清单 + 分离签名）与验签公钥：缺省路径对应 configs/policy/harness-v2-20260808.*
+    policy_package_path: str = "configs/policy/harness-v2-20260808.json"
+    policy_package_signature_path: str = "configs/policy/harness-v2-20260808.sig"
+    # Ed25519 私钥（仅签名脚本使用，控制面不持有）；逗号分隔的公钥用于验签
+    harness_signing_key_hex: str = ""
+    # Capability TTL 秒（FR-33：30–900，默认 300；提供方越界即拒绝启动）
+    harness_capability_ttl_seconds: int = CAPABILITY_TTL_SECONDS_DEFAULT
+    # 准备单 TTL 秒（FR-31：300–7 天，默认 24h；越界即拒绝启动）
+    harness_preparation_ttl_seconds: int = PREPARATION_TTL_SECONDS_DEFAULT
+
     @property
     def resolved_database_url(self) -> str:
         """业务库异步连接串（复用 infrastructure.database，S1 已落地）。"""
@@ -161,6 +183,56 @@ class Settings(BaseSettings):
             problems.append("ETL_AGENT_HARNESS_PUBLIC_KEYS 未配置（FR-65 / SPEC 4.4-3）")
         if problems:
             raise ProductionConfigError("生产配置校验失败:\n" + "\n".join(f"  - {p}" for p in problems))
+
+    @property
+    def harness_public_key_list(self) -> list[str]:
+        """验签公钥列表（逗号分隔，空项过滤；长度非法项一并剔除——宁可拒签也不静默通过）。"""
+        keys: list[str] = []
+        for item in self.harness_public_keys.split(","):
+            key = item.strip()
+            if len(key) == HARNESS_KEY_HEX_LENGTH:
+                keys.append(key)
+        return keys
+
+    def validate_harness(self) -> None:
+        """Harness 内核配置校验（S6：AC-11 / AC-05 / FR-29/30/31/33）。
+
+        启动期 fail-fast 的三条红线：
+        1. 策略包路径与签名路径**必须显式配置**（不做默认兜底）；
+        2. Capability TTL 必须落在 30–900s、准备单 TTL 必须落在 300s–7d——
+           越界直接拒绝启动，防止运行期突破 SPEC 6.2 上限；
+        3. 生产环境必须配置 Ed25519 私钥（策略包签名）与公钥（验签），
+           否则 PDP 没有可信策略可用（FR-30：启动与热切换前强制验签）。
+        """
+        if not self.policy_package_path.strip():
+            raise ProductionConfigError("ETL_AGENT_POLICY_PACKAGE_PATH 未配置（FR-30）")
+        if not self.policy_package_signature_path.strip():
+            raise ProductionConfigError("ETL_AGENT_POLICY_PACKAGE_SIGNATURE_PATH 未配置（FR-30）")
+        if not CAPABILITY_TTL_SECONDS_MIN <= self.harness_capability_ttl_seconds <= CAPABILITY_TTL_SECONDS_MAX:
+            raise ProductionConfigError(
+                f"ETL_AGENT_HARNESS_CAPABILITY_TTL_SECONDS 必须为 "
+                f"{CAPABILITY_TTL_SECONDS_MIN}–{CAPABILITY_TTL_SECONDS_MAX} 秒（FR-33），"
+                f"当前为 {self.harness_capability_ttl_seconds}"
+            )
+        if not (
+            PREPARATION_TTL_SECONDS_MIN
+            <= self.harness_preparation_ttl_seconds
+            <= PREPARATION_TTL_SECONDS_MAX
+        ):
+            raise ProductionConfigError(
+                f"ETL_AGENT_HARNESS_PREPARATION_TTL_SECONDS 必须为 "
+                f"{PREPARATION_TTL_SECONDS_MIN}–{PREPARATION_TTL_SECONDS_MAX} 秒（FR-31），"
+                f"当前为 {self.harness_preparation_ttl_seconds}"
+            )
+        if self.is_production:
+            if len(self.harness_signing_key_hex.strip()) != HARNESS_KEY_HEX_LENGTH:
+                raise ProductionConfigError(
+                    "ENV=prod 必须配置 ETL_AGENT_HARNESS_SIGNING_KEY_HEX（Ed25519 32 字节 hex，FR-30）"
+                )
+            if not self.harness_public_key_list:
+                raise ProductionConfigError(
+                    "ENV=prod 必须配置 ETL_AGENT_HARNESS_PUBLIC_KEYS（Ed25519 32 字节 hex，FR-30）"
+                )
 
     def validate_bootstrap(self) -> None:
         """Bootstrap 配置校验（FR-01）：启用时 Token 必须 ≥32 字节。

@@ -1,0 +1,82 @@
+{
+  "version": "harness-v2-20260808",
+  "rules": [
+    {
+      "rule_id": "HARNESS-P0-CROSS-PROJECT",
+      "version": "1",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "rule_id": "HARNESS-P0-DESTRUCTIVE-OP",
+      "version": "1",
+      "enabled": true,
+      "params": {
+        "required_approvals": 2
+      }
+    },
+    {
+      "rule_id": "HARNESS-P0-PLAINTEXT-CREDENTIAL",
+      "version": "1",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "rule_id": "HARNESS-P0-SECRET-EXFIL",
+      "version": "1",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "rule_id": "HARNESS-P1-BUDGET-EXCEED",
+      "version": "1",
+      "enabled": true,
+      "params": {
+        "max_records": 10000000,
+        "max_bytes": 10737418240,
+        "max_duration_seconds": 3600
+      }
+    },
+    {
+      "rule_id": "HARNESS-P1-SENSITIVE-EXPORT",
+      "version": "1",
+      "enabled": true,
+      "params": {
+        "sensitive_levels": [
+          "RESTRICTED",
+          "SECRET"
+        ]
+      }
+    },
+    {
+      "rule_id": "HARNESS-P2-SCHEMA-MISMATCH",
+      "version": "1",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "rule_id": "HARNESS-P2-WRITE-PROD",
+      "version": "1",
+      "enabled": true,
+      "params": {
+        "environments": [
+          "prod"
+        ]
+      }
+    },
+    {
+      "rule_id": "HARNESS-P3-ROUTINE",
+      "version": "1",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "host_whitelist": [
+    "api.openai.com",
+    "api.deepseek.com",
+    "ark.cn-beijing.volces.com",
+    "api.moonshot.cn",
+    "open.bigmodel.cn"
+  ],
+  "package_sha256": "382fb15625383e0c573c5cc6816540d240e1df7859a2e726cd7c6de778816a41"
+}
