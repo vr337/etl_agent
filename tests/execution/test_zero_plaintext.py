@@ -3,6 +3,7 @@
 覆盖：API-11/12/14 响应体、执行事件流消息、质量报告诊断都不含连接口令与
 HOCON 正文；出参模型字段集合固定（无自由文本正文位）。
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,9 @@ CONTRACT = {"valid_sink": "orders_wide_shadow", "error_sink": "orders_wide_error
 
 
 async def test_zero_plaintext_execution_responses(
-    app: FastAPI, db_session: AsyncSession, seeded: SeededWorkspace,
+    app: FastAPI,
+    db_session: AsyncSession,
+    seeded: SeededWorkspace,
     seeded_execution: SeededExecution,
 ) -> None:
     """AC-02：触发 / 查询 / 质量报告三类响应均无连接口令。"""

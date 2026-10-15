@@ -15,6 +15,7 @@ attempt_number / seatunnel_job_id）/ ADR-06 消费侧幂等
 `harness_preparation_id` 在一运行一准备单的唯一约束下，不存在"旧令牌复用重试"，
 重试必须重新 prepare→approve→commit（那才签发新单次令牌）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -45,9 +46,7 @@ async def next_attempt_number(session: AsyncSession, retry_of_run_id: uuid.UUID)
     return count + 2  # 头运行自身 attempt_number=1，首个重试=2
 
 
-async def build_retry_context(
-    session: AsyncSession, run: ExecutionRun
-) -> dict[str, object]:
+async def build_retry_context(session: AsyncSession, run: ExecutionRun) -> dict[str, object]:
     """为重试运行构造追溯上下文（API-11 重试入参装配，FR-42）。
 
     Returns:

@@ -64,6 +64,17 @@ CAPABILITY_HANDOFF_KEY_PREFIX = "harness:capability"
 # OTel 导出超时 10s（SPEC 8「可观测」）
 OTEL_EXPORT_TIMEOUT_SECONDS_DEFAULT = 10
 
+# ---- S8 质量发布与运行时监督（SPEC 3.2 M-K/M-L / 8「性能 · 运行时预算硬上限」）----
+# 监督快照周期 10s（与心跳同频，提示词 §8.5）
+SUPERVISION_INTERVAL_SECONDS_DEFAULT = 10
+# 回滚制品到期清理扫描 3600s（与凭据告警同频，FR-48）
+ROLLBACK_CLEANUP_SCAN_INTERVAL_SECONDS_DEFAULT = 3600
+# 外部减损动作重试预算默认 3 次（提示词 §8.9）
+EXTERNAL_MITIGATION_MAX_ATTEMPTS_DEFAULT = 3
+# 回滚制品保留期默认 7 天、容量预警阈值默认 20（SPEC 5.2 / FR-48）
+ROLLBACK_RETENTION_DAYS_DEFAULT = 7
+ROLLBACK_CAPACITY_WARN_THRESHOLD_DEFAULT = 20
+
 
 class ProductionConfigError(RuntimeError):
     """生产配置缺失或不合法：启动即拒绝（AC-11）。
@@ -172,6 +183,13 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = ""
     otel_export_timeout_seconds: int = OTEL_EXPORT_TIMEOUT_SECONDS_DEFAULT
+
+    # ---- M-K/M-L 质量发布与运行时监督（S8：FR-43~48）----
+    supervision_interval_seconds: int = SUPERVISION_INTERVAL_SECONDS_DEFAULT
+    rollback_cleanup_scan_interval_seconds: int = ROLLBACK_CLEANUP_SCAN_INTERVAL_SECONDS_DEFAULT
+    external_mitigation_max_attempts: int = EXTERNAL_MITIGATION_MAX_ATTEMPTS_DEFAULT
+    rollback_retention_days: int = ROLLBACK_RETENTION_DAYS_DEFAULT
+    rollback_capacity_warn_threshold: int = ROLLBACK_CAPACITY_WARN_THRESHOLD_DEFAULT
 
     @property
     def resolved_database_url(self) -> str:
@@ -294,6 +312,10 @@ class Settings(BaseSettings):
         2. misfire 宽限必须为正（FR-40：默认 120s，非正宽限使「错过」判定永假）；
         3. SeaTunnel 引擎地址必填（执行面唯一出口，ADR-01：Worker 只认受管指令打到的引擎）；
         4. OTel 启用时端点必填（FR-60：开关开而不配置端点等于静默丢弃遥测）。
+
+        S8 追加：监督快照 / 回滚清理扫描间隔同为周期任务间隔（同规则必须为正数），
+        外部减损动作重试预算与回滚保留期 / 容量阈值也必须为正（非正预算会让重试与
+        阈值判定失去意义）。
         """
         positive: list[tuple[str, int]] = [
             ("ETL_AGENT_WORKER_HEARTBEAT_INTERVAL_SECONDS", self.worker_heartbeat_interval_seconds),
@@ -311,6 +333,20 @@ class Settings(BaseSettings):
             ("ETL_AGENT_SEATUNNEL_CHECK_TIMEOUT_SECONDS", self.seatunnel_check_timeout_seconds),
             ("ETL_AGENT_CAPABILITY_HANDOFF_TTL_SECONDS", self.capability_handoff_ttl_seconds),
             ("ETL_AGENT_OTEL_EXPORT_TIMEOUT_SECONDS", self.otel_export_timeout_seconds),
+            ("ETL_AGENT_SUPERVISION_INTERVAL_SECONDS", self.supervision_interval_seconds),
+            (
+                "ETL_AGENT_ROLLBACK_CLEANUP_SCAN_INTERVAL_SECONDS",
+                self.rollback_cleanup_scan_interval_seconds,
+            ),
+            (
+                "ETL_AGENT_EXTERNAL_MITIGATION_MAX_ATTEMPTS",
+                self.external_mitigation_max_attempts,
+            ),
+            ("ETL_AGENT_ROLLBACK_RETENTION_DAYS", self.rollback_retention_days),
+            (
+                "ETL_AGENT_ROLLBACK_CAPACITY_WARN_THRESHOLD",
+                self.rollback_capacity_warn_threshold,
+            ),
         ]
         invalid = [f"{name}={value}" for name, value in positive if value <= 0]
         if invalid:

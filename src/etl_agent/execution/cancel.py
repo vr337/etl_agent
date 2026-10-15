@@ -9,6 +9,7 @@ S7 边界：取消**申请与确认**在本模块（RUNNING→CANCELLING 记录�
 （CANCEL_EXECUTION，API-13 属 S8），本模块不提供 HTTP 端点——
 控制面只实现状态推进与原因留痕（提示词 §8.2：S7 不做监督硬中断）。
 """
+
 from __future__ import annotations
 
 import uuid

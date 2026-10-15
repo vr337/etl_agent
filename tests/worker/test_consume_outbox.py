@@ -79,7 +79,7 @@ async def test_consume_outbox_happy_path(
     assert run.status == execution_service.STATUS_SUCCEEDED
     assert run.seatunnel_job_id == "seatunnel-job-1"
     assert run.engine_status == "FINISHED"
-    assert run.source_rows == 10 and run.sink_rows == 9
+    assert run.source_rows == 1000 and run.sink_rows == 900
 
     # 令牌已消费（Replay Guard 事实落库，禁止事项 18）
     grant = await db_session.get(HarnessCapabilityGrant, seeded_execution.token_id)
@@ -89,7 +89,7 @@ async def test_consume_outbox_happy_path(
     outbox = await db_session.get(HarnessCommandOutbox, seeded_execution.outbox_id)
     assert outbox is not None and outbox.status == "SENT"
 
-    # 质量报告落库（PASSED：拒绝率 10% 未超阈值）
+    # 质量报告落库（PASSED：拒绝率 10% 未超阈值，且样本量 >= 最低质量行数 100）
     report = (
         (await db_session.execute(select(QualityReport).where(QualityReport.run_id == run.id)))
         .scalars()
@@ -97,7 +97,7 @@ async def test_consume_outbox_happy_path(
     )
     assert report is not None
     assert report.status == STATUS_PASSED
-    assert report.total_rows == 10 and report.rejected_rows == 1
+    assert report.total_rows == 1000 and report.rejected_rows == 100
     assert report.valid_sink == "orders_wide_shadow"
     assert report.error_sink == "orders_wide_error"
 

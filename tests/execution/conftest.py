@@ -7,6 +7,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.2 章 execution_runs / 第 6.
 `seeded_execution`（tests/conftest.py）提供「已 Commit 的完整事实链」；本文件只补
 「同一版本可建多条运行」的工厂与职责分配，避免每个用例重复拼装治理事实。
 """
+
 from __future__ import annotations
 
 import uuid

@@ -1,7 +1,7 @@
-"""Celery 应用与 Beat 计划用例（T-13.1 / T-14.1 / FR-35/38/40 / FR-10）。
+"""Celery 应用与 Beat 计划用例（T-13.1 / T-14.1 / T-16.x / FR-35/38/40/45/48 / FR-10）。
 
 覆盖：可靠性三件套（acks_late / prefetch=1 / reject_on_worker_lost）、
-四类周期任务的注册名与周期、任务注册完整性。
+六类周期任务的注册名与周期（S7 四类 + S8 监督 / 到期清理两类）、任务注册完整性。
 """
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ from etl_agent.worker import app as worker_app
 from etl_agent.worker.beat_schedule import (
     TASK_CREDENTIAL_SCAN,
     TASK_HEARTBEAT,
+    TASK_ROLLBACK_CLEANUP_SCAN,
     TASK_SCAN_OUTBOX,
     TASK_SCHEDULE_SCAN,
+    TASK_SUPERVISE,
 )
 
 
@@ -32,18 +34,27 @@ def test_serialization_and_timezone() -> None:
     assert conf.timezone == "Asia/Shanghai"
 
 
-def test_beat_schedule_has_four_tasks() -> None:
-    """四类周期任务就位，注册名与任务模块一致（SPEC 4.3）。"""
+def test_beat_schedule_has_six_tasks() -> None:
+    """六类周期任务就位（S7 四类 + S8 监督 / 回滚清理），注册名与任务模块一致。"""
     schedule = worker_app.conf.beat_schedule
-    assert set(schedule) == {"outbox-scan", "worker-heartbeat", "credential-scan", "schedule-scan"}
+    assert set(schedule) == {
+        "outbox-scan",
+        "worker-heartbeat",
+        "credential-scan",
+        "schedule-scan",
+        "supervise",
+        "rollback-cleanup-scan",
+    }
     assert schedule["outbox-scan"]["task"] == TASK_SCAN_OUTBOX
     assert schedule["worker-heartbeat"]["task"] == TASK_HEARTBEAT
     assert schedule["credential-scan"]["task"] == TASK_CREDENTIAL_SCAN
     assert schedule["schedule-scan"]["task"] == TASK_SCHEDULE_SCAN
+    assert schedule["supervise"]["task"] == TASK_SUPERVISE
+    assert schedule["rollback-cleanup-scan"]["task"] == TASK_ROLLBACK_CLEANUP_SCAN
 
 
 def test_beat_intervals_match_config() -> None:
-    """周期取自配置（默认 2s / 10s / 3600s / 30s，SPEC 4.3 表）。"""
+    """周期取自配置（默认 2s / 10s / 3600s / 30s / 10s / 3600s，SPEC 4.3 表）。"""
     schedule = worker_app.conf.beat_schedule
     assert schedule["outbox-scan"]["schedule"].run_every.total_seconds() == (
         default_settings.outbox_scan_interval_seconds
@@ -57,16 +68,27 @@ def test_beat_intervals_match_config() -> None:
     assert schedule["schedule-scan"]["schedule"].run_every.total_seconds() == (
         default_settings.scheduler_scan_interval_seconds
     )
+    assert schedule["supervise"]["schedule"].run_every.total_seconds() == (
+        default_settings.supervision_interval_seconds
+    )
+    assert schedule["rollback-cleanup-scan"]["schedule"].run_every.total_seconds() == (
+        default_settings.rollback_cleanup_scan_interval_seconds
+    )
     assert default_settings.outbox_scan_interval_seconds == 2
     assert default_settings.worker_heartbeat_interval_seconds == 10
     assert default_settings.credential_scan_interval_seconds == 3600
     assert default_settings.scheduler_scan_interval_seconds == 30
+    assert default_settings.supervision_interval_seconds == 10
+    assert default_settings.rollback_cleanup_scan_interval_seconds == 3600
 
 
-def test_all_four_tasks_registered() -> None:
+def test_all_six_tasks_registered() -> None:
     """任务模块导入即注册（Beat 以注册名派发，缺一个就是静默不跑）。"""
     registered = set(worker_app.tasks)
     assert TASK_SCAN_OUTBOX in registered
     assert TASK_HEARTBEAT in registered
     assert TASK_CREDENTIAL_SCAN in registered
     assert TASK_SCHEDULE_SCAN in registered
+    assert TASK_SUPERVISE in registered
+    assert TASK_ROLLBACK_CLEANUP_SCAN in registered
+

@@ -11,6 +11,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-11/12/14 / 第 6.2 
 **不在 API 进程内执行引擎调用**（SPEC 3.2：Worker 才是执行通道）。
 派发失败不阻塞响应：返回 `dispatched=false`，由 Beat 周期兜底领取（FR-35 至少一次投递）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -83,9 +84,7 @@ def _run_view(run: ExecutionRun) -> ExecutionRunView:
 
 def _dispatch_scan(request: Request) -> bool:
     """派发一次即时 Outbox 扫描（失败不抛出：Beat 周期兜底，FR-35）。"""
-    dispatcher: Callable[[], None] | None = getattr(
-        request.app.state, "execution_dispatcher", None
-    )
+    dispatcher: Callable[[], None] | None = getattr(request.app.state, "execution_dispatcher", None)
     try:
         (dispatcher or _celery_dispatch)()
         return True
@@ -130,7 +129,9 @@ async def trigger_execution(
     if "OPERATOR" not in actor.harness_roles:
         raise RoleRequired("需要 Harness 职责: OPERATOR（API-11 仅操作员可触发执行）")
     if payload.trigger not in ALLOWED_TRIGGERS:
-        raise ValidationError(f"trigger 取值非法：{payload.trigger!r}，可选 {sorted(ALLOWED_TRIGGERS)}")
+        raise ValidationError(
+            f"trigger 取值非法：{payload.trigger!r}，可选 {sorted(ALLOWED_TRIGGERS)}"
+        )
 
     preparation = await _load_preparation(session, payload.preparation_id, project_id)
     if preparation.status != STATUS_COMMITTED:
@@ -202,11 +203,7 @@ async def get_quality_report(
     run, project_id = await execution_service.load_run_project(session, run_id)
     await require_actor_for_project(request, session, project_id)
     report = (
-        (
-            await session.execute(
-                select(QualityReport).where(QualityReport.run_id == run.id)
-            )
-        )
+        (await session.execute(select(QualityReport).where(QualityReport.run_id == run.id)))
         .scalars()
         .first()
     )

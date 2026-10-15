@@ -1,18 +1,22 @@
-"""M-J/M-K 执行 Worker — Celery Beat 周期任务配置（4 类，SPEC 4.3）。
+"""M-J/M-K/M-L 执行 Worker — Celery Beat 周期任务配置（6 类，SPEC 4.3）。
 
 SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 4.3 章进程与入口 / 第 8 章「高可用」行
-覆盖 FR：FR-38（Worker 心跳 10s）、FR-10（凭据告警扫描 3600s）、FR-40（调度扫描 30s）、FR-35（Outbox 扫描 2s）
-对应 AC：AC-06（Beat 调度就位；部署形态单实例，Q11/S-Q3 待决议多实例）
+覆盖 FR：FR-38（Worker 心跳 10s）、FR-10（凭据告警扫描 3600s）、FR-40（调度扫描 30s）、
+FR-35（Outbox 扫描 2s）、FR-45（监督快照 10s）、FR-48（回滚制品到期清理 3600s）
+对应 AC：AC-06（Beat 调度就位；部署形态单实例，Q11/S-Q3 待决议多实例）、
+AC-08（监督周期 + 到期清理周期）
 
-四类周期任务（SPEC 4.3 Beat 行）：
+六类周期任务（SPEC 4.3 Beat 行 + S8 新增 2 项）：
 | 任务 | 周期 | 来源 |
 |------|------|------|
 | Outbox 扫描 / 执行推进 | 2s | FR-35 / ADR-06 |
 | Worker 心跳 | 10s | FR-38 |
 | 凭据告警扫描 | 3600s | FR-10 |
 | 调度扫描 | 30s | FR-40 |
+| 监督快照 | 10s | FR-45（S8） |
+| 回滚制品到期清理扫描 | 3600s | FR-48（S8） |
 
-周期取自 `config.py` 的 S7 配置（`ETL_AGENT_*_INTERVAL_SECONDS`），启动期由
+周期取自 `config.py` 的 S7/S8 配置（`ETL_AGENT_*_INTERVAL_SECONDS`），启动期由
 `validate_worker()` 保证为正数——零 / 负间隔会让任务永不触发或忙轮询。
 
 任务以**注册名**（字符串）装配而非导入函数对象：Beat 与 Worker 是不同进程，
@@ -34,6 +38,8 @@ TASK_SCAN_OUTBOX = "worker.scan_outbox"
 TASK_HEARTBEAT = "worker.heartbeat"
 TASK_CREDENTIAL_SCAN = "worker.credential_scan"
 TASK_SCHEDULE_SCAN = "worker.schedule_scan"
+TASK_SUPERVISE = "worker.supervise"
+TASK_ROLLBACK_CLEANUP_SCAN = "worker.rollback_cleanup_scan"
 
 app.conf.beat_schedule = {
     "outbox-scan": {
@@ -52,11 +58,21 @@ app.conf.beat_schedule = {
         "task": TASK_SCHEDULE_SCAN,
         "schedule": celery_schedule(run_every=settings.scheduler_scan_interval_seconds),
     },
+    "supervise": {
+        "task": TASK_SUPERVISE,
+        "schedule": celery_schedule(run_every=settings.supervision_interval_seconds),
+    },
+    "rollback-cleanup-scan": {
+        "task": TASK_ROLLBACK_CLEANUP_SCAN,
+        "schedule": celery_schedule(run_every=settings.rollback_cleanup_scan_interval_seconds),
+    },
 }
 
 __all__ = [
     "TASK_CREDENTIAL_SCAN",
     "TASK_HEARTBEAT",
+    "TASK_ROLLBACK_CLEANUP_SCAN",
     "TASK_SCAN_OUTBOX",
     "TASK_SCHEDULE_SCAN",
+    "TASK_SUPERVISE",
 ]

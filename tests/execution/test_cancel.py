@@ -3,6 +3,7 @@
 覆盖：RUNNING/SUBMITTED → CANCELLING → CANCELLED、取消原因留痕、重复申请幂等、
 终态 / QUEUED 不可取消、确认取消的前置状态校验。
 """
+
 from __future__ import annotations
 
 import pytest

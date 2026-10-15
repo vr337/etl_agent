@@ -8,6 +8,7 @@ execution_events、quality_reports / 第 6.4 章错误码
 红线：出参**只回治理事实与聚合指标**——不含 HOCON 正文、不含凭据、不含业务数据。
 监督快照（S8 落 `runtime_supervision_snapshots`）在 S7 恒为 None：本阶段不做监督。
 """
+
 from __future__ import annotations
 
 import uuid

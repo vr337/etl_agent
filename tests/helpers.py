@@ -233,14 +233,16 @@ class FakeSeaTunnelClient:
         self._statuses = list(statuses or ["FINISHED"])
         self._check_ok = check_ok
         self._job_id = job_id
+        # 默认样本量 >= SPEC 5.2 冻结预算的「最低质量行数 100」——
+        # 样本不足 100 行按 INCOMPLETE 处理（判不了通过），故 happy path 必须用足量样本
         self.metrics: dict[str, object] = {
-            "source_rows": 10,
-            "sink_rows": 9,
-            "source_bytes": 1024,
-            "sink_bytes": 900,
-            "tables": [{"table": "orders_wide", "rows": 9, "bytes": 900}],
-            "quality": {"total_rows": 10, "passed_rows": 9, "rejected_rows": 1,
-                        "error_codes": {"NULL_ID": 1}},
+            "source_rows": 1000,
+            "sink_rows": 900,
+            "source_bytes": 102_400,
+            "sink_bytes": 90_000,
+            "tables": [{"table": "orders_wide", "rows": 900, "bytes": 90_000}],
+            "quality": {"total_rows": 1000, "passed_rows": 900, "rejected_rows": 100,
+                        "error_codes": {"NULL_ID": 100}},
         }
 
     async def submit_job(self, hocon: str, *, job_name: str = "") -> str:

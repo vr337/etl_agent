@@ -7,6 +7,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.2 章 execution_events / 第 
 只读查询：事件的写入在 `execution.service.record_event`（与状态迁移同事务），
 本模块只提供按运行列举的事件序列（按 occurred_at 升序）。
 """
+
 from __future__ import annotations
 
 import uuid

@@ -3,6 +3,7 @@
 覆盖：`CREATE TABLE <target>_shadow LIKE <target>` DDL 正确、幂等创建、
 **S7 不做原子 Swap**（禁止事项 16：Swap 属 S8）。
 """
+
 from __future__ import annotations
 
 import ast

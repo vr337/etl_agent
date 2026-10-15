@@ -13,6 +13,7 @@ PASSED 之后由监督链路触发）。
 （经 Doris FE MySQL 协议执行 DDL）。目标端 Doris 是否可用由部署决定，
 控制面不猜测——不可用时执行失败可观测（BIZ_503 家族由调用方映射）。
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
