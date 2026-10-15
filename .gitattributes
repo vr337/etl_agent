@@ -1,0 +1,27 @@
+# 冻结制品以「字节精确」为契约：禁止任何换行转换
+#
+# 背景（S10 前置检查发现，跨 S9 缺陷）：`benchmarks/**` 下的制品由 manifest.json 以
+# SHA256 冻结校验（SPEC 3.2 M-M / S9 禁止事项 15）。Windows 上 `core.autocrlf=true`
+# 会把检出后的 LF 转成 CRLF，令工作区字节与冻结哈希不符 →
+# `load_suite` 抛 BenchmarkStateConflict，任何 Windows 全新克隆都会失败。
+# 故对冻结制品**强制 LF 且不转换**（`-text`），使「仓库字节 == 工作区字节 == 哈希输入」。
+benchmarks/** -text
+
+# 其余文本统一 LF 落库（避免同类平台差异扩散）；工作区换行由各人 autocrlf 决定
+*.py   text eol=lf
+*.md   text eol=lf
+*.ts   text eol=lf
+*.vue  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ps1  text eol=crlf
+*.sql  text eol=lf
+
+# 二进制：不做任何处理
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
