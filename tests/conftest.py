@@ -38,7 +38,9 @@ from etl_agent.infrastructure.models import (
 )
 from etl_agent.infrastructure.redis_client import close_redis_client
 from tests.helpers import (
+    S7_TEST_HOCON,
     SAMPLE_EMAILS,
+    SeededExecution,
     SeededWorkspace,
     attach_harness_services,
     build_test_app,
@@ -384,3 +386,162 @@ async def profile_source_table(db_session: AsyncSession) -> AsyncIterator[str]:
         await db_session.rollback()
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP TABLE IF EXISTS public."{table}"'))
+
+
+# ============================================================
+# S7：执行 / 调度 / 可观测用例的共享夹具
+# ============================================================
+
+
+@pytest.fixture
+async def seeded_execution(
+    db_session: AsyncSession,
+    seeded: SeededWorkspace,
+    seeded_connection: tuple,
+    frozen_version: tuple[uuid.UUID, str],
+) -> SeededExecution:
+    """构造「已授权、待执行」的完整事实链（不经过 HTTP，便于 Worker 用例直接驱动）。
+
+    事实链与 `CommitService` 的产出同构（SPEC 5.2 / FR-33/35）：
+    准备单 COMMITTED → 单次 Capability（库中只存 token_sha256）→ ExecutionRun(QUEUED)
+    → Outbox(PENDING) → 令牌本体写入交接通道。
+
+    令牌本体只存在于返回值与交接通道，业务库中只有摘要——这正是 AC-02/AC-05 的红线，
+    故夹具不允许「把令牌塞进 payload」的写法。
+    """
+    from etl_agent.harness.capability.issuer import CapabilityClaims, CapabilityIssuer
+    from etl_agent.harness.side_effects.registry import MAIN_EXECUTION_COMMAND
+    from etl_agent.infrastructure.models import (
+        ExecutionPreparation,
+        ExecutionRun,
+        HarnessCapabilityGrant,
+        HarnessCommandOutbox,
+        HarnessPolicyDecision,
+    )
+    from etl_agent.worker.capability_handoff import InMemoryCapabilityHandoff
+
+    connection, _settings = seeded_connection
+    version_id, artifact_sha256 = frozen_version
+    project_id = seeded.project_a_id
+
+    decision = HarnessPolicyDecision(
+        project_id=project_id,
+        outcome="ALLOW",
+        risk_level="P3",
+        rule_evidence=[],
+        policy_package_id="test-package",
+        policy_package_sha256="0" * 64,
+    )
+    db_session.add(decision)
+    await db_session.flush()
+
+    contract = {"max_records": 1000, "warning_ratio": 0.8}
+    preparation = ExecutionPreparation(
+        project_id=project_id,
+        policy_decision_id=decision.id,
+        pipeline_version_id=version_id,
+        status="COMMITTED",
+        risk_level="P3",
+        environment="dev",
+        tool_name="pipeline.execute",
+        tool_version="1.0.0",
+        artifact_sha256=artifact_sha256,
+        input_fingerprint="a" * 64,
+        resource_fingerprint="b" * 64,
+        impact_report={"requested_input": {"side_effect_type": None, "resource_ids": []}},
+        rollback_plan={},
+        supervision_contract=contract,
+        required_roles=[],
+        required_approvals=0,
+        idempotency_key=f"s7-{uuid.uuid4().hex[:8]}",
+        requested_by=seeded.engineer_a_user_id,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(preparation)
+    await db_session.flush()
+
+    issuer = CapabilityIssuer(make_settings().harness_signing_key_hex)
+    claims = CapabilityClaims(
+        tool_name="pipeline.execute",
+        tool_version="1.0.0",
+        subject=str(seeded.engineer_a_user_id),
+        environment="dev",
+        artifact_sha256=artifact_sha256,
+        supervision_contract_sha256="c" * 64,
+        classification_report_sha256="d" * 64,
+        allowed_mitigations=["CANCEL", "PAUSE"],
+        project_id=str(project_id),
+        preparation_id=str(preparation.id),
+        pipeline_version_id=str(version_id),
+    )
+    capability = issuer.issue(claims, now=datetime.now(UTC), ttl_seconds=300)
+
+    run = ExecutionRun(
+        pipeline_version_id=version_id,
+        harness_preparation_id=preparation.id,
+        idempotency_key=f"commit-{preparation.id}",
+        status="QUEUED",
+        trigger="MANUAL",
+        supervision_contract_sha256="c" * 64,
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    db_session.add(
+        HarnessCapabilityGrant(
+            token_id=capability.token_id,
+            preparation_id=preparation.id,
+            run_id=run.id,
+            token_sha256=capability.token_sha256,
+            claims=capability.claims,
+            expires_at=capability.expires_at,
+        )
+    )
+    outbox = HarnessCommandOutbox(
+        project_id=project_id,
+        command_type=MAIN_EXECUTION_COMMAND,
+        payload={
+            "project_id": str(project_id),
+            "preparation_id": str(preparation.id),
+            "run_id": str(run.id),
+            "token_id": str(capability.token_id),
+            "claims": capability.claims,
+            "allowed_mitigations": capability.claims["allowed_mitigations"],
+        },
+        status="PENDING",
+        retry_count=0,
+    )
+    db_session.add(outbox)
+    await db_session.flush()
+
+    handoff = InMemoryCapabilityHandoff()
+    await handoff.publish(capability.token_id, capability.token, 300)
+
+    plan: dict[str, object] = {
+        "pipeline_name": "orders_wide",
+        "source": {"connector_type": "POSTGRESQL", "connection_id": str(connection.id), "table": "orders"},
+        "sink": {
+            "connector_type": "POSTGRESQL",
+            "connection_id": str(connection.id),
+            "table": "orders_wide",
+        },
+        "quality_contract": {
+            "valid_sink": "orders_wide_shadow",
+            "error_sink": "orders_wide_error",
+            "predicates": [{"name": "not_null_id", "expression": "id IS NOT NULL"}],
+        },
+    }
+    return SeededExecution(
+        project_id=project_id,
+        version_id=version_id,
+        preparation_id=preparation.id,
+        run_id=run.id,
+        outbox_id=outbox.id,
+        token_id=capability.token_id,
+        token=capability.token,
+        connection_id=connection.id,
+        plan=plan,
+        hocon=S7_TEST_HOCON,
+        handoff=handoff,
+    )
+

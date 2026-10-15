@@ -39,6 +39,9 @@ services:
       timeout: 5s
       retries: 10
   # ============ S7：控制面 API 容器化 ============
+  # 容器内寻址覆盖：`infra/.env` 是**开发主机**口径（PG/Redis 在 localhost），
+  # 容器网络里必须按 compose 服务名解析，故此处以 `environment` 覆盖（env_file 先加载、
+  # environment 后覆盖）。这是 compose 侧的部署事实，不需要也不允许改 `infra/.env`。
   api:
     build:
       context: ..
@@ -46,6 +49,13 @@ services:
     container_name: etl_agent_api
     restart: unless-stopped
     env_file: .env
+    environment:
+      ETL_AGENT_POSTGRES_HOST: postgres
+      ETL_AGENT_POSTGRES_PORT: "5432"
+      ETL_AGENT_REDIS_HOST: redis
+      ETL_AGENT_REDIS_PORT: "6379"
+      ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
+      ETL_AGENT_FILE_ASSET_ROOT: /data/file-assets
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,6 +66,8 @@ services:
     profiles: ["app"]
 
   # ============ S7：Celery Worker ============
+  # 无容器级 healthcheck：Worker 存活由 `worker_heartbeats`（10s 上报 / 35s 判失活）
+  # 与 `/health` 的 Worker 摘要承载（FR-38）——那是比 `pgrep` 更可信的业务级信号。
   worker:
     build:
       context: ..
@@ -64,6 +76,13 @@ services:
     restart: unless-stopped
     command: uv run celery -A etl_agent.worker worker --loglevel=info
     env_file: .env
+    environment:
+      ETL_AGENT_POSTGRES_HOST: postgres
+      ETL_AGENT_POSTGRES_PORT: "5432"
+      ETL_AGENT_REDIS_HOST: redis
+      ETL_AGENT_REDIS_PORT: "6379"
+      ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
+      ETL_AGENT_FILE_ASSET_ROOT: /data/file-assets
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,20 +101,43 @@ services:
     restart: unless-stopped
     command: uv run celery -A etl_agent.worker beat --loglevel=info
     env_file: .env
+    environment:
+      ETL_AGENT_POSTGRES_HOST: postgres
+      ETL_AGENT_POSTGRES_PORT: "5432"
+      ETL_AGENT_REDIS_HOST: redis
+      ETL_AGENT_REDIS_PORT: "6379"
+      ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
     depends_on:
       redis:
         condition: service_healthy
     profiles: ["exec"]
 
   # ============ S7：SeaTunnel Zeta ============
+  # 启动命令与挂载路径按镜像实测对齐（flowpilot/seatunnel:2.3.13）：
+  # - 镜像默认 CMD 是 `bash`，不指定 command 会立即退出并进入 restart 循环；
+  #   `bin/seatunnel-cluster.sh`（前台）启动 master+worker 单节点并监听 REST :8080；
+  # - 镜像配置目录是 `/opt/seatunnel/config`（不是 `conf`），挂载点必须写对，
+  #   否则挂了个没人读的空目录（配置静默不生效）。
+  # healthcheck 用镜像自带的 python3（镜像内无 curl/wget）。
   seatunnel:
     image: flowpilot/seatunnel:2.3.13
     container_name: etl_agent_seatunnel
     restart: unless-stopped
+    command: ["bin/seatunnel-cluster.sh"]
     ports:
       - "8080:8080"
     volumes:
-      - ./seatunnel/conf:/opt/seatunnel/conf:rw
+      - ./seatunnel/conf:/opt/seatunnel/config:rw
       - ./seatunnel/plugins:/opt/seatunnel/plugins:ro
       - D:/Documents/Docker/volume/app/etl_agent/file_assets:/data/file-assets:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/', timeout=5).status == 200 else 1)\"",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     profiles: ["exec", "e2e"]

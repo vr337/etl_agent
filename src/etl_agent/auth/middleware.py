@@ -44,7 +44,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in PUBLIC_PATHS or not path.startswith(API_PREFIX):
             return await call_next(request)
 
-        trace_id = uuid.uuid4().hex
+        # trace_id 沿用外层可观测中间件（S7 起由 TraceIdMiddleware 统一生成）已写入的值：
+        # 此处再生成一个会让「响应头的 trace_id」与「错误体里的 trace_id」不一致——
+        # 链路日志与用户报障就对不上了。未装可观测中间件时才自行兜底生成。
+        trace_id = getattr(request.state, "trace_id", None) or uuid.uuid4().hex
         request.state.trace_id = trace_id
         try:
             subject = await self._authenticate(request)

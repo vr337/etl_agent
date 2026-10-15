@@ -17,6 +17,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp",
+    "opentelemetry-instrumentation-celery",
     "opentelemetry-instrumentation-fastapi",
     "opentelemetry-instrumentation-httpx",
     "opentelemetry-instrumentation-sqlalchemy",
@@ -66,9 +67,16 @@ strict = true
 
 # 驱动/客户端库无类型存根（asyncpg / aiomysql / hvac）；strict 模式下跳过其类型检查
 # S4 追加：文件格式适配器依赖的 pyarrow / openpyxl / pdfplumber 同样无存根
+# S7 追加：Celery（Worker 应用与任务装饰器）与 PyYAML（占位符契约加载）同样无存根
 [[tool.mypy.overrides]]
-module = ["asyncpg", "aiomysql", "hvac", "pyarrow.*", "openpyxl.*", "pdfplumber.*"]
+module = ["asyncpg", "aiomysql", "hvac", "pyarrow.*", "openpyxl.*", "pdfplumber.*", "celery", "celery.*", "yaml"]
 ignore_missing_imports = true
+
+# S7 追加：Celery `@app.task` 装饰器与 OTel instrumentor 均无类型标注，
+# 其调用点已由运行期行为与测试覆盖，strict 下豁免这两类噪音（不影响业务代码的类型约束）
+[[tool.mypy.overrides]]
+module = ["etl_agent.worker.*", "etl_agent.observability.otel"]
+disable_error_code = ["untyped-decorator", "no-untyped-call"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

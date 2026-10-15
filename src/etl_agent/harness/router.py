@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.auth.actor_resolver import ActorContext
 from etl_agent.auth.dependencies import require_actor_for_project, require_project_member
+from etl_agent.config import Settings
 from etl_agent.harness import service as harness_service
 from etl_agent.harness.approve.service import ApproveService
 from etl_agent.harness.commit.service import CommitService
@@ -30,6 +31,7 @@ from etl_agent.harness.schemas import (
     PreparationResponse,
 )
 from etl_agent.infrastructure.database import get_session
+from etl_agent.worker.capability_handoff import CapabilityHandoff, RedisCapabilityHandoff
 
 router = APIRouter(prefix="/api/v1", tags=["harness"])
 
@@ -45,6 +47,23 @@ def _approve_service() -> ApproveService:
 
 def _commit_service(request: Request) -> CommitService:
     return cast("CommitService", request.app.state.commit_service)
+
+
+def _handoff(request: Request) -> CapabilityHandoff:
+    """取 Capability 交接通道（应用生命周期装配；测试应用按需现建）。
+
+    S7 起 Commit 必须把令牌本体交付到 Worker 通道：库中只存 `token_sha256`（FR-33），
+    令牌本体若只出现在 Commit 返回值里，Worker 永远拿不到——那是「授权了但执行不了」
+    的死路。通道写入失败即拒绝（`DependencyUnavailable`），**不降级为无令牌执行**
+    （那等于绕过 Replay Guard，FR-34 红线）。
+    """
+    existing = getattr(request.app.state, "capability_handoff", None)
+    if existing is not None:
+        return cast("CapabilityHandoff", existing)
+    settings = cast("Settings", request.app.state.settings)
+    return RedisCapabilityHandoff(
+        request.app.state.redis, key_prefix=settings.capability_handoff_key_prefix
+    )
 
 
 @router.post(
@@ -148,13 +167,20 @@ async def commit(
         session, preparation_id
     )
     actor = await require_actor_for_project(request, session, preparation)
-    result, _token = await _commit_service(request).commit(
+    result, token = await _commit_service(request).commit(
         session,
         preparation_id=preparation_id,
         project_id=preparation,
         operator=actor,
     )
     await session.commit()
+    # 令牌本体交付 Worker 通道（Redis 单次读，TTL 与令牌过期对齐，FR-33）。
+    # 必须在业务事务提交之后：先提交「已授权」事实，再交付令牌——顺序颠倒会出现
+    # 「Worker 拿到令牌但库里还没有准备单 COMMITTED」的窗口。
+    settings = cast("Settings", request.app.state.settings)
+    await _handoff(request).publish(
+        result.token_id, token, settings.capability_handoff_ttl_seconds
+    )
     return CommitResponse(
         token_id=result.token_id,
         preparation_id=result.preparation_id,
