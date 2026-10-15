@@ -45,6 +45,7 @@ dev = [
 etl-agent-api = "etl_agent.main:main"
 etl-agent-checkpoint-setup = "etl_agent.checkpoint_setup:main"
 etl-agent-scan-credentials = "etl_agent.secrets.expiry:main"
+etl-agent-benchmark = "etl_agent.benchmark.cli:main"
 
 [build-system]
 requires = ["hatchling"]

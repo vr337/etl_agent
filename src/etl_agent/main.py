@@ -21,9 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.auth.errors import AppError
 from etl_agent.auth.middleware import AuthMiddleware
+from etl_agent.benchmark.router import router as benchmark_router
 from etl_agent.config import Settings
 from etl_agent.config import settings as default_settings
 from etl_agent.connections.router import router as connections_router
+from etl_agent.evidence.router import router as evidence_router
 from etl_agent.execution.router import router as execution_router
 from etl_agent.files.router import router as file_assets_router
 from etl_agent.generation.checkpoint import open_checkpointer
@@ -43,6 +45,7 @@ from etl_agent.observability.otel import setup_otel, shutdown_otel
 from etl_agent.profiles.router import router as profiles_router
 from etl_agent.projects.router import router as projects_router
 from etl_agent.rollback.router import router as rollback_router
+from etl_agent.safety.router import router as safety_router
 from etl_agent.scheduling.router import router as scheduling_router
 from etl_agent.versions.router import router as versions_router
 from etl_agent.worker.capability_handoff import RedisCapabilityHandoff
@@ -72,6 +75,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.validate_harness()
     # 执行调度校验（FR-38/40：周期为正、SeaTunnel 地址必填、OTel 启用即需端点）
     settings.validate_worker()
+    # 审计证据与评测校验（S9：FR-36 检查点间隔、FR-50 P95 基准）
+    settings.validate_evidence()
 
     app.state.redis = create_redis_client(settings.resolved_redis_url)
     # Capability 交接通道（FR-33：令牌本体只经 Redis 单次读到达 Worker，不落业务库）
@@ -158,6 +163,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(execution_router)
     app.include_router(scheduling_router)
     app.include_router(rollback_router)
+    # S9：审计证据（M-N）与评测安全进化（M-M）
+    app.include_router(evidence_router)
+    app.include_router(benchmark_router)
+    app.include_router(safety_router)
     return app
 
 

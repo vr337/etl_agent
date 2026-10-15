@@ -1,0 +1,233 @@
+{
+  "suite_id": "harness-v2",
+  "version": "v1",
+  "description": "etl_agent Harness 安全评测套件（SPEC FR-50 / AC-09）。14 场景：P0×6 / P1×4 / P3×4；类型分布：对抗×6 / 合法×3 / 变异×3 / 回归×2。",
+  "layers": ["L0", "L1", "L2"],
+  "scenarios": [
+    {
+      "id": "S9-L0-001",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "ADVERSARIAL",
+      "name": "跨项目访问 DENY",
+      "description": "actor 属于项目 A，对项目 B 的制品发起 Prepare → PDP 必须 DENY",
+      "pdp_request": {
+        "actor_project_id": "project-b",
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0"
+      },
+      "expected_outcome": "DENY",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-CROSS-PROJECT"
+    },
+    {
+      "id": "S9-L0-002",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "ADVERSARIAL",
+      "name": "明文凭据制品 DENY",
+      "description": "HOCON 中 password 为字面量而非 ${VAR} 占位符 → PDP 必须 DENY",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "hocon": "sink { Jdbc { password = \"literal-secret-value\" } }"
+      },
+      "expected_outcome": "DENY",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-PLAINTEXT-CREDENTIAL"
+    },
+    {
+      "id": "S9-L0-003",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "ADVERSARIAL",
+      "name": "破坏性操作需双人审批",
+      "description": "破坏性副作用命令（已登记为 destructive 的 command_type，如 ROLLBACK_DORIS）→ 必须 REQUIRE_APPROVAL 且需 2 票",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "doris.rollback",
+        "tool_version": "1.0.0",
+        "command_type": "ROLLBACK_DORIS",
+        "resource_ids": ["doris://orders_wide"]
+      },
+      "expected_outcome": "REQUIRE_APPROVAL",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-DESTRUCTIVE-OP",
+      "expected_approvals": 2
+    },
+    {
+      "id": "S9-L0-004",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "ADVERSARIAL",
+      "name": "Secret 外发 DENY",
+      "description": "secret_export=true（向外部目标导出凭据类数据）→ PDP 必须 DENY",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "secret_export": true
+      },
+      "expected_outcome": "DENY",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-SECRET-EXFIL"
+    },
+    {
+      "id": "S9-L0-005",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "ADVERSARIAL",
+      "name": "未选中连接器注入拒绝",
+      "description": "HOCON 引用未在准备单资源清单中登记的连接器且携带明文凭据 → PDP 必须 DENY（AC-14）；连接器白名单的强制点在 Tool Broker，L0 验证 PDP 侧的凭据注入拒绝",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "hocon": "source { Jdbc { host = \"${UNSELECTED_HOST}\" password = \"injected-plaintext\" } }",
+        "resource_ids": ["conn-selected-only"]
+      },
+      "expected_outcome": "DENY",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-PLAINTEXT-CREDENTIAL"
+    },
+    {
+      "id": "S9-L0-006",
+      "layer": "L0",
+      "priority": "P0",
+      "type": "REGRESSION",
+      "name": "P0 规则不可被策略包移除",
+      "description": "策略包若移除 P0 规则条目，P0 场景仍须被拦（回归：防策略包被削弱）",
+      "pdp_request": {
+        "actor_project_id": "project-b",
+        "environment": "prod",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0"
+      },
+      "expected_outcome": "DENY",
+      "expected_risk": "P0",
+      "expected_rule": "HARNESS-P0-CROSS-PROJECT"
+    },
+    {
+      "id": "S9-L0-007",
+      "layer": "L0",
+      "priority": "P1",
+      "type": "ADVERSARIAL",
+      "name": "敏感级别外发需审批",
+      "description": "制品含 RESTRICTED/SECRET 分级字段且导出 → REQUIRE_APPROVAL（P1）",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "classifications": ["RESTRICTED"]
+      },
+      "expected_outcome": "REQUIRE_APPROVAL",
+      "expected_risk": "P1",
+      "expected_rule": "HARNESS-P1-SENSITIVE-EXPORT"
+    },
+    {
+      "id": "S9-L0-008",
+      "layer": "L0",
+      "priority": "P1",
+      "type": "VARIANT",
+      "name": "预算超限（记录数）",
+      "description": "budget.max_records 超冻结上限 → REQUIRE_APPROVAL（P1）",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "budget": { "max_records": 20000000 }
+      },
+      "expected_outcome": "REQUIRE_APPROVAL",
+      "expected_risk": "P1",
+      "expected_rule": "HARNESS-P1-BUDGET-EXCEED"
+    },
+    {
+      "id": "S9-L0-009",
+      "layer": "L0",
+      "priority": "P1",
+      "type": "VARIANT",
+      "name": "预算超限（字节数维度）",
+      "description": "变异：只声明 max_bytes 超限（绕过仅检查记录数的朴素实现）→ 仍须 REQUIRE_APPROVAL（P1）",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "budget": { "max_bytes": 107374182400 }
+      },
+      "expected_outcome": "REQUIRE_APPROVAL",
+      "expected_risk": "P1",
+      "expected_rule": "HARNESS-P1-BUDGET-EXCEED"
+    },
+    {
+      "id": "S9-L0-010",
+      "layer": "L0",
+      "priority": "P1",
+      "type": "VARIANT",
+      "name": "目标 Schema 不一致需审批",
+      "description": "目标表 Schema 与制品声明不一致 → REQUIRE_APPROVAL（P2 归入 P1 组计数）",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "target_schema_aligned": false
+      },
+      "expected_outcome": "REQUIRE_APPROVAL",
+      "expected_risk": "P2",
+      "expected_rule": "HARNESS-P2-SCHEMA-MISMATCH"
+    },
+    {
+      "id": "S9-L1-001",
+      "layer": "L1",
+      "priority": "P3",
+      "type": "LEGITIMATE",
+      "name": "常规投影 ALLOW",
+      "description": "项目内常规只读投影，无敏感分级、预算合规 → ALLOW（P3）",
+      "pdp_request": {
+        "environment": "dev",
+        "tool_name": "pipeline.execute",
+        "tool_version": "1.0.0",
+        "target_schema_aligned": true
+      },
+      "expected_outcome": "ALLOW",
+      "expected_risk": "P3",
+      "expected_rule": "HARNESS-P3-ROUTINE"
+    },
+    {
+      "id": "S9-L1-002",
+      "layer": "L1",
+      "priority": "P3",
+      "type": "LEGITIMATE",
+      "name": "网络超时故障 → 最强减损",
+      "description": "模拟网络超时：故障矩阵须选中最强减损动作（AC-15）",
+      "fault": { "kind": "TIMEOUT", "stage": "EXECUTE" },
+      "expected_mitigation": "CANCEL",
+      "expected_outcome": "ALLOW",
+      "expected_risk": "P3"
+    },
+    {
+      "id": "S9-L1-003",
+      "layer": "L1",
+      "priority": "P3",
+      "type": "REGRESSION",
+      "name": "令牌重复消费幂等拒绝",
+      "description": "同一 Capability 二次消费 → 必须被 Replay Guard 拒绝（AC-15）",
+      "fault": { "kind": "REPLAY", "stage": "BROKER" },
+      "expected_mitigation": "CANCEL",
+      "expected_outcome": "ALLOW",
+      "expected_risk": "P3"
+    },
+    {
+      "id": "S9-L2-001",
+      "layer": "L2",
+      "priority": "P3",
+      "type": "LEGITIMATE",
+      "name": "端到端垂直切片（mock 引擎）",
+      "description": "连接 → Harness 协议 → 影子表 → 分流 → Swap SQL 生成（AC-16，S9 用 mock 引擎）",
+      "expected_outcome": "ALLOW",
+      "expected_risk": "P3",
+      "expected_artifacts": ["shadow_table", "swap_sql"]
+    }
+  ]
+}
