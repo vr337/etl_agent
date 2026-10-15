@@ -1,0 +1,586 @@
+# ============================================================
+# WorkBuddy — S10 阶段执行指令
+# 阶段：前端控制台与端到端演示（T-19 + T-22）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001~008
+# 环境：Windows + PowerShell + Node v24.16.0 + npm 11.13.0 + Docker Desktop + uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S10
+- 阶段名称：前端控制台与端到端演示
+- 覆盖任务：T-19（M-P 前端控制台）、T-22（端到端演示）
+- 依赖：S1~S9 全部完成
+- 对应 AC：**AC-10（端到端演示链路）**、**AC-17（版本 Diff 视图）**
+- 附加展示：AC-01/02/07/08/09/11/12/13
+- SPEC 依据：SPEC v1.0.3-Baseline 第 3.2 章 M-P、第 7 章（页面原型）、第 8 章、附录 A.1、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-53~58 + AC-10/17
+- 追加件：AMEND-001~008
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、⚠️ 引擎诊断结论（先读）
+
+**S10 走 mock 引擎模式。人类已裁决 C。**
+
+根因：SeaTunnel 2.3.x REST 提交路径 `ConfigShadeUtils.processConfig` NPE 跨 4 版本复现
+（flowpilot:2.3.13 / apache:2.3.13 / apache:2.3.11 / apache:2.3.8 均失败）。
+详细记录见 `docs/open-questions/tracking.md` **T-ENGINE-01**。
+
+**S10 交付策略**：
+- 前端/后端 API/审批/HOCON 生成/质量报告/影子表/原子 Swap **全部真实执行**；
+- 只有 "SeaTunnel REST 提交作业" 这一步走 mock（返回假 jobId，不真搬数据）。
+
+真实引擎 e2e 留 S10 后作为独立运维事项（CLI 提交方案，1~2 小时）。
+
+## 三、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 前端目录 | D:\Desktop\code\etl_agent\frontend（同仓库） |
+| 数据卷路径 | D:/Documents/Docker/volume/app/etl_agent |
+| Node | v24.16.0 |
+| npm | 11.13.0 |
+| Docker | Docker Desktop（WSL 2 后端） |
+| Python | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S10-frontend（**已切**） |
+| 上游 tag | stage-S9-done |
+
+## 四、前置检查
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S10-frontend
+3. git log --oneline -3 显示 S9 合并 + AMEND-008
+4. 工作区干净：git status 无 tracked 变更
+5. 上游 tag 存在：git tag --list | Select-String "stage-S9-done"
+6. Node / npm：node --version → v24.16.0；npm --version → 11.13.0
+7. 容器健康：docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+8. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+9. 后端全部已就位：
+   Test-Path src\etl_agent\harness\ / versions\ / benchmark\ / evidence\ / safety\
+10. 基线 + AMEND-001~008（均 Accepted）
+11. 原型图（5 张 PNG）：docs\prototype\images\
+    - S1-dashboard.png
+    - S2-datasources.png
+    - S3-pipeline-studio.png
+    - S4-runtime-center.png
+    - S5-safety-governance.png
+12. 代码规范文件存在
+```
+
+任一项不满足 → 输出阻塞报告。
+
+## 五、S9 → S10 吸收清单
+
+1. **引擎 NPE**：S10 走 mock 引擎（人类裁决 C）。
+2. **后端 API 已全部就绪**：认证/项目/连接/凭据/探查/文件/生成/门禁/版本/Harness/执行/调度/监督/回滚/证据/评测/安全 全部可调用。
+3. **证据链检查点按事件数主导**：前端展示证据流只展示 `sequence / occurred_at / event_type`。
+4. **`report_sha256` 只纳入确定性事实**：Benchmark 大盘显示 `non_llm_p95_regression` 实测值。
+5. **CLI 运行记录不落库**：S10 演示用 API-15，不用 CLI。
+6. **AMEND-008 已 Accepted**：S10 错误码清单 = SPEC 6.4 + AMEND-001~008。
+7. **SeaTunnel conf 挂载已移除**：S10 不改回。
+
+## 六、任务清单
+
+### T-19 M-P 前端控制台
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-19.1 | Vite + Vue 3 + TS 脚手架 | frontend/package.json、vite.config.ts、tsconfig.json |
+| T-19.2 | 路由（Vue Router） | frontend/src/router/index.ts |
+| T-19.3 | 状态管理（Pinia） | frontend/src/stores/ |
+| T-19.4 | HTTP 客户端（axios + X-Actor-ID 注入） | frontend/src/api/client.ts |
+| T-19.5 | API 模块（按后端域划分） | frontend/src/api/*.ts |
+| T-19.6 | 通用组件（表格/卡片/状态徽标/DAG/Diff） | frontend/src/components/ |
+| T-19.7 | 页面 1：总览工作台 | frontend/src/views/Dashboard.vue |
+| T-19.8 | 页面 2：数据源与资产管理 | frontend/src/views/DataSources.vue |
+| T-19.9 | 页面 3：Pipeline Studio | frontend/src/views/PipelineStudio.vue |
+| T-19.10 | 页面 4：运行中心与审批控制台 | frontend/src/views/RuntimeCenter.vue |
+| T-19.11 | 页面 5：安全治理与 Benchmark | frontend/src/views/SafetyGovernance.vue |
+| T-19.12 | 版本 Diff 视图（AC-17） | frontend/src/views/VersionDiff.vue |
+| T-19.13 | 工作区初始化引导 | frontend/src/views/Bootstrap.vue |
+| T-19.14 | 静态资源与样式 | frontend/src/assets/ |
+
+### T-22 端到端演示
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-22.1 | 演示脚本（场景 A：MySQL→Doris 宽表） | infra/e2e/demo-scenario-a.ps1 |
+| T-22.2 | 演示脚本（场景 B：脏数据超限硬中断） | infra/e2e/demo-scenario-b.ps1 |
+| T-22.3 | 演示环境初始化 | infra/e2e/{mysql-init,doris-init}/ |
+| T-22.4 | 演示说明文档 | docs/demo/README.md |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| 前端 Dockerfile（可选） | frontend/Dockerfile |
+| 前端 README | frontend/README.md |
+
+## 七、目录结构
+
+```
+D:\Desktop\code\etl_agent\
+├── frontend\                            （新增：Vue 3 SPA）
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── index.html
+│   ├── Dockerfile                       （可选）
+│   ├── README.md
+│   └── src\
+│       ├── main.ts
+│       ├── App.vue
+│       ├── router\index.ts
+│       ├── stores\{actor.ts, notification.ts}
+│       ├── api\
+│       │   ├── client.ts                （axios + X-Actor-ID）
+│       │   ├── types.ts                 （与后端 schemas 对齐）
+│       │   └── {auth,projects,connections,profiles,files,agentRuns,versions,harness,executions,rollback,evidence,benchmark,safety}.ts
+│       ├── components\
+│       │   ├── AppShell.vue
+│       │   ├── DataTable.vue
+│       │   ├── StatusBadge.vue
+│       │   ├── RiskBadge.vue            （P0-P3）
+│       │   ├── DagViewer.vue
+│       │   ├── HoconViewer.vue
+│       │   ├── SchemaDiff.vue
+│       │   ├── ApprovalCard.vue
+│       │   ├── SupervisionTimeline.vue
+│       │   ├── QualityReportCard.vue
+│       │   └── EvidenceTimeline.vue
+│       ├── views\
+│       │   ├── Dashboard.vue
+│       │   ├── DataSources.vue
+│       │   ├── PipelineStudio.vue
+│       │   ├── RuntimeCenter.vue
+│       │   ├── SafetyGovernance.vue
+│       │   ├── VersionDiff.vue
+│       │   └── Bootstrap.vue
+│       └── assets\styles\main.css
+├── infra\e2e\                           （S10 新增演示资产）
+│   ├── demo-scenario-a.ps1
+│   ├── demo-scenario-b.ps1
+│   ├── mysql-init\01-seed.sql
+│   └── doris-init\01-init.sql
+├── docs\demo\
+│   └── README.md
+└── src\ tests\ docs\  （S1~S9，不动）
+```
+
+## 七点五、UI 还原要求（强制）
+
+**本阶段 5 大视图必须逐一对照 `docs/prototype/images/` 下的 5 张 PNG 原型图实现。**
+
+| 视图 | 原型图文件 | Vue 组件 |
+|------|-----------|---------|
+| 页面 1 总览工作台 | `S1-dashboard.png` | `frontend/src/views/Dashboard.vue` |
+| 页面 2 数据源与资产 | `S2-datasources.png` | `frontend/src/views/DataSources.vue` |
+| 页面 3 Pipeline Studio | `S3-pipeline-studio.png` | `frontend/src/views/PipelineStudio.vue` |
+| 页面 4 运行中心与审批 | `S4-runtime-center.png` | `frontend/src/views/RuntimeCenter.vue` |
+| 页面 5 安全治理与 Benchmark | `S5-safety-governance.png` | `frontend/src/views/SafetyGovernance.vue` |
+
+**还原要求**：
+
+1. **布局**：每个页面的区域划分（左侧导航 / 顶部 / 主内容 / 卡片网格）按原型图实现；
+2. **组件**：统计卡、表格、按钮、标签、状态徽标、DAG 图、HOCON 代码块、Diff 视图——**按原型图逐一实现**；
+3. **字段与标签**：表格列名、卡片标题、按钮文案**按原型图**；
+4. **颜色与样式**：状态徽标（READY/FAILED/WAITING）、风险等级（P0-P3）、按钮色——**按原型图**；
+5. **交互**：页面跳转、列表点击展开详情、审批卡按钮——按原型图推断；
+6. **冲突处理**：若原型图与 SPEC 第 7 章文字描述冲突，**以原型图为准**（原型图更新）；
+7. **不可省项**：不能只做骨架——**每个统计卡、每张表格、每个按钮都要有**。
+
+**验收方式**：
+- 每个页面完成后，在阶段报告里**附页面截图**（`npm run dev` 启动后截图）；
+- 阶段报告里列出「原型图元素 → 已实现」对照清单；
+- 若某元素确实无法实现（如后端 API 未提供），在阶段报告中**明确说明原因 + 替代方案**。
+
+## 八、核心实现要点
+
+### 8.1 前端脚手架
+
+**技术栈**：Vite 5.x + Vue 3.4+ + TypeScript 5.x + Vue Router 4 + Pinia 2 + axios。
+
+**npm 命令**：
+```bash
+cd frontend
+npm install
+npm run dev      # :5173
+npm run build    # → dist/
+```
+
+### 8.2 HTTP 客户端
+
+**关键**：开发环境注入 `X-Actor-ID`；**生产禁直传**。
+
+```typescript
+// frontend/src/api/client.ts
+import axios from 'axios';
+
+const client = axios.create({
+  baseURL: '/api/v1',
+  timeout: 30000,
+});
+
+// 开发环境：注入 dev-header
+client.interceptors.request.use((config) => {
+  const actorId = localStorage.getItem('actor_id');
+  if (actorId) {
+    config.headers['X-Actor-ID'] = actorId;
+  }
+  return config;
+});
+
+// 统一错误处理
+client.interceptors.response.use(
+  (r) => r,
+  (error) => {
+    // 显示 code + trace_id
+    return Promise.reject(error);
+  }
+);
+
+export default client;
+```
+
+**约束**：
+- **生产环境禁直传 `X-Actor-ID`**（由 trusted-gateway 签名注入）；
+- 开发环境从 `localStorage` 取。
+
+### 8.3 5 大视图
+
+**页面 1：总览工作台**（对照 `S1-dashboard.png`）
+- 统计卡：连接数 / Pipeline 数 / 待审批 / 运行成功率
+- 目标切片预览：迷你流程图
+- 生产边界提示卡
+- 快捷导航
+
+**页面 2：数据源与资产管理**（对照 `S2-datasources.png`）
+- 连接列表（类型/状态徽标）
+- 登记连接表单
+- 端点角色 → 表级探查 → Profile 列表
+- 文件导入（25 MiB / 10 万行上限）
+- 凭据轮换表单
+
+**页面 3：Pipeline Studio**（对照 `S3-pipeline-studio.png`，最复杂）
+- 需求输入区：自然语言 + 源/目标 Profile
+- 澄清对话历史（LangGraph 中断/恢复）
+- 生成过程：阶段 + 修复计数
+- 方案配置：HOCON 高亮 + DAG 渲染 + 字段映射 Diff + 脱敏前后对比
+- 版本 Diff 视图（AC-17）
+- 门禁结果 + 调度策略 + 提交审批
+
+**页面 4：运行中心与审批控制台**（对照 `S4-runtime-center.png`）
+- 准备单列表 + 详情（风险/影响/回滚/审批槽位）
+- 审批槽位卡片（DATA_APPROVER / SECURITY_APPROVER，含"不可自批"提示）
+- APPROVE/REJECT + 理由
+- 执行监控：状态 + 实时事件 + 监督快照 + 吞吐/行数/字节 + 质量报告
+- 运维操作：取消 / 重试 / 回滚 / 清理
+- Worker 健康列表
+- 凭据治理清单
+
+**页面 5：安全治理与 Benchmark**（对照 `S5-safety-governance.png`）
+- Benchmark 门禁指标卡（六项）
+- 用例结果表
+- 触发区（运行 Benchmark）
+- 安全提案列表 + 发布状态 + 人工裁决
+
+**页面 6（附加）：版本 Diff**（AC-17）
+- 两版本选择
+- Schema 差异 / HOCON 差异 / 质量规则差异
+- 不可原地编辑提示
+
+**页面 7（附加）：工作区初始化引导**
+- Bootstrap Token 输入
+- 项目名 + 管理员 subject
+- 成功后设置 `actor_id` 到 localStorage
+
+### 8.4 端到端演示脚本
+
+**场景 A（推荐先做）**：MySQL → Doris 宽表增量投产
+
+**流程**：
+1. 前置：MySQL 种子数据；Doris 目标库
+2. UI：登记连接 → 探查 Profile → Studio 输入需求
+3. LangGraph 生成 EtlPlan + HOCON
+4. 门禁通过 → 冻结版本
+5. Prepare → 四眼审批 → Commit → 签发 Capability
+6. **mock SeaTunnel 提交** → 生成 ExecutionRun
+7. 真实 Doris：`CREATE TABLE ... LIKE`（影子表）
+8. 质量报告 PASSED
+9. 真实 Doris：`REPLACE TABLE ... swap=true`（原子发布）
+10. 证据账本可复盘
+
+**场景 B（可选）**：日志脏数据超限硬中断
+1. 执行中拒绝率超 20% 阈值
+2. 监督引擎触发硬中断
+3. 根因诊断（9 类分类）
+4. 受管回滚（ROLLBACK_DORIS）
+
+### 8.5 演示说明文档
+
+`docs/demo/README.md` 包含：
+- 环境准备（docker compose 命令）
+- 演示流程（分步骤 UI 操作）
+- 预期结果
+- 证据账本查询
+- 常见问题排查
+
+## 九、验收命令
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 后端回归
+uv run pytest tests -q
+# 期望：834 passed, 2 skipped
+
+# 3. 前端构建
+cd frontend
+npm install
+npm run build
+# 期望：dist/ 生成，无 TypeScript 错误
+
+# 4. 前端类型检查 + Lint
+npx vue-tsc --noEmit
+npm run lint
+
+# 5. 前端启动（临时验证）
+npm run dev
+# 期望：Vite 启动，:5173 可访问
+
+# 6. 端到端演示（场景 A）
+cd ..\..\..\
+docker compose -f infra\docker-compose.yml --profile e2e up -d
+uv run uvicorn etl_agent.main:app --host 0.0.0.0 --port 8000 &
+powershell -File infra\e2e\demo-scenario-a.ps1
+
+# 7. 凭据零明文核对
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\|\\node_modules\\|\\dist\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 8. 前端无凭据硬编码
+Select-String -Path frontend\src\**\*.ts,frontend\src\**\*.vue -Pattern "password\s*=\s*['\`"]"
+
+# 9. 代码注释合规
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 10. .env 未被修改
+Get-Content infra\.env | Select-String "FERNET_KEY|SEATUNNEL_URL"
+```
+
+## 十、DoD（20 项）
+
+```
+[ ] DoD-1  前端脚手架就位
+[ ] DoD-2  前端构建通过
+[ ] DoD-3  前端类型检查通过
+[ ] DoD-4  前端 Lint 通过
+[ ] DoD-5  后端回归通过：834 passed, 2 skipped
+[ ] DoD-6  页面 1 总览工作台（对照 S1-dashboard.png）
+[ ] DoD-7  页面 2 数据源与资产（对照 S2-datasources.png）
+[ ] DoD-8  页面 3 Pipeline Studio（对照 S3-pipeline-studio.png）
+[ ] DoD-9  页面 4 运行中心与审批（对照 S4-runtime-center.png）
+[ ] DoD-10 页面 5 安全治理与 Benchmark（对照 S5-safety-governance.png）
+[ ] DoD-11 AC-17 版本 Diff 视图
+[ ] DoD-12 工作区初始化引导
+[ ] DoD-13 HTTP 客户端（X-Actor-ID 仅 dev）
+[ ] DoD-14 端到端演示场景 A
+[ ] DoD-15 端到端演示场景 B（可选）
+[ ] DoD-16 演示说明文档
+[ ] DoD-17 AC-02 凭据零明文
+[ ] DoD-18 Lint / Type / 基线
+[ ] DoD-19 代码注释合规
+[ ] DoD-20 上下文读取确认 + 遗留分类归档 + UI 还原对照清单
+```
+
+DoD 全过 → 调 git_ship。
+
+## 十一、git_ship / github_ops 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S10-frontend
+  base_branch: master
+  commit_message: |
+    feat(S10): 前端控制台与端到端演示 [SPEC v1.0.3-Baseline + AMEND-001~008]
+
+    覆盖任务：T-19（M-P 前端控制台）、T-22（端到端演示）
+    SPEC 依据：第 3.2 / 7 章 / 附录 A.1 / ADR-08
+    追加件：AMEND-001~008
+    对应 AC：AC-10（端到端演示链路）、AC-17（版本 Diff 视图）
+    DoD：20 项全部通过（详见阶段报告）
+    前端：Vue 3 + Vite + TypeScript + Pinia + Vue Router
+    后端回归：834 passed, 2 skipped
+    演示：mock 引擎 + 真实 Doris 影子表/原子 Swap
+    UI：对照 docs/prototype/images/ 5 张原型图实现
+  files:
+    # WorkBuddy 按实际产出自动列出
+  tag: stage-S10-done
+  push: true
+  auto_pr: false
+```
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S10-frontend
+      base: master
+      title: "[S10] 前端控制台与端到端演示"
+      body: |
+        ## 阶段
+        S10 — 前端控制台与端到端演示
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001~008
+
+        ## 覆盖任务
+        T-19（M-P 前端控制台）、T-22（端到端演示）
+
+        ## 对应 AC
+        - AC-10（端到端演示链路）
+        - AC-17（版本 Diff 视图）
+
+        ## DoD 结果
+        - [x] 20 项全部通过（详见阶段报告）
+
+        ## 演示策略
+        - mock 引擎 + 真实 Doris 影子表/原子 Swap
+        - 后端回归 834 passed, 2 skipped
+
+        ## UI 还原
+        - 5 大视图对照 docs/prototype/images/ 下的 5 张 PNG
+      labels:
+        - "stage:S10"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-10"
+        - "ac:AC-17"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-19 M-P 前端控制台"
+        - "T-22 端到端演示"
+```
+
+## 十二、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（AC-02 红线）。
+5.  禁止前端硬编码连接密码 / API Key。
+6.  禁止前端在生产直传 `X-Actor-ID`。
+7.  禁止多个阶段混在同一次提交。
+8.  禁止在无任务清单的情况下开始编码。
+9.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+10. 禁止把 S11（条件数据源）纳入主线。
+11. **禁止用 pip 替代 uv**（后端）。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止前端绕过 API 直接查数据库**。
+15. **禁止前端展示凭证明文**。
+16. **禁止前端展示证据链的 hash 计算细节**。
+17. **禁止前端触发原子 Swap / 硬中断**（由 Worker 侧自动触发；前端只读监控）。
+18. **禁止 S10 因引擎 NPE 阻塞**：走 mock 模式（人类已裁决）。
+19. **禁止 WorkBuddy 修改 `infra\.env`**；只能改 `.env.example`。
+20. 禁止复述代码行为的冗余注释。
+21. **禁止 AMEND 草稿自动提交**。
+22. 禁止在 S10 实现 S11 的条件数据源。
+23. **禁止跳过「4a 设计阶段」直接编码**（人类确认设计大纲后才进 4b）。
+24. **禁止 UI 只做骨架**——每个统计卡 / 表格 / 按钮必须有（对照原型图）。
+
+## 十三、启动指令
+
+收到 `START S10` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-53~58、AC-10/17、第 7 章）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-P、第 7 章）
+4. 读 docs/spec/amendments/AMEND-001~008（8 份）
+5. 读 docs/prompts/S9-审计证据与评测安全进化.prompt
+6. 读 docs/stages/S9-审计证据与评测安全进化-阶段报告.md
+7. 读 docs/prototype/images/ 下的 5 张原型图（PNG，逐一对照）：
+   - S1-dashboard.png        （总览工作台）
+   - S2-datasources.png      （数据源与资产）
+   - S3-pipeline-studio.png  （Pipeline Studio）
+   - S4-runtime-center.png   （运行中心与审批）
+   - S5-safety-governance.png（安全治理与 Benchmark）
+8. 读 src/etl_agent/main.py
+9. 读 src/etl_agent/auth/dev_header.py
+10. 读 docs/open-questions/tracking.md（T-ENGINE-01）
+11. 读 src/etl_agent/benchmark/router.py（API-15 契约）
+12. 读 src/etl_agent/evidence/router.py（证据流查询契约）
+```
+
+**读取确认**：阶段报告开头列出 12 个文件读取状态。
+
+### 第二步：执行前置检查
+
+### 第三步：输出任务清单
+
+### 第四步：编码 + 测试 + DoD 自检（两阶段）
+
+#### 4a. 设计阶段（先做）
+
+对 5 大视图，**先输出设计大纲**（不写代码）：
+- 每个页面的布局结构（区域划分）
+- 每个区域使用的组件（表格/卡片/图表/表单）
+- 每个组件的字段名 + 对应后端 API
+- 与原型图的对照（哪些元素来自哪张图）
+
+**输出后暂停，等待人类确认。**
+
+#### 4b. 实现阶段（人类确认后）
+
+按设计大纲实现 Vue 组件；对每个页面：
+1. 先实现布局骨架
+2. 再实现组件与数据绑定
+3. 再对齐原型图样式
+4. **完成后截图对照原型图**
+
+#### 4c. 全量自检（原第四步内容）
+
+- 后端回归
+- 前端 build / type / lint
+- DoD 20 项自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+### 第八步：输出阶段报告
+
+现在，等待 `START S10` 指令。
