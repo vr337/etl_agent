@@ -1,0 +1,666 @@
+# ============================================================
+# WorkBuddy — S6 阶段执行指令
+# 阶段：版本与 Harness 安全执行内核（T-11 + T-12）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001/002/003/004
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S6
+- 阶段名称：版本与 Harness 安全执行内核
+- 覆盖任务：T-11（M-H 不可变版本与设计审批）、T-12（M-J Harness 安全执行内核）
+- 依赖：S1~S5
+- 对应 AC：**AC-01（四眼职责分离拦截）**、**AC-05（prepare→approve→commit + 单次令牌 + 防重放）**
+- SPEC 依据：SPEC v1.0.3-Baseline 第 3.2 章 M-H/M-J、第 5.2 章（8 张 M6 表）、第 6.1 章 API-07/08/09/10、第 6.4 章错误码、第 8 章「安全 · 授权与职责分离/防重放与授权」、附录 A.1、ADR-04、ADR-05、ADR-06、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-26/27/28/29/30/31/32/33/34/35/36/37 + AC-01/05
+- 追加件：AMEND-001/002/003/004
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S6-harness |
+| 上游 tag | stage-S5-done |
+
+## 三、前置检查
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S6-harness
+3. git log --oneline -3 显示 S5 合并 + AMEND-004 提交
+4. 工作区干净：git status 无 tracked 变更
+5. 上游 tag 存在：git tag --list | Select-String "stage-S5-done"
+6. 容器健康：docker compose -f infra\docker-compose.yml ps
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. 双库可访问：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "SELECT 1"
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_checkpoint -c "SELECT 1"
+9. S1 数据模型已落地（8 张 M6 表）：
+   docker exec etl_agent_postgres psql -U etl_agent -d etl_agent -c "\dt" | Select-String -Pattern "harness_policy_decisions|execution_preparations|harness_approval_decisions|harness_capability_grants|harness_command_outbox|harness_side_effect_preparations|harness_side_effect_approvals|harness_side_effect_capability_grants"
+   → 8 张表全部存在
+10. S5 产出已就位：
+    Test-Path src\etl_agent\generation\  → True
+    Test-Path src\etl_agent\gate\        → True
+    Test-Path src\etl_agent\llm\         → True
+11. 基线文件 + 4 个追加件存在：
+    docs\prd\etl_agent-PRD_v1.1.1-Baseline.md
+    docs\spec\etl_agent-SPEC_v1.0.3-Baseline.md
+    docs\spec\amendments\AMEND-001~004（均 Accepted）
+12. infra\.env 已含 S6 密钥（人类已配置，见前置手动动作）：
+    uv run python -c "from etl_agent.config import settings; print(bool(settings.harness_signing_key_hex), bool(settings.harness_public_keys))"
+    → True True
+13. 代码规范文件：docs\conventions\code-comments.md
+```
+
+任一项不满足 → 输出阻塞报告，停止执行。
+
+## 四、S5 → S6 吸收清单（本阶段必须遵循）
+
+来自 S5 阶段报告的 9 项：
+
+1. **版本链状态机与派生版本由 S6 接管**：S5 只做到 `PipelineVersion.status=VALIDATED`；S6 补 `DRAFT→PROFILING→GENERATED→VALIDATED→WAITING_APPROVAL→APPROVED/REJECTED` + `parent_version_id` 派生 + `lock_version` 乐观锁；API-07 从幂等读取口升级为写入与状态迁移接口；
+2. **`pipeline_artifacts` 只存摘要，正文在 Checkpoint**：S6 做版本 Diff 时，候选正文从 `etl_checkpoint` 的 Checkpoint 取，或新增「制品正文存储」——**本阶段决议：正文**继续在 Checkpoint 库**（保持 FR-67 红线）；artifacts 表只存 SHA256 + artifact_type**；
+3. **`GENERATABLE_STATUSES` 收敛**：版本链落地后按 FR-26 收敛（仅 DRAFT / GENERATED 可再生成）；
+4. **`agent_runs.pending_question` 只承载澄清**：S6 审批中断用独立挂起语义 + `ApprovalRequest` 接入；
+5. **引擎检查换真实实现**（S7）：S6 保持 stub，接口不变；
+6. **HOCON 占位符命名契约**：MockProvider 的 `${SRC_PASSWORD}` / `${SRC_HOST}` 等需与 S7 `credential_materialization` 一致——S6 在 SPEC 或 configs/ 里**正式登记占位符清单**；
+7. **GATE-014 主机白名单迁入策略包**：S6 做签名策略包时把白名单从规则文件迁到策略包；
+8. **门禁规则当前全 ERROR**：保留 `warnings` / `SEVERITY_WARN` 通道；
+9. **Mock 候选标定**：S6 仍用 Mock；真实 Provider 标定留 S10 前。
+
+## 五、`.env` 修改规则（S4 起强制）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新 | 每阶段新增变量时 |
+| `infra/.env` | **人类**（第三节已完成） | 引入新密钥时；**禁止 WorkBuddy 修改** |
+
+## 六、任务清单
+
+### T-11 M-H 不可变版本与设计审批
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-11.1 | 版本链状态机（DRAFT→...→APPROVED/REJECTED） | src\etl_agent\versions\state.py |
+| T-11.2 | 派生新版本（parent_version_id，禁原地覆盖） | src\etl_agent\versions\service.py |
+| T-11.3 | 乐观锁（lock_version） | src\etl_agent\versions\service.py |
+| T-11.4 | 制品 SHA256 冻结（plan / hocon / quality_contract） | src\etl_agent\versions\artifacts.py |
+| T-11.5 | 版本 Diff（Schema / HOCON / 质量规则） | src\etl_agent\versions\diff.py |
+| T-11.6 | ApprovalRequest 绑定 artifact_sha256 | src\etl_agent\versions\approval.py |
+| T-11.7 | API-07 冻结 + 状态迁移 | src\etl_agent\versions\router.py、schemas.py |
+| T-11.8 | 领域错误码 | src\etl_agent\versions\errors.py |
+
+### T-12 M-J Harness 安全执行内核
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-12.1 | PDP 9 条确定性规则（P0-P3 + ALLOW/DENY/REQUIRE_APPROVAL/DEFER） | src\etl_agent\harness\pdp\engine.py |
+| T-12.2 | PDP 规则集 | src\etl_agent\harness\pdp\rules\ |
+| T-12.3 | 签名策略包（Ed25519 分离签名 + 启动验签） | src\etl_agent\harness\policy\package.py |
+| T-12.4 | 默认策略包生成脚本 | scripts\gen_policy_package.py |
+| T-12.5 | Prepare 准备单（指纹 / 影响报告 / 监督契约 / 回滚计划 / TTL / 幂等键） | src\etl_agent\harness\prepare\service.py |
+| T-12.6 | 四眼审批（`(preparation_id, role)` + `(preparation_id, decided_by)` 双唯一） | src\etl_agent\harness\approve\service.py |
+| T-12.7 | Commit（重验指纹与审批事实 + 签发 Ed25519 单次 Capability） | src\etl_agent\harness\commit\service.py |
+| T-12.8 | Capability 签发 / 验证 | src\etl_agent\harness\capability\issuer.py、verifier.py |
+| T-12.9 | Tool Broker（唯一副作用出口 + 注册清单判定） | src\etl_agent\harness\broker\tool_broker.py |
+| T-12.10 | Replay Guard（令牌仅消费一次） | src\etl_agent\harness\broker\replay_guard.py |
+| T-12.11 | 事务 Outbox（PENDING/SENDING/SENT/FAILED + 重试 + 锁） | src\etl_agent\harness\outbox\service.py |
+| T-12.12 | 9 类副作用同协议 | src\etl_agent\harness\side_effects\registry.py |
+| T-12.13 | 执行租约（防并发重入） | src\etl_agent\harness\lease.py |
+| T-12.14 | API-08 创建准备单 | src\etl_agent\harness\router.py |
+| T-12.15 | API-09 审批决策 | src\etl_agent\harness\router.py |
+| T-12.16 | API-10 Commit | src\etl_agent\harness\router.py |
+| T-12.17 | 领域错误码 | src\etl_agent\harness\errors.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API 路由注册 | src\etl_agent\main.py（更新） |
+| config.py 新增 Harness 配置 | src\etl_agent\config.py（更新） |
+| 占位符清单登记（S5 吸收 6） | configs\credential_placeholders.yaml |
+| 端到端测试 | tests\versions\、tests\harness\ |
+
+## 七、目录结构
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S6 Harness 变量）
+├── pyproject.toml                      （新增：cryptography 已有；无需新依赖）
+├── uv.lock
+├── configs\
+│   ├── policy\                         （新增：策略包与签名）
+│   │   ├── harness-v2-20260808.json
+│   │   └── harness-v2-20260808.sig
+│   └── credential_placeholders.yaml    （新增：S5 吸收 6）
+├── scripts\
+│   └── gen_policy_package.py           （新增：策略包生成脚本）
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 versions / harness 路由）
+│   ├── config.py                       （更新：Harness 配置）
+│   ├── auth\ projects\ connections\ secrets\ profiles\ files\ llm\ generation\ gate\  （S2~S5，不动）
+│   ├── versions\                       （新增：M-H）
+│   │   ├── __init__.py
+│   │   ├── state.py
+│   │   ├── service.py
+│   │   ├── artifacts.py
+│   │   ├── diff.py
+│   │   ├── approval.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── errors.py
+│   └── harness\                        （新增：M-J）
+│       ├── __init__.py
+│       ├── errors.py
+│       ├── lease.py
+│       ├── router.py
+│       ├── schemas.py
+│       ├── pdp\
+│       │   ├── __init__.py
+│       │   ├── engine.py
+│       │   └── rules\                  （9 条规则）
+│       ├── policy\
+│       │   ├── __init__.py
+│       │   └── package.py
+│       ├── prepare\
+│       │   ├── __init__.py
+│       │   └── service.py
+│       ├── approve\
+│       │   ├── __init__.py
+│       │   └── service.py
+│       ├── commit\
+│       │   ├── __init__.py
+│       │   └── service.py
+│       ├── capability\
+│       │   ├── __init__.py
+│       │   ├── issuer.py
+│       │   └── verifier.py
+│       ├── broker\
+│       │   ├── __init__.py
+│       │   ├── tool_broker.py
+│       │   └── replay_guard.py
+│       ├── outbox\
+│       │   ├── __init__.py
+│       │   └── service.py
+│       └── side_effects\
+│           ├── __init__.py
+│           └── registry.py
+└── tests\
+    ├── conftest.py                     （S6 扩展）
+    ├── helpers.py
+    ├── versions\                       （新增）
+    │   ├── test_state_machine.py
+    │   ├── test_derivation.py
+    │   ├── test_optimistic_lock.py
+    │   ├── test_artifacts.py
+    │   ├── test_diff.py
+    │   └── test_router.py
+    └── harness\                        （新增）
+        ├── test_pdp.py
+        ├── test_policy_package.py
+        ├── test_prepare.py
+        ├── test_four_eyes.py           （AC-01 核心）
+        ├── test_commit.py              （AC-05 核心）
+        ├── test_capability.py
+        ├── test_replay_guard.py        （AC-05 防重放）
+        ├── test_outbox.py
+        ├── test_side_effects.py
+        ├── test_lease.py
+        └── test_zero_plaintext.py      （AC-02）
+```
+
+## 八、核心实现要点
+
+### 8.1 版本链（T-11.1 ~ T-11.4）
+
+**状态机**：
+```
+DRAFT → PROFILING → GENERATED → VALIDATED → WAITING_APPROVAL → APPROVED / REJECTED
+```
+
+**硬规则**：
+- **禁原地覆盖**：已冻结版本不可修改；任何变更必须 `parent_version_id` 派生新版本；
+- **乐观锁**：更新带 `WHERE lock_version = ?`，失败 → `BIZ_409_STATE_CONFLICT`；
+- **制品 SHA256 冻结**：`pipeline_artifacts` 只存 `{artifact_type, sha256}`；**正文继续在 Checkpoint 库**（S5 吸收 2 决议）。
+
+### 8.2 PDP 9 条规则（T-12.1 ~ T-12.2）
+
+**输出**：`{outcome, risk_level, rule_evidence}`
+
+**聚合规则**：
+- `outcome` 优先级：DENY > DEFER > REQUIRE_APPROVAL > ALLOW
+- `risk_level` 优先级：P0 > P1 > P2 > P3
+- **DENY 清空审批要求**（无放行通道）
+
+**9 条规则清单**（S6 落地时按 SPEC 3.2 M-J 具体定义）：
+
+| # | rule_id | 内容 | 典型输出 |
+|---|---------|------|---------|
+| 1 | HARNESS-P0-CROSS-PROJECT | 跨项目工具意图 | P0 / DENY |
+| 2 | HARNESS-P0-PLAINTEXT-CREDENTIAL | HOCON 含明文凭据 | P0 / DENY |
+| 3 | HARNESS-P0-DESTRUCTIVE-OP | 破坏性操作（DROP / TRUNCATE） | P0 / REQUIRE_APPROVAL（2 审批） |
+| 4 | HARNESS-P0-SECRET-EXFIL | Secret 外发 | P0 / DENY |
+| 5 | HARNESS-P1-SENSITIVE-EXPORT | 敏感数据外发（RESTRICTED+） | P1 / REQUIRE_APPROVAL |
+| 6 | HARNESS-P1-BUDGET-EXCEED | 预算超限 | P1 / REQUIRE_APPROVAL |
+| 7 | HARNESS-P2-WRITE-PROD | 生产环境写入 | P2 / REQUIRE_APPROVAL |
+| 8 | HARNESS-P2-SCHEMA-MISMATCH | Schema 漂移 | P2 / REQUIRE_APPROVAL |
+| 9 | HARNESS-P3-ROUTINE | 常规操作 | P3 / ALLOW |
+
+**决策持久化**：`harness_policy_decisions` 表，**只存规则证据**（`rule_evidence`），不存原始数据 / Prompt。
+
+### 8.3 签名策略包（T-12.3 ~ T-12.4）
+
+**策略包**：
+```json
+{
+  "version": "harness-v2-20260808",
+  "rules": [
+    {"rule_id": "HARNESS-P0-CROSS-PROJECT", "version": "1", "enabled": true, "params": {...}},
+    ...
+  ],
+  "host_whitelist": [...],   // S5 吸收 7：GATE-014 主机白名单
+  "package_sha256": "<64-hex>"   // 不含本字段的清单 SHA256
+}
+```
+
+**签名**：Ed25519（`ETL_AGENT_HARNESS_SIGNING_KEY_HEX`）；签名文件 `.sig`。
+
+**验签**：PDP 启动与热切换前强制验签；失败 → 启动拒绝。
+
+**生成脚本**：`scripts/gen_policy_package.py` 输出 JSON + SIG。
+
+### 8.4 Prepare 准备单（T-12.5）
+
+**API-08**：`POST /api/v1/projects/{project_id}/preparations`
+
+```
+Body: {
+  "pipeline_version_id": "uuid",
+  "idempotency_key": "string",
+  "environment": "dev/staging/prod",
+  "tool_name": "pipeline.execute",
+  "tool_version": "string"
+}
+```
+
+**流程**：
+1. 加载版本 + 制品摘要；
+2. PDP 决策（9 条规则）；
+3. **DENY → 立即返回 403**，不生成准备单；
+4. 否则生成准备单：
+   - `input_fingerprint` / `resource_fingerprint`（SHA256）
+   - `impact_report`（effects / bounded / resource_count / source/sink profile / 分级报告摘要 / 监督契约摘要）
+   - `rollback_plan`
+   - `supervision_contract`（默认预算）
+   - `required_roles` / `required_approvals`（P0=2，P1/P2=1，P3=0）
+   - `expires_at`（默认 24h，300s–7d）
+5. **幂等键**：同 `idempotency_key` 返回同一准备单；同键不同载荷 → 409。
+
+**状态机**：`DENIED / WAITING_APPROVAL / READY / REJECTED / EXPIRED / COMMITTED`。
+
+### 8.5 四眼审批（T-12.6，AC-01 核心）
+
+**API-09**：`POST /api/v1/preparations/{preparation_id}/decisions`
+
+```
+Body: { "role": "DATA_APPROVER|SECURITY_APPROVER", "decision": "APPROVE|REJECT", "reason": "string", "evidence_sha256": "64-hex"? }
+```
+
+**硬约束（AC-01 红线）**：
+- **DB 双唯一**：`(preparation_id, role)` UK + `(preparation_id, decided_by)` UK；
+- 违反 → `HARNESS_409_SELF_APPROVAL`（申请人自批）或 `HARNESS_409_ROLE_TAKEN`（职责槽被占）；
+- 具名审批人必须具备对应 Harness 职责，否则 `AUTH_403_ROLE_REQUIRED`；
+- 决策带 `evidence_sha256` 落库。
+
+**全部 APPROVE 后**：准备单状态 → `READY`（满足 `required_approvals`）。
+
+### 8.6 Commit + Capability（T-12.7 ~ T-12.8，AC-05 核心）
+
+**API-10**：`POST /api/v1/preparations/{preparation_id}/commit`
+
+**流程**：
+1. 校验准备单状态 = READY；
+2. **服务端重验**：输入/资源指纹未变、审批事实完整（required_roles 全部 APPROVE）；
+3. **签发 Ed25519 单次 Capability**：
+   - TTL 默认 300s（30–900s）
+   - claims 绑定：`{tool_name, tool_version, subject, environment, artifact_sha256, supervision_contract_sha256, classification_report_sha256, allowed_mitigations}`
+   - `token_sha256` 入 `harness_capability_grants`（**UK**：preparation_id + token_sha256）
+4. **同一事务**：创建 `ExecutionRun`（QUEUED）+ `harness_command_outbox` 命令（PENDING）；
+5. 返回 `{token_id, preparation_id, claims, expires_at}`。
+
+**约束**：
+- 重复 Commit → `HARNESS_409_ALREADY_COMMITTED`；
+- 准备单过期 → `BIZ_410_PREPARATION_EXPIRED`；
+- 非 OPERATOR → `AUTH_403_ROLE_REQUIRED`。
+
+### 8.7 Tool Broker + Replay Guard（T-12.9 ~ T-12.10）
+
+**Tool Broker 是唯一副作用出口**：
+- 副作用以**注册清单**判定（`side_effects/registry.py`），**非 Agent 自报**；
+- 所有副作用（`CANCEL_EXECUTION / ROLLBACK_DORIS / CLEANUP_DORIS / MIGRATE_SECRET / STAGE|VALIDATE|ACTIVATE|ROLLBACK|DESTROY_SECRET`）**同协议**：`prepare → approve → commit → outbox → worker`；
+- 未授权调用 → `HARNESS_403_POLICY_DENY`。
+
+**Replay Guard**：
+- Capability 令牌**仅消费一次**；
+- 消费记录：`harness_capability_grants.consumed_at`（**S1 已建字段**）；
+- 第二次消费 → `HARNESS_409_CAPABILITY_REPLAYED`。
+
+**S6 不执行副作用**（Worker 在 S7）：S6 只做"发令到 Outbox"，**不真的执行**。**Tool Broker 的"出口"是逻辑出口**——把命令原子写入 Outbox。
+
+### 8.8 事务 Outbox（T-12.11）
+
+**状态机**：`PENDING → SENDING → SENT → FAILED`。
+
+**S6 只做写入 PENDING**；扫描 / 发送在 S7 Worker/Beat。
+
+**字段**：`{id, project_id, command_type, payload, status, retry_count, locked_until}`。
+
+### 8.9 执行租约（T-12.13）
+
+**防并发重入**：同一准备单的同类型副作用只有一个执行租约。
+
+**S6 提供接口**；实际租约获取在 S7 Worker。
+
+### 8.10 错误码（S6 新增）
+
+**新增（S6 若引用，将生成 AMEND-005 草稿）**：
+```
+HARNESS_403_POLICY_DENY               403（SPEC 6.4 已有，复用）
+HARNESS_409_SELF_APPROVAL             409（SPEC 6.4 已有，复用）
+HARNESS_409_ROLE_TAKEN                409（SPEC 6.4 已有，复用）
+HARNESS_409_ALREADY_COMMITTED         409（SPEC 6.4 已有，复用）
+HARNESS_409_APPROVAL_INSUFFICIENT     409（SPEC 6.4 已有，复用）
+HARNESS_409_CAPABILITY_REPLAYED       409（SPEC 6.4 已有，复用）
+HARNESS_401_CAPABILITY_EXPIRED        401（SPEC 6.4 已有，复用）
+BIZ_404_PREPARATION_NOT_FOUND         404（新增？）
+BIZ_410_PREPARATION_EXPIRED           410（SPEC 6.4 已有）
+BIZ_409_VERSION_STATE_CONFLICT        409（新增？）
+BIZ_409_VERSION_OPTIMISTIC_LOCK       409（新增？）
+```
+
+**若新增 → 生成 AMEND-005 草稿。**
+
+## 九、测试清单（关键用例）
+
+### tests/versions/
+
+| 用例 | 断言 |
+|------|------|
+| test_state_machine_all_transitions | 6 态全部可达 |
+| test_no_overwrite_frozen | 已冻结版本不可原地修改 |
+| test_derivation_parent_id | 派生版本 parent_version_id 正确 |
+| test_optimistic_lock | 并发更新同一版本 → 409 |
+| test_artifacts_sha256 | plan/hocon/quality_contract SHA256 稳定 |
+| test_diff_versions | 两版本 Schema/HOCON/质量规则差异 |
+| test_router_freeze | API-07 冻结 + 返回 SHA256 |
+
+### tests/harness/（AC-01 / AC-05 核心）
+
+| 用例 | 断言 |
+|------|------|
+| test_pdp_9_rules | 9 条规则全注册；聚合逻辑正确 |
+| test_pdp_deny_no_approval | DENY 清空审批要求 |
+| test_pdp_cross_project_deny | 跨项目 → HARNESS-P0-CROSS-PROJECT / DENY |
+| test_policy_package_verify | 签名验签通过 |
+| test_policy_package_tamper | 篡改 → 启动拒绝 |
+| test_prepare_fingerprint_stable | 同输入 → 同指纹 |
+| test_prepare_idempotent | 同 idempotency_key 返回同一准备单 |
+| test_prepare_deny_returns_403 | PDP DENY → 403，无准备单落库 |
+| **test_four_eyes_self_approval** | **申请人自批 → HARNESS_409_SELF_APPROVAL（AC-01）** |
+| **test_four_eyes_role_taken** | **同角色二次审批 → HARNESS_409_ROLE_TAKEN（AC-01）** |
+| **test_four_eyes_p0_requires_two** | **P0 场景 required_approvals=2，一人通过不足以 READY（AC-01）** |
+| test_four_eyes_role_required | 无 Harness 职责 → AUTH_403_ROLE_REQUIRED |
+| test_approval_evidence_sha256 | 决策带 evidence_sha256 落库 |
+| **test_commit_reverify_fingerprint** | **指纹被篡改 → Commit 拒绝（AC-05）** |
+| **test_commit_insufficient_approval** | **审批不足 → HARNESS_409_APPROVAL_INSUFFICIENT（AC-05）** |
+| **test_commit_signs_capability** | **签发 Ed25519 单次 Capability，TTL ≤300s（AC-05）** |
+| **test_commit_atomic_outbox** | **同事务创建 ExecutionRun + Outbox（AC-05）** |
+| test_commit_already_committed | 重复 Commit → 409 |
+| **test_capability_replay_guard** | **同一令牌第二次消费 → HARNESS_409_CAPABILITY_REPLAYED（AC-05）** |
+| test_capability_expired | 过期令牌 → HARNESS_401_CAPABILITY_EXPIRED |
+| test_capability_claims_binding | claims 绑定 tool/subject/environment/artifact 指纹等 |
+| test_tool_broker_registry_only | Agent 自报的副作用不在注册清单 → 拒绝 |
+| test_side_effects_9_registered | 9 类副作用全注册 |
+| test_outbox_pending_written | Commit 后 Outbox 有 PENDING 行 |
+| test_lease_mutex | 同一准备单并发执行 → 只有一个租约 |
+| test_zero_plaintext_harness_responses | 所有 Harness 响应无凭证明文 |
+
+## 十、验收命令（DoD 必须附输出）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S6 不新增；S1 的 8 张 M6 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 生成策略包（首次）
+uv run python scripts\gen_policy_package.py
+
+# 5. 单元测试
+uv run pytest tests\versions\ tests\harness\ -v
+uv run pytest tests -q   # 全量回归
+
+# 6. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\versions\ src\etl_agent\harness\ src\etl_agent\config.py
+
+# 7. 凭据零明文
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 8. AC-01 专项：四眼职责分离
+uv run pytest tests\harness\test_four_eyes.py -v
+
+# 9. AC-05 专项：三阶段协议 + 单次令牌 + 防重放
+uv run pytest tests\harness\test_commit.py tests\harness\test_capability.py tests\harness\test_replay_guard.py -v
+
+# 10. 代码注释抽检
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 11. .env 未被修改
+Get-Content infra\.env | Select-String "HARNESS_SIGNING_KEY_HEX|HARNESS_PUBLIC_KEYS|FERNET_KEY"
+# 期望：均为人类配置的值，未被 S6 修改
+```
+
+## 十一、DoD（20 项）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降
+[ ] DoD-3  版本链测试通过：tests/versions/ 全绿
+[ ] DoD-4  Harness 测试通过：tests/harness/ 全绿
+[ ] DoD-5  回归测试通过：S1~S5 全部保持（全量 206+ passed）
+[ ] DoD-6  AC-01 四眼职责分离：
+       - 申请人自批 → HARNESS_409_SELF_APPROVAL
+       - 职责槽被占 → HARNESS_409_ROLE_TAKEN
+       - P0 场景 required_approvals=2
+       - 无 Harness 职责 → AUTH_403_ROLE_REQUIRED
+[ ] DoD-7  AC-05 prepare→approve→commit：
+       - Prepare 生成准备单（含影响报告 + 回滚计划 + TTL）
+       - 四眼审批双唯一
+       - Commit 服务端重验指纹与审批事实
+       - 签发 Ed25519 单次 Capability（TTL ≤300s）
+       - 同事务创建 ExecutionRun + Outbox
+[ ] DoD-8  AC-05 防重放：同令牌二次消费 → HARNESS_409_CAPABILITY_REPLAYED
+[ ] DoD-9  PDP 9 条规则：全注册 + 聚合逻辑（DENY 清空审批）
+[ ] DoD-10 PDP DENY 无放行通道：跨项目 / Secret 外发 → 403
+[ ] DoD-11 签名策略包：Ed25519 验签通过；篡改 → 启动拒绝
+[ ] DoD-12 Tool Broker 唯一出口：注册清单判定副作用
+[ ] DoD-13 事务 Outbox：Commit 后 PENDING 行写入
+[ ] DoD-14 执行租约：同一准备单并发 → 单租约
+[ ] DoD-15 版本链：禁原地覆盖 + 派生 + 乐观锁
+[ ] DoD-16 AC-02 凭据零明文：Harness 响应无明文
+[ ] DoD-17 Lint / Type 干净
+[ ] DoD-18 未修改基线
+[ ] DoD-19 代码注释合规
+[ ] DoD-20 上下文读取确认（10 文件）+ 遗留分类归档（含 AMEND-005 草稿）+ .env 未被修改
+```
+
+DoD 全过 → 调 git_ship。
+
+## 十二、git_ship / github_ops 参数
+
+（与 S5 类似结构，请按下面关键点配置）
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S6-harness
+  base_branch: master
+  commit_message: |
+    feat(S6): 版本与 Harness 安全执行内核 [SPEC v1.0.3-Baseline + AMEND-001/002/003/004]
+
+    覆盖任务：T-11（M-H 不可变版本与设计审批）、T-12（M-J Harness 安全执行内核）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-04~08
+    追加件：AMEND-001/002/003/004
+    对应 AC：AC-01（四眼职责分离拦截）、AC-05（prepare→approve→commit + 单次令牌 + 防重放）
+    DoD：20 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    # WorkBuddy 按实际产出自动列出
+  tag: stage-S6-done
+  push: true
+  auto_pr: false
+```
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S6-harness
+      base: master
+      title: "[S6] 版本与 Harness 安全执行内核"
+      body: |
+        ## 阶段
+        S6 — 版本与 Harness 安全执行内核
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001/002/003/004
+
+        ## 覆盖任务
+        T-11（M-H 不可变版本与设计审批）、T-12（M-J Harness 安全执行内核）
+
+        ## 对应 AC
+        - AC-01（四眼职责分离拦截）
+        - AC-05（prepare→approve→commit + 单次令牌 + 防重放）
+
+        ## DoD 结果
+        - [x] 20 项全部通过（详见阶段报告）
+
+        ## 关键红线
+        - 四眼双唯一约束（DB 层 + API 双重校验）
+        - 单次 Capability（TTL ≤300s，Replay Guard）
+        - PDP DENY 无放行通道
+        - Tool Broker 唯一副作用出口（注册清单判定）
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S7；AMEND-005 草稿见阶段报告末尾>
+      labels:
+        - "stage:S6"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-01"
+        - "ac:AC-05"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-11 M-H 不可变版本与设计审批"
+        - "T-12 M-J Harness 安全执行内核"
+```
+
+## 十三、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（AC-02 红线）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止原地覆盖已冻结版本**（FR-26 红线）；任何变更必须派生新版本。
+15. **禁止绕过 Tool Broker 直接触发副作用**（唯一出口，FR-34）。
+16. **禁止 Agent 自报副作用**：以注册清单判定（FR-34）。
+17. **禁止 Capability 令牌 TTL > 900s**（SPEC 6.2 上限）。
+18. **禁止同一令牌二次消费**（Replay Guard，FR-34）。
+19. **禁止 PDP DENY 后生成准备单**（无放行通道，FR-29）。
+20. **禁止 WorkBuddy 修改 `infra\.env`**（人类维护密钥）。
+21. 禁止复述代码行为的冗余注释。
+22. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+23. **禁止在 S6 实际执行副作用**（Worker 在 S7）；S6 只做"发令到 Outbox"。
+24. 禁止在 S6 实现 S7 的 Celery Worker/Beat。
+
+## 十四、启动指令
+
+收到 `START S6` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-26~37、AC-01/05）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-H/M-J、5.2、6.1 API-07~10、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001~004（4 份）
+5. 读 docs/prompts/S5-生成引擎与确定性门禁.prompt
+6. 读 docs/stages/S5-生成引擎与确定性门禁-阶段报告.md
+```
+
+**读取确认**：阶段报告开头列出 10 个文件读取状态。
+
+### 第二步：执行前置检查
+
+### 第三步：输出任务清单
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-005 草稿**。
+
+现在，等待 `START S6` 指令。

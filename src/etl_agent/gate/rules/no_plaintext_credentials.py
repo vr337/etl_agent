@@ -41,6 +41,22 @@ def _assigned_value(match: re.Match[str]) -> str:
     return ""
 
 
+def first_plaintext_credential(hocon: str) -> str | None:
+    """返回 HOCON 中首个明文凭据字段名（无则 None）。
+
+    跨模块出口：GATE-001 与 Harness PDP（`HARNESS-P0-PLAINTEXT-CREDENTIAL`）共用同一份
+    检测口径——两处各写一份正则迟早会漂移，而这是 AC-02 的判定依据。
+    """
+    for match in ASSIGNMENT.finditer(hocon):
+        key = match.group("key")
+        if not CREDENTIAL_KEY.search(key):
+            continue
+        if _is_placeholder(_assigned_value(match)):
+            continue
+        return key
+    return None
+
+
 class NoPlaintextCredentials:
     """GATE-001：HOCON 与 plan 均不得携带明文凭据。"""
 
@@ -49,14 +65,10 @@ class NoPlaintextCredentials:
     severity = SEVERITY_ERROR
 
     def check(self, plan: Plan, hocon: str, context: Context) -> RuleResult:
-        for match in ASSIGNMENT.finditer(hocon):
-            key = match.group("key")
-            if not CREDENTIAL_KEY.search(key):
-                continue
-            if _is_placeholder(_assigned_value(match)):
-                continue
+        leaked_key = first_plaintext_credential(hocon)
+        if leaked_key is not None:
             return RuleResult.of(
-                self, False, f"HOCON 中出现明文凭据字段：{key}（值已省略，AC-02）"
+                self, False, f"HOCON 中出现明文凭据字段：{leaked_key}（值已省略，AC-02）"
             )
         leaked = _first_plaintext_key(plan)
         if leaked is not None:

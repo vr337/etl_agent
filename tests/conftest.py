@@ -40,6 +40,7 @@ from etl_agent.infrastructure.redis_client import close_redis_client
 from tests.helpers import (
     SAMPLE_EMAILS,
     SeededWorkspace,
+    attach_harness_services,
     build_test_app,
     dev_pg_credentials,
     make_settings,
@@ -86,8 +87,13 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 async def app(db_session: AsyncSession) -> AsyncIterator[FastAPI]:
-    """dev-header 模式应用（Nonce 走真实 Redis）。"""
+    """dev-header 模式应用（Nonce 走真实 Redis）。
+
+    S6 起默认注入 Harness 服务（验签后的 PDP / Prepare / Commit）——策略包与密钥取自
+    `configs/policy/harness-v2-20260808.*` 与 `infra/.env` 的人类配置，测试不新增密钥材料。
+    """
     application = await build_test_app(db_session)
+    attach_harness_services(application)
     yield application
     await close_redis_client(application.state.redis)
 
@@ -280,6 +286,66 @@ async def seeded_pipeline_version(
     db_session.add(version)
     await db_session.flush()
     return version.id
+
+
+# S6 版本链 / Harness 夹具（M-H / M-J）
+S6_TEST_PLAN: dict[str, object] = {
+    "pipeline_name": "orders_wide",
+    "source": {"connector_type": "POSTGRESQL", "connection_id": "src", "table": "orders"},
+    "sink": {
+        "connector_type": "POSTGRESQL",
+        "connection_id": "sink",
+        "table": "orders_wide",
+        "target_schema": {"columns": [{"name": "id", "type": "bigint"}]},
+    },
+    "quality_contract": {
+        "valid_sink": "orders_wide_valid",
+        "error_sink": "orders_wide_error",
+        "routing": [{"rule": "not_null_id", "sink": "orders_wide_valid"}],
+        "traceability": {
+            "source_row_id_column": "id",
+            "error_code_column": "error_code",
+            "reason_column": "error_reason",
+        },
+        "predicates": [{"name": "not_null_id", "expression": "id IS NOT NULL"}],
+    },
+}
+
+S6_TEST_HOCON = (
+    "env {\n"
+    '  job.mode = "BATCH"\n'
+    "}\n"
+    "sink {\n"
+    "  Jdbc {\n"
+    '    password = "${SINK_PASSWORD}"\n'
+    "  }\n"
+    "}\n"
+)
+
+
+@pytest.fixture
+async def frozen_version(
+    db_session: AsyncSession, seeded: SeededWorkspace
+) -> tuple[uuid.UUID, str]:
+    """项目 A 下**已冻结制品**的版本（VALIDATED + artifact_sha256）。
+
+    返回 `(version_id, artifact_sha256)`：Harness Prepare 的前置状态即由此产生。
+    """
+    from etl_agent.versions.artifacts import freeze_version_artifacts
+    from etl_agent.versions.service import mark_generated
+
+    pipeline = Pipeline(project_id=seeded.project_a_id, name=f"pipe-{uuid.uuid4().hex[:8]}")
+    db_session.add(pipeline)
+    await db_session.flush()
+    version = PipelineVersion(pipeline_id=pipeline.id, version_number=1, status="DRAFT")
+    db_session.add(version)
+    await db_session.flush()
+
+    await mark_generated(db_session, version.id)
+    digest = await freeze_version_artifacts(
+        db_session, version.id, S6_TEST_PLAN, S6_TEST_HOCON
+    )
+    return version.id, digest
 
 
 @pytest.fixture

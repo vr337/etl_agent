@@ -3,6 +3,9 @@
 SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A / 第 8 章「安全 · 多租户」行
 覆盖 FR：FR-66（多租户项目隔离：访问控制基于项目成员关系）、FR-03（ADMIN 不隐式升级）
 对应 AC：AC-12（非成员访问项目资源 → 403）
+
+S6 追加 `require_actor_for_project`：API-06/07/09/10 等路径中不含 `project_id`，
+需先由资源回溯所属项目再做成员校验；抽到本模块避免各路由重复实现（S5 起已有三处同类逻辑）。
 """
 from __future__ import annotations
 
@@ -48,6 +51,32 @@ async def require_project_member(
     if actor.member_role is None:
         raise NotProjectMember()
     request.state.actor = actor
+    return actor
+
+
+async def require_actor_for_project(
+    request: Request, session: AsyncSession, project_id: uuid.UUID
+) -> ActorContext:
+    """由资源回溯项目后的成员校验（路径无 `project_id` 的端点使用）。
+
+    Args:
+        request: 当前请求（读取中间件注入的 actor_subject）。
+        session: 请求级数据库会话。
+        project_id: 资源所属项目（调用方已从资源反查）。
+
+    Returns:
+        ActorContext: 成员角色 + Harness 职责。
+
+    Raises:
+        UnknownActor:     未携带身份声明（401）。
+        NotProjectMember: 非成员（403）。
+    """
+    subject = getattr(request.state, "actor_subject", None)
+    if not subject:
+        raise UnknownActor("请求未携带身份声明")
+    actor = await resolve_actor(session, subject, project_id)
+    if actor.member_role is None:
+        raise NotProjectMember()
     return actor
 
 
