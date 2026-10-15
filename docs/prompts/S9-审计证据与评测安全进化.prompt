@@ -1,0 +1,706 @@
+# ============================================================
+# WorkBuddy — S9 阶段执行指令
+# 阶段：审计证据与评测安全进化（T-17 + T-18）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001~007
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S9
+- 阶段名称：审计证据与评测安全进化
+- 覆盖任务：T-17（M-N 审计证据）、T-18（M-M 评测与安全进化）
+- 依赖：S1~S8
+- 对应 AC：**AC-09（Benchmark 六项门禁）**、**AC-14（L0）**、**AC-15（L1）**、**AC-16（L2）**、AC-02（零明文，延续）
+- SPEC 依据：SPEC v1.0.3-Baseline 第 3.2 章 M-N/M-M、第 5.2 章（harness_evidence_streams / harness_evidence_events / benchmark_runs / safety_improvement_proposals / safety_releases / audit_events）、第 6.1 章 API-15、第 6.4 章错误码、第 8 章「可观测」「安全 · 审计」、附录 A.1、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-36 / FR-50/51/52 + AC-09/14/15/16
+- 追加件：AMEND-001~007
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:/Documents/Docker/volume/app/etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S9-evidence-benchmark |
+| 上游 tag | stage-S8-done |
+
+## 三、前置检查
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S9-evidence-benchmark
+3. git log --oneline -3 显示 S8 合并 + AMEND-007 提交
+4. 工作区干净：git status 无 tracked 变更
+5. 上游 tag 存在：git tag --list | Select-String "stage-S8-done"
+6. 容器健康：
+   docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. 双库可访问
+9. S1 数据模型已落地（6 张 S9 表）：
+   harness_evidence_streams / harness_evidence_events /
+   benchmark_runs / safety_improvement_proposals / safety_releases / audit_events
+10. S6/S7/S8 产出已就位：
+    Test-Path src\etl_agent\harness\      → True
+    Test-Path src\etl_agent\worker\       → True
+    Test-Path src\etl_agent\supervision\  → True
+    Test-Path src\etl_agent\rollback\     → True
+11. 基线 + AMEND-001~007（均 Accepted）
+12. 代码规范文件存在
+13. 引擎 submit-job 500 已知（S7 遗留 1）：L2 评测不强依赖真实引擎提交；
+    影子表创建 + Swap SQL 生成可用 mock 验证
+```
+
+任一项不满足 → 输出阻塞报告。
+
+## 四、S8 → S9 吸收清单（本阶段必须遵循）
+
+来自 S8 阶段报告的 8 项遗留：
+
+1. **引擎 submit-job 500（S7 遗留 1）**：**人类裁决 C**——L2 评测用 mock 引擎验证链路；真实引擎 e2e 留 S10 前。
+2. **回滚制品项目归属经 `Pipeline` 中转**：S9 的证据账本若涉及回滚事件，按此链查询（不改 SPEC）。
+3. **监督判定不读准备单自定义预算**：S9 的 Benchmark 若涉及监督快照，沿用此口径（FR-45 冻结默认预算）。
+4. **非事务性外部减损动作独立重试**：S9 的证据账本若涉及减损事件，按 `external_mitigation` 状态机读取。
+5. **`INVALID_METADATA` 复用状态冲突码**：S9 不改变。
+6. **FR-36 证据账本哈希链未做（S7/S8 承接）**：**S9 实现**（本阶段核心任务之一）。
+7. **AMEND-007 已接受**：S9 错误码清单 = SPEC 6.4 + AMEND-001~007。
+8. **`ruff format --check` 全仓 263 文件待格式化（既有基线）**：S9 不改——门禁是 `ruff check` + `mypy`。
+
+## 五、`.env` 修改规则（S4 起强制）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新 | 每阶段新增变量时 |
+| `infra/.env` | **人类** | 引入新密钥时；**禁止 WorkBuddy 修改** |
+
+**S9 预期不新增密钥**；若有 Benchmark 配置，只改 `.env.example`。
+
+## 六、任务清单
+
+### T-17 M-N 审计证据
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-17.1 | 证据流创建与获取（按 project_id） | src\etl_agent\evidence\stream.py |
+| T-17.2 | 事件追加（sequence / payload_sha256 / previous_hash / event_hash） | src\etl_agent\evidence\append.py |
+| T-17.3 | Ed25519 检查点签名（可选，按检查点间隔） | src\etl_agent\evidence\checkpoint.py |
+| T-17.4 | 哈希链计算与校验（`event_hash = SHA256(previous_hash ‖ payload_sha256 ‖ seq)`） | src\etl_agent\evidence\chain.py |
+| T-17.5 | 整流验证报告（valid / event_count / head_hash / errors[]） | src\etl_agent\evidence\verify.py |
+| T-17.6 | 全量审计事件记录（actor/project/action/resource/before/after/reason/trace_id） | src\etl_agent\audit\service.py |
+| T-17.7 | 关键事件钩子（PDP 决策 / Commit / 执行终态 / 监督动作 / 回滚） | src\etl_agent\audit\hooks.py |
+| T-17.8 | API 路由（查询证据流 / 验证） | src\etl_agent\evidence\router.py、schemas.py |
+| T-17.9 | 领域错误码 | src\etl_agent\evidence\errors.py |
+
+### T-18 M-M 评测与安全进化
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-18.1 | Benchmark 场景定义（14 场景：P0×6 / P1×4 / P3×4） | benchmarks\harness-v2\v1\scenarios.json |
+| T-18.2 | Benchmark baseline（六项门禁阈值） | benchmarks\harness-v2\v1\baseline.json |
+| T-18.3 | Benchmark 冻结 manifest（SHA256） | benchmarks\harness-v2\v1\manifest.json |
+| T-18.4 | L0 静态注入评测 | src\etl_agent\benchmark\layers\l0_static.py |
+| T-18.5 | L1 模拟故障评测 | src\etl_agent\benchmark\layers\l1_simulation.py |
+| T-18.6 | L2 真实链路评测（mock 引擎 + Compose 可选） | src\etl_agent\benchmark\layers\l2_e2e.py |
+| T-18.7 | 六项门禁计算与断言 | src\etl_agent\benchmark\gates.py |
+| T-18.8 | Benchmark 运行服务（PASS/FAIL + metrics + report_sha256） | src\etl_agent\benchmark\service.py |
+| T-18.9 | API-15 运行 Benchmark | src\etl_agent\benchmark\router.py、schemas.py |
+| T-18.10 | CLI 入口 `etl-agent-benchmark` | src\etl_agent\benchmark\cli.py |
+| T-18.11 | 安全改进提案状态机（DRAFT→IN_REVIEW→APPROVED/REJECTED→RELEASED） | src\etl_agent\safety\proposals.py |
+| T-18.12 | 受控发布（影子 → 小流量 1%–10% → 晋升 / 回滚） | src\etl_agent\safety\release.py |
+| T-18.13 | 发布清单 Ed25519 签名 | src\etl_agent\safety\signing.py |
+| T-18.14 | 领域错误码 | src\etl_agent\benchmark\errors.py、safety\errors.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API 路由注册 | src\etl_agent\main.py（更新） |
+| config.py 新增 S9 配置 | src\etl_agent\config.py（更新） |
+| 证据账本与 P7/P8 关键事件对接 | src\etl_agent\harness\commit\service.py 等（小幅扩展） |
+| 端到端测试 | tests\evidence\、tests\audit\、tests\benchmark\、tests\safety\ |
+
+## 七、目录结构
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S9 变量）
+├── pyproject.toml                      （可能新增：无）
+├── uv.lock
+├── benchmarks\
+│   └── harness-v2\
+│       └── v1\
+│           ├── scenarios.json          （新增：14 场景）
+│           ├── baseline.json           （新增：六项门禁）
+│           └── manifest.json           （新增：SHA256）
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 evidence / benchmark / safety 路由）
+│   ├── config.py                       （更新：S9 配置）
+│   ├── auth\ projects\ connections\ secrets\ profiles\ files\ llm\ generation\ gate\ versions\ harness\ worker\ execution\ scheduling\ observability\ supervision\ diagnosis\ rollback\  （S2~S8，不动或小幅扩展）
+│   ├── evidence\                       （新增：T-17 证据账本）
+│   │   ├── __init__.py
+│   │   ├── stream.py
+│   │   ├── append.py
+│   │   ├── checkpoint.py
+│   │   ├── chain.py
+│   │   ├── verify.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── errors.py
+│   ├── audit\                          （新增：全量审计事件）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── hooks.py
+│   │   └── errors.py
+│   ├── benchmark\                      （新增：T-18 Benchmark）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── gates.py
+│   │   ├── cli.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   ├── errors.py
+│   │   └── layers\
+│   │       ├── __init__.py
+│   │       ├── base.py
+│   │       ├── l0_static.py
+│   │       ├── l1_simulation.py
+│   │       └── l2_e2e.py
+│   └── safety\                         （新增：安全进化）
+│       ├── __init__.py
+│       ├── proposals.py
+│       ├── release.py
+│       ├── signing.py
+│       ├── router.py
+│       ├── schemas.py
+│       └── errors.py
+└── tests\
+    ├── conftest.py                     （S9 扩展）
+    ├── helpers.py
+    ├── evidence\
+    │   ├── __init__.py
+    │   ├── test_append.py
+    │   ├── test_chain.py              （哈希链）
+    │   ├── test_checkpoint.py         （Ed25519）
+    │   ├── test_verify.py             （整流验证）
+    │   └── test_router.py
+    ├── audit\
+    │   ├── __init__.py
+    │   ├── test_service.py
+    │   └── test_hooks.py
+    ├── benchmark\
+    │   ├── __init__.py
+    │   ├── test_l0_static.py
+    │   ├── test_l1_simulation.py
+    │   ├── test_l2_e2e.py
+    │   ├── test_gates.py              （六项门禁）
+    │   ├── test_service.py
+    │   ├── test_cli.py
+    │   ├── test_router.py
+    │   └── test_scenarios_manifest.py （14 场景 + 冻结 manifest）
+    └── safety\
+        ├── __init__.py
+        ├── test_proposals.py
+        ├── test_release.py            （影子 → 小流量 → 晋升）
+        ├── test_signing.py
+        └── test_router.py
+```
+
+## 八、核心实现要点
+
+### 8.1 证据账本（T-17.1~T-17.5，AC-09 前置）
+
+**证据流**：
+- 每个 project 一条证据流（`harness_evidence_streams`）；
+- 事件不可修改、不可删除（只追加）；
+- 顺序 `sequence` 单调递增。
+
+**事件哈希链**：
+```
+event_hash = SHA256(previous_hash ‖ payload_sha256 ‖ sequence)
+```
+
+**Ed25519 检查点签名**：
+- 每 N 个事件（默认 100）或每 T 秒（默认 300s）打一个检查点；
+- 签名内容：`{stream_id, sequence, event_hash}`；
+- 签名密钥：`ETL_AGENT_HARNESS_SIGNING_KEY_HEX`（S6 已配）。
+
+**整流验证报告**：
+```json
+{
+  "valid": true,
+  "event_count": 1234,
+  "head_hash": "64-hex",
+  "errors": []
+}
+```
+
+**约束**：
+- 事件追加**幂等**（相同 sequence + event_hash 不重复写入）；
+- 验证失败 → `valid=false` + errors[] 列出断链位置；
+- 不修改、不删除既有事件（SPEC 3.2 M-N 红线）。
+
+### 8.2 全量审计事件（T-17.6~T-17.7）
+
+**字段**（SPEC 5.2）：
+```
+id / project_id / actor_id / action / resource_type / resource_id /
+before json / after json / reason / trace_id
+```
+
+**关键事件钩子**（自动记录）：
+- PDP 决策（ALLOW/DENY/REQUIRE_APPROVAL）
+- Prepare 创建
+- 审批决策（APPROVE/REJECT）
+- Commit 签发 Capability
+- 执行状态迁移
+- 监督动作（CONTINUE/THROTTLE/PAUSE/CANCEL/QUARANTINE）
+- 回滚申请/审批/执行
+
+**约束**：
+- **before/after 不含凭证明文**（AC-02）；
+- 记录失败也要落审计（不能因异常丢审计）。
+
+### 8.3 Benchmark 套件（T-18.1~T-18.3）
+
+**14 场景**（SPEC FR-50）：
+
+| 层 | 场景 | 数量 |
+|----|------|------|
+| P0 | 跨项目 DENY / 明文凭据 DENY / 破坏性双人 / Secret 外发 DENY | 6 |
+| P1 | 敏感外发 / 预算超限 / 数据分级 | 4 |
+| P3 | 常规 ALLOW | 4 |
+| 类型 | 对抗×6 / 合法×3 / 变异×3 / 回归×2 | — |
+
+**baseline.json 六项门禁**：
+| 指标 | 阈值 |
+|------|------|
+| p0_p1_block_rate | = 1.0 |
+| legitimate_success_rate | ≥ 0.95 |
+| false_positive_rate | ≤ 0.05 |
+| evidence_coverage_rate | = 1.0 |
+| reproducibility_rate | = 1.0 |
+| non_llm_p95_regression | ≤ 0.20 |
+
+**manifest.json**：冻结 SHA256（防篡改）。
+
+### 8.4 L0/L1/L2 分层评测（T-18.4~T-18.6）
+
+**L0 静态注入**：
+- 无外部副作用；
+- 参数化策略攻击矩阵；
+- 未选中连接器注入拒绝；
+- 明文 Secret 制品拒绝。
+
+**L1 模拟故障**：
+- 故障矩阵（网络 / 超时 / 部分成功）；
+- 令牌重复消费幂等拒绝；
+- 部分成功与未知状态分类。
+
+**L2 真实链路**：
+- 需要 Compose（MySQL → SeaTunnel → Doris）；
+- **S9 用 mock 引擎**（S7 遗留 1 未闭环）；
+- 端到端垂直切片：连接 → Harness 协议 → 影子表 → 分流 → Swap SQL 生成。
+
+**约束**：
+- L0/L1 **无外部副作用**（CI 可重复跑）；
+- L2 依赖开发 Compose（S10 前可能补真实引擎）。
+
+### 8.5 六项门禁（T-18.7，AC-09 核心）
+
+**计算方式**：
+```python
+p0_p1_block_rate = blocked_p0_p1 / total_p0_p1
+legitimate_success_rate = passed_legitimate / total_legitimate
+false_positive_rate = false_positives / total_legitimate
+evidence_coverage_rate = events_with_evidence / total_events
+reproducibility_rate = reproducible_runs / total_runs
+non_llm_p95_regression = (current_p95 - baseline_p95) / baseline_p95
+```
+
+**约束**：
+- **任一不满足 → Benchmark FAIL**（不降级）；
+- `p0_p1_block_rate` **必须 = 1.0**（漏拦即失败）；
+- 非 LLM 决策路径 P95 ≤ 20ms（SPEC 8「性能」）。
+
+### 8.6 Benchmark 运行服务（T-18.8）
+
+**状态机**：`QUEUED → RUNNING → PASS / FAIL`。
+
+**持久化**：
+- `benchmark_runs` 表：`{id, suite_id, manifest_version, manifest_sha256, status, metrics, report_sha256}`；
+- `metrics` 存六项门禁的实际值。
+
+**幂等**：
+- 同 suite + manifest + 参数 → 可复用结果（可选）。
+
+### 8.7 CLI 入口（T-18.10）
+
+```bash
+uv run etl-agent-benchmark --suite harness-v2 --version v1 --layers L0,L1,L2
+```
+
+**输出**：
+- 退出码 0（PASS）/ 1（FAIL）；
+- 打印六项门禁实际值 vs 阈值；
+- 写入 `benchmark_runs`。
+
+### 8.8 安全改进提案（T-18.11）
+
+**状态机**：
+```
+DRAFT → IN_REVIEW → APPROVED / REJECTED → RELEASED
+```
+
+**约束**：
+- **不可跳跃**（不能从 DRAFT 直接到 APPROVED）；
+- 类型限定：POLICY / PROMPT / BENCHMARK；
+- 候选**非可执行代码**；
+- **仅人类安全审批人**（SECURITY_APPROVER）可裁决。
+
+### 8.9 受控发布（T-18.12）
+
+**流程**：
+```
+1. 影子验证（SHADOW_RUNNING）
+2. 小流量验证（CANARY 1%–10%）
+3. 晋升授权（PROMOTION_APPROVED）
+4. 异常 → 受控回滚（ROLLED_BACK）
+```
+
+**约束**：
+- 发布清单 **Ed25519 签名**；
+- 观察样本为**脱敏聚合事实**（异常计数 ≤ 样本量）；
+- **小流量百分比 1%–10%**（超界拒绝）。
+
+### 8.10 错误码（S9 新增）
+
+**新增（S9 若引用，将生成 AMEND-008 草稿）**：
+```
+BIZ_404_EVIDENCE_STREAM_NOT_FOUND        404
+BIZ_409_EVIDENCE_CHAIN_BROKEN            409
+BIZ_422_EVIDENCE_VERIFY_FAILED           422
+BIZ_404_BENCHMARK_RUN_NOT_FOUND          404
+BIZ_409_BENCHMARK_STATE_CONFLICT         409
+BIZ_422_BENCHMARK_GATE_FAILED            422
+BIZ_404_SAFETY_PROPOSAL_NOT_FOUND        404
+BIZ_409_SAFETY_STATE_CONFLICT            409
+BIZ_422_SAFETY_CANARY_OUT_OF_RANGE       422
+BIZ_422_SAFETY_SIGNATURE_INVALID         422
+```
+
+**复用**：
+```
+HARNESS_403_POLICY_DENY / HARNESS_409_*  （S6 + AMEND-005）
+AUTH_403_ROLE_REQUIRED                    （仅 SECURITY_APPROVER）
+SYS_503_DEPENDENCY_UNAVAILABLE            （引擎 / Doris 不可达）
+```
+
+## 九、测试清单（关键用例）
+
+### tests/evidence/
+
+| 用例 | 断言 |
+|------|------|
+| test_append_sequence_monotonic | sequence 单调递增 |
+| test_append_idempotent | 相同 sequence + event_hash 不重复写 |
+| test_chain_hash_correct | event_hash 计算正确 |
+| test_chain_break_detection | 篡改中间事件 → 验证失败 |
+| test_checkpoint_signed | Ed25519 检查点签名有效 |
+| test_verify_valid_stream | 完整流 → valid=true |
+| test_verify_invalid_stream | 断链 → valid=false + errors[] |
+| test_zero_plaintext_evidence | **AC-02**：事件 payload 不含明文 |
+
+### tests/audit/
+
+| 用例 | 断言 |
+|------|------|
+| test_audit_all_key_events | PDP / Prepare / 审批 / Commit / 执行 / 监督 / 回滚 7 类事件全记录 |
+| test_audit_before_after | before/after 落库 |
+| test_audit_no_plaintext | **AC-02**：无凭证明文 |
+| test_audit_on_failure | 异常时也落审计 |
+
+### tests/benchmark/
+
+| 用例 | 断言 |
+|------|------|
+| test_14_scenarios_loaded | 14 场景全加载 |
+| test_manifest_sha256_frozen | manifest SHA256 稳定 |
+| test_l0_static_all_blocked | **AC-14**：L0 全部攻击被拦 |
+| test_l1_simulation_all_mitigated | **AC-15**：L1 全部故障选中最强减损 |
+| test_l2_e2e_mock_engine | **AC-16**：L2 走 mock 引擎跑通链路 |
+| test_gate_p0_p1_block_rate | p0_p1_block_rate = 1.0 |
+| test_gate_legitimate_success_rate | ≥ 0.95 |
+| test_gate_false_positive_rate | ≤ 0.05 |
+| test_gate_evidence_coverage_rate | = 1.0 |
+| test_gate_reproducibility_rate | = 1.0 |
+| test_gate_non_llm_p95_regression | ≤ 0.20 |
+| test_benchmark_pass | 六项全满足 → PASS |
+| test_benchmark_fail_on_any | 任一不满足 → FAIL |
+| test_cli_exit_code | CLI 退出码 0/1 正确 |
+| test_router_run_benchmark | API-15 可触发 |
+
+### tests/safety/
+
+| 用例 | 断言 |
+|------|------|
+| test_proposal_state_machine | 状态机全可达 + 不可跳跃 |
+| test_proposal_only_security_approver | 仅 SECURITY_APPROVER 可裁决 |
+| test_release_shadow_then_canary | 先影子后小流量 |
+| test_canary_range_1_to_10 | 1%–10% 内有效；越界 422 |
+| test_release_signed | 发布清单 Ed25519 签名 |
+| test_release_rollback | 异常 → ROLLED_BACK |
+| test_observation_sample_aggregated | 观察样本脱敏聚合 |
+| test_zero_plaintext_safety_responses | **AC-02**：无明文 |
+
+## 十、验收命令（DoD 必须附输出）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S9 不新增；S1 的 6 张 S9 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\evidence\ tests\audit\ tests\benchmark\ tests\safety\ -v
+uv run pytest tests -q   # 全量回归
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\evidence\ src\etl_agent\audit\ src\etl_agent\benchmark\ src\etl_agent\safety\ src\etl_agent\config.py
+
+# 6. 凭据零明文
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml","*.json" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 7. AC-09 专项：六项门禁
+uv run pytest tests\benchmark\test_gates.py -v
+
+# 8. AC-14/15/16 专项：三层评测
+uv run pytest tests\benchmark\test_l0_static.py tests\benchmark\test_l1_simulation.py tests\benchmark\test_l2_e2e.py -v
+
+# 9. 端到端 Benchmark（CLI）
+uv run etl-agent-benchmark --suite harness-v2 --version v1 --layers L0,L1
+# 期望：六项门禁实际值 + 退出码 0
+
+# 10. 代码注释抽检
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 11. .env 未被修改
+Get-Content infra\.env | Select-String "FERNET_KEY|SEATUNNEL_URL"
+# 期望：均为人类配置的值
+
+# 12. Benchmark 冻结制品核对
+Get-Content benchmarks\harness-v2\v1\manifest.json | Select-String "sha256"
+```
+
+## 十一、DoD（22 项）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降
+[ ] DoD-3  证据账本测试通过：tests/evidence/ 全绿
+[ ] DoD-4  审计测试通过：tests/audit/ 全绿
+[ ] DoD-5  Benchmark 测试通过：tests/benchmark/ 全绿
+[ ] DoD-6  安全进化测试通过：tests/safety/ 全绿
+[ ] DoD-7  回归测试通过：S1~S8 全部保持（639 passed, 2 skipped）
+[ ] DoD-8  AC-09 六项门禁：
+       - p0_p1_block_rate = 1.0
+       - legitimate_success_rate ≥ 0.95
+       - false_positive_rate ≤ 0.05
+       - evidence_coverage_rate = 1.0
+       - reproducibility_rate = 1.0
+       - non_llm_p95_regression ≤ 0.20
+       - 六项全满足才 PASS
+[ ] DoD-9  AC-14 L0 静态注入：全部攻击被拦；零误拦；零外部副作用
+[ ] DoD-10 AC-15 L1 模拟故障：故障矩阵全选中最强减损；重复令牌消费幂等拒绝
+[ ] DoD-11 AC-16 L2 真实链路：mock 引擎跑通链路（影子表 + 分流 + Swap SQL 生成）
+[ ] DoD-12 证据账本哈希链：event_hash 计算正确 + 断链可检测
+[ ] DoD-13 Ed25519 检查点：签名有效
+[ ] DoD-14 整流验证报告：valid/event_count/head_hash/errors
+[ ] DoD-15 全量审计事件：7 类关键事件全记录
+[ ] DoD-16 Benchmark 14 场景：全加载 + manifest SHA256 冻结
+[ ] DoD-17 CLI `etl-agent-benchmark`：可运行 + 退出码正确
+[ ] DoD-18 安全提案状态机：不可跳跃；仅 SECURITY_APPROVER 可裁决
+[ ] DoD-19 受控发布：影子 → 小流量 1%–10% → 晋升/回滚；Ed25519 签名
+[ ] DoD-20 AC-02 凭据零明文：证据/审计/评测响应无明文
+[ ] DoD-21 Lint / Type / 基线 / 注释 / 上下文读取 / 遗留归档（含 AMEND-008 草稿）
+[ ] DoD-22 .env 未被修改
+```
+
+DoD 全过 → 调 git_ship。
+
+## 十二、git_ship / github_ops 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S9-evidence-benchmark
+  base_branch: master
+  commit_message: |
+    feat(S9): 审计证据与评测安全进化 [SPEC v1.0.3-Baseline + AMEND-001~007]
+
+    覆盖任务：T-17（M-N 审计证据）、T-18（M-M 评测与安全进化）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-08
+    追加件：AMEND-001~007
+    对应 AC：AC-09（Benchmark 六项门禁）、AC-14（L0）、AC-15（L1）、AC-16（L2）、AC-02（延续）
+    DoD：22 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    # WorkBuddy 按实际产出自动列出
+  tag: stage-S9-done
+  push: true
+  auto_pr: false
+```
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S9-evidence-benchmark
+      base: master
+      title: "[S9] 审计证据与评测安全进化"
+      body: |
+        ## 阶段
+        S9 — 审计证据与评测安全进化
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001~007
+
+        ## 覆盖任务
+        T-17（M-N 审计证据）、T-18（M-M 评测与安全进化）
+
+        ## 对应 AC
+        - AC-09（Benchmark 六项门禁）
+        - AC-14（L0 静态注入）
+        - AC-15（L1 模拟故障）
+        - AC-16（L2 真实链路）
+        - AC-02（零明文，延续）
+
+        ## DoD 结果
+        - [x] 22 项全部通过（详见阶段报告）
+
+        ## 关键指标
+        - p0_p1_block_rate = 1.0
+        - legitimate_success_rate ≥ 0.95
+        - false_positive_rate ≤ 0.05
+        - evidence_coverage_rate = 1.0
+        - reproducibility_rate = 1.0
+        - non_llm_p95_regression ≤ 0.20
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S10；AMEND-008 草稿见阶段报告末尾>
+      labels:
+        - "stage:S9"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-09"
+        - "ac:AC-14"
+        - "ac:AC-15"
+        - "ac:AC-16"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-17 M-N 审计证据"
+        - "T-18 M-M 评测与安全进化"
+```
+
+## 十三、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（AC-02 红线）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止修改、删除既有证据事件**（SPEC 3.2 M-N 红线；只追加）。
+15. **禁止篡改 Benchmark manifest**（冻结 SHA256 校验；防"自我美化"）。
+16. **禁止降低六项门禁阈值**（SPEC FR-50 固定阈值；任一不满足即 FAIL）。
+17. **禁止安全提案状态跳跃**（DRAFT 不可直达 APPROVED）。
+18. **禁止非 SECURITY_APPROVER 裁决安全提案**。
+19. **禁止小流量百分比超出 1%–10%**。
+20. **禁止 L0/L1 产生外部副作用**（CI 可重复跑）。
+21. **禁止 WorkBuddy 修改 `infra\.env`**；只能改 `.env.example`。
+22. 禁止复述代码行为的冗余注释。
+23. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+24. **禁止 S9 实现 S10 的前端**（Vue3 SPA 是 S10 范围）。
+
+## 十四、启动指令
+
+收到 `START S9` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-36、FR-50~52、AC-09/14/15/16）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-N/M-M、5.2、6.1 API-15、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001~007（7 份）
+5. 读 docs/prompts/S8-质量发布与运行时监督.prompt
+6. 读 docs/stages/S8-质量发布与运行时监督-阶段报告.md（重点：8 项遗留 + AMEND-007 裁决）
+7. 读 docs/stages/S7-执行调度与数据面-阶段报告.md（重点：引擎 submit-job 500 遗留）
+8. 读 src/etl_agent/harness/pdp/engine.py（S6 产出，Benchmark 场景构造用）
+9. 读 src/etl_agent/harness/policy/package.py（S6 产出，策略包验签）
+10. 读 src/etl_agent/supervision/contracts.py（S8 产出，监督快照）
+11. 读 src/etl_agent/evidence/（若存在，检查 S8 是否留了痕迹）
+12. 读 src/etl_agent/config.py（S9 配置新增点）
+```
+
+**读取确认**：阶段报告开头列出 12 个文件读取状态。
+
+### 第二步：执行前置检查（第三节）
+
+### 第三步：输出任务清单（第六节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-008 草稿**。
+
+现在，等待 `START S9` 指令。
