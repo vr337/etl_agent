@@ -38,3 +38,64 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  # ============ S7：控制面 API 容器化 ============
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: etl_agent_api
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    profiles: ["app"]
+
+  # ============ S7：Celery Worker ============
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: etl_agent_worker
+    restart: unless-stopped
+    command: uv run celery -A etl_agent.worker worker --loglevel=info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - D:/Documents/Docker/volume/app/etl_agent/file_assets:/data/file-assets:ro
+    profiles: ["exec"]
+
+  # ============ S7：Celery Beat ============
+  beat:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: etl_agent_beat
+    restart: unless-stopped
+    command: uv run celery -A etl_agent.worker beat --loglevel=info
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles: ["exec"]
+
+  # ============ S7：SeaTunnel Zeta ============
+  seatunnel:
+    image: flowpilot/seatunnel:2.3.13
+    container_name: etl_agent_seatunnel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./seatunnel/conf:/opt/seatunnel/conf:rw
+      - ./seatunnel/plugins:/opt/seatunnel/plugins:ro
+      - D:/Documents/Docker/volume/app/etl_agent/file_assets:/data/file-assets:ro
+    profiles: ["exec", "e2e"]
