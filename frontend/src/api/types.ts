@@ -266,7 +266,8 @@ export interface RollbackView {
   id: string
   execution_run_id: string
   status: string
-  risk_level: RiskLevel
+  /** 后端 rollback_requests 无风险列（PDP 判决在 Harness 副作用准备单上），列表回 null */
+  risk_level: RiskLevel | null
   artifact_manifest: Record<string, unknown> | null
   created_at: string
 }

@@ -85,3 +85,36 @@ async def test_bootstrap_token_too_short_rejected_at_startup() -> None:
     settings = make_settings(bootstrap_enabled=True, bootstrap_token=short_token)
     with pytest.raises(ProductionConfigError):
         settings.validate_bootstrap()
+
+
+async def test_bootstrap_persists_beyond_request_scope(
+    app: FastAPI, db_session: AsyncSession
+) -> None:
+    """Bootstrap 必须**显式 commit**：路由结束前调用一次 session.commit（联调回归）。
+
+    背景（fix/S10-e2e-integration）：`get_session` 的 `async with` 在请求结束时会
+    回滚未提交事务。路由若只 flush 而不 commit，会「返回 201 但数据全部丢失」，
+    后续所有请求因 subject 查不到而 401 AUTH_401_UNKNOWN_ACTOR——这是真实联调
+    才暴露的缺陷。
+
+    测试手法：测试夹具使用 `create_savepoint` 模式，应用侧 commit 不落真实库，
+    因此无法靠「换连接读取」区分（savepoint 内外一致）。此处改为**探测行为契约**
+    ——用 `commit` 被调用的次数判定路由是否提交。缺失时该断言直接失败（红灯）。
+    """
+    commit_calls: list[int] = []
+    original_commit = db_session.commit
+
+    async def _spy_commit() -> None:
+        commit_calls.append(1)
+        await original_commit()
+
+    db_session.commit = _spy_commit  # type: ignore[method-assign]
+
+    async with make_client(app) as client:
+        response = await client.post(
+            BOOTSTRAP_URL,
+            json={"project_name": "提交语义验证", "admin_subject": "persist-admin"},
+            headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+        )
+    assert response.status_code == 201, response.text
+    assert commit_calls, "Bootstrap 路由未调用 session.commit：数据不会落库（401 根因）"

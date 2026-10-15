@@ -25,6 +25,27 @@ class FileAssetResponse(BaseModel):
     created_at: datetime
 
 
+class FileAssetListView(BaseModel):
+    """文件资产列表项（联调修复新增；前端 `FileAssetView` 对齐）。
+
+    `storage_path` 绝不外泄（S4 禁止事项 16：引擎只读挂载路径）——列表同样只回
+    元数据。两处**如实口径**（后端不持有更细粒度的事实，不伪造）：
+
+    - `filename`：取受挂载路径的 basename。`file_assets` 无「原始文件名」列
+      （上传时仅用于嗅探格式，不落库），故展示名是落盘名 `<asset_id>.<ext>`；
+    - `upload_status`：上传为同步落盘，**任何未完整写入的资产都不会入列**
+      （失败即清理半成品并报错），故凡列出即 `COMPLETED`。
+    """
+
+    id: uuid.UUID
+    filename: str
+    size_bytes: int
+    row_count: int
+    format: str
+    upload_status: str = "COMPLETED"
+    created_at: datetime
+
+
 class FileColumn(BaseModel):
     """文件列规格（FR-13：Schema 推断 + 是否已脱敏）。"""
 

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.auth.actor_resolver import ActorContext
@@ -19,11 +20,13 @@ from etl_agent.auth.dependencies import require_actor_for_project, require_proje
 from etl_agent.generation import service as generation_service
 from etl_agent.generation.schemas import (
     AgentRunCreateRequest,
+    AgentRunListView,
     AgentRunMessageRequest,
     AgentRunResponse,
 )
 from etl_agent.infrastructure.database import get_session
-from etl_agent.infrastructure.models import AgentRun
+from etl_agent.infrastructure.models import AgentRun, Pipeline, PipelineVersion
+from etl_agent.infrastructure.pagination import paginate
 
 router = APIRouter(prefix="/api/v1", tags=["generation"])
 
@@ -48,6 +51,55 @@ async def _require_membership(
 ) -> ActorContext:
     """资源回溯项目的成员校验（API-06 无 project_id 路径参数时的等价依赖）。"""
     return await require_actor_for_project(request, session, project_id)
+
+
+@router.get(
+    "/projects/{project_id}/agent-runs",
+    response_model=list[AgentRunListView],
+)
+async def list_agent_runs(
+    project_id: uuid.UUID,
+    response: Response,
+    status: str | None = Query(default=None, description="可选：按运行状态过滤"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> list[AgentRunListView]:
+    """列出项目的生成运行（联调修复新增；Studio 消费）。
+
+    项目隔离：`agent_runs` 无 `project_id` 列，经
+    `pipeline_version_id → PipelineVersion.pipeline_id → Pipeline.project_id` 派生
+    （FR-66 / AC-12）。总数经 `X-Total-Count` 响应头回传，列表体保持裸数组。
+    """
+    base = (
+        select(AgentRun, PipelineVersion.pipeline_id)
+        .join(PipelineVersion, AgentRun.pipeline_version_id == PipelineVersion.id)
+        .join(Pipeline, PipelineVersion.pipeline_id == Pipeline.id)
+        .where(Pipeline.project_id == project_id)
+    )
+    if status is not None:
+        base = base.where(AgentRun.status == status)
+    rows, total = await paginate(
+        session,
+        base,
+        order_by=(AgentRun.created_at.desc(), AgentRun.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [
+        AgentRunListView(
+            id=run.id,
+            thread_id=run.thread_id,
+            pipeline_id=pipeline_id,
+            status=run.status,
+            repair_count=run.generation_repair_count or 0,
+            clarify_question=run.pending_question,
+            created_at=run.created_at,
+        )
+        for run, pipeline_id in rows
+    ]
 
 
 @router.post(

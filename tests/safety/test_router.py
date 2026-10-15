@@ -343,3 +343,61 @@ async def test_release_without_approved_proposal_conflicts(
             headers={"X-Actor-ID": SeededWorkspace.ADMIN_B},
         )
     assert response.status_code == 409
+
+
+async def _approve_proposal(app: FastAPI, seeded: SeededWorkspace) -> dict:
+    """创建 → 提交 → 安全审批人批准，返回提案体（发布前置事实）。"""
+    body = await _create(app, seeded.project_a_id, SeededWorkspace.ENGINEER_A)
+    async with make_client(app) as client:
+        await client.post(
+            f"/api/v1/safety-proposals/{body['id']}/submit",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+        decided = await client.post(
+            f"/api/v1/safety-proposals/{body['id']}/decisions",
+            json={"decision": "APPROVE"},
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_B},
+        )
+    assert decided.status_code == 200, decided.text
+    return body
+
+
+@pytest.mark.asyncio
+async def test_list_releases_empty_before_start(
+    app: FastAPI, seeded: SeededWorkspace, seeded_security_approver
+) -> None:
+    """未启动发布：列表为空集——`{releases: [], total: 0}` 信封（联调修复新增）。"""
+    body = await _approve_proposal(app, seeded)
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/safety-proposals/{body['id']}/releases",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"releases": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_list_releases_after_shadow_start(
+    app: FastAPI, seeded: SeededWorkspace, seeded_security_approver
+) -> None:
+    """影子启动后：列表含该发布记录（信封 + SHADOW_RUNNING 阶段，联调修复新增）。"""
+    body = await _approve_proposal(app, seeded)
+    manifest = "a" * 64
+    async with make_client(app) as client:
+        shadow = await client.post(
+            f"/api/v1/safety-proposals/{body['id']}/releases",
+            json={"manifest_sha256": manifest},
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_B},
+        )
+        assert shadow.status_code == 201, shadow.text
+        response = await client.get(
+            f"/api/v1/safety-proposals/{body['id']}/releases",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total"] == 1
+    assert len(payload["releases"]) == 1
+    assert payload["releases"][0]["id"] == shadow.json()["id"]
+    assert payload["releases"][0]["stage"] == "SHADOW_RUNNING"

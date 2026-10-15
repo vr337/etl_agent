@@ -73,3 +73,81 @@ async def test_zero_plaintext_generation_response(
         assert password not in response.text
     # 澄清回答（用户输入）同样不落业务库、不回传
     assert "再补一句需求描述" not in answered.text
+
+
+async def test_router_list_agent_runs_empty(
+    app: FastAPI, seeded: SeededWorkspace
+) -> None:
+    """空列表：项目无生成运行 → 200 + 空数组 + X-Total-Count=0（联调修复新增）。"""
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/agent-runs",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    assert response.headers["X-Total-Count"] == "0"
+
+
+async def test_router_list_agent_runs_with_data(
+    app: FastAPI, seeded: SeededWorkspace, seeded_profiles: dict[str, uuid.UUID]
+) -> None:
+    """有数据：返回前端契约口径（pipeline_id 派生 / 遥测计数），不含候选正文（FR-67）。"""
+    async with make_client(app) as client:
+        created = await client.post(
+            f"/api/v1/projects/{seeded.project_a_id}/agent-runs",
+            json={
+                "requirement": "生成 orders → orders_wide 的宽表任务",
+                "source_profile_ids": [str(seeded_profiles["source"])],
+                "sink_profile_ids": [str(seeded_profiles["sink"])],
+            },
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+        assert created.status_code == 201, created.text
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/agent-runs",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Total-Count"] == "1"
+    body = response.json()
+    assert len(body) == 1
+    item = body[0]
+    assert item["id"] == created.json()["id"]
+    assert item["status"] == "WAITING_APPROVAL"
+    assert uuid.UUID(item["pipeline_id"])  # pipeline_id 为合法 UUID（经版本链派生）
+    assert item["repair_count"] == 0
+    assert "clarify_question" in item
+    for absent in ("etl_plan", "hocon", "requirement", "candidate"):
+        assert absent not in item
+
+
+async def test_router_list_agent_runs_pagination(
+    app: FastAPI, seeded: SeededWorkspace, seeded_profiles: dict[str, uuid.UUID]
+) -> None:
+    """分页：limit/offset 生效，X-Total-Count 反映全量总数（联调修复新增）。"""
+    async with make_client(app) as client:
+        for _ in range(2):
+            created = await client.post(
+                f"/api/v1/projects/{seeded.project_a_id}/agent-runs",
+                json={
+                    "requirement": "分页用例",
+                    "source_profile_ids": [str(seeded_profiles["source"])],
+                    "sink_profile_ids": [str(seeded_profiles["sink"])],
+                },
+                headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+            )
+            assert created.status_code == 201, created.text
+        path = f"/api/v1/projects/{seeded.project_a_id}/agent-runs"
+        first_page = await client.get(
+            path, params={"limit": 1}, headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A}
+        )
+        second_page = await client.get(
+            path, params={"limit": 1, "offset": 1}, headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A}
+        )
+    assert first_page.status_code == 200, first_page.text
+    assert first_page.headers["X-Total-Count"] == "2"
+    assert len(first_page.json()) == 1
+    assert second_page.status_code == 200, second_page.text
+    assert second_page.headers["X-Total-Count"] == "2"
+    assert len(second_page.json()) == 1

@@ -39,6 +39,10 @@ async def bootstrap_workspace(
     """工作区初始化（API-01，FR-01）。
 
     Header: X-Bootstrap-Token。幂等：已有项目 → 409。
+
+    提交语义：`bootstrap_workspace` 只 flush，**必须在本路由 commit**——
+    `get_session` 的 `async with` 在退出时回滚未提交事务，漏 commit 会让
+    初始化「返回 201 但数据全部丢失」，后续所有请求因用户不存在而 401。
     """
     settings = request.app.state.settings
     project_id, admin_user_id = await bootstrap.bootstrap_workspace(
@@ -49,6 +53,7 @@ async def bootstrap_workspace(
         expected_token=settings.bootstrap_token,
         provided_token=request.headers.get("X-Bootstrap-Token", ""),
     )
+    await session.commit()
     return BootstrapResponse(project_id=project_id, admin_user_id=admin_user_id)
 
 
@@ -78,6 +83,7 @@ async def add_member(
         session, project_id=project_id, subject=body.subject, role=body.role
     )
     user = await get_or_create_user(session, body.subject)
+    await session.commit()
     return MemberResponse(
         user_id=membership.user_id, subject=user.subject, display_name=user.display_name, role=membership.role
     )
@@ -94,6 +100,7 @@ async def remove_member(
     await memberships.remove_member(
         session, project_id=project_id, user_id=user_id, actor_user_id=actor.user_id
     )
+    await session.commit()
 
 
 @router.patch("/projects/{project_id}/members/{user_id}", response_model=MemberResponse)
@@ -111,6 +118,7 @@ async def update_member_role(
     user = await get_user_by_id(session, user_id)
     if user is None:  # 成员存在则用户必然存在（FK 保证）；防御性分支
         raise NotFound("用户不存在")
+    await session.commit()
     return MemberResponse(
         user_id=user.id, subject=user.subject, display_name=user.display_name, role=membership.role
     )
@@ -155,6 +163,7 @@ async def grant_role(
     user = await get_user_by_id(session, grant.user_id)
     if user is None:
         raise NotFound("用户不存在")
+    await session.commit()
     return RoleGrantResponse(
         id=grant.id,
         user_id=grant.user_id,
@@ -174,3 +183,4 @@ async def revoke_role(
 ) -> None:
     """撤销 Harness 职责（FR-03，写操作需 ADMIN）。"""
     await role_grants.revoke_role(session, project_id=project_id, grant_id=grant_id)
+    await session.commit()

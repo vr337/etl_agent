@@ -69,6 +69,23 @@ class RollbackResponse(BaseModel):
     updated_at: datetime
 
 
+class RollbackListView(BaseModel):
+    """回滚申请列表视图（联调修复新增；前端契约口径，只含治理事实与制品引用）。
+
+    与 `RollbackResponse` 的差异：`execution_run_id` 即后端 `run_id`；
+    `risk_level` 在后端无对应列——PDP 风险判决落在 Harness 副作用准备单上
+    （不在回滚申请表），列表不跨域拼接，如实回 None
+    （前端 `RollbackView.risk_level` 相应由必填放宽为可空）。
+    """
+
+    id: uuid.UUID
+    execution_run_id: uuid.UUID
+    status: str
+    risk_level: str | None = None
+    artifact_manifest: dict[str, Any] | None = None
+    created_at: datetime
+
+
 class RollbackCleanupView(BaseModel):
     """清理申请视图（只含引用，不含数据）。"""
 
@@ -98,5 +115,6 @@ __all__ = [
     "RollbackCleanupView",
     "RollbackCreateRequest",
     "RollbackDecisionRequest",
+    "RollbackListView",
     "RollbackResponse",
 ]

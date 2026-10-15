@@ -50,9 +50,11 @@ async function onSubmit() {
     )
     result.value = data
     done.value = true
-    // 以 admin_user_id 作为初始 actor：后续经 X-Actor-ID 注入（仅非生产）
+    // X-Actor-ID 的语义是 subject（`actor_resolver.resolve_user` 按 User.subject 查表），
+    // 不是 user_id —— admin_user_id 是 UUID 主键，注入它会导致 401 AUTH_401_UNKNOWN_ACTOR。
+    // 此处以登录主体 admin_subject 作为初始 actor：后续经 X-Actor-ID 注入（仅非生产）。
     actor.bind({
-      actorId: data.admin_user_id,
+      actorId: adminSubject.value,
       projectId: data.project_id,
       name: adminSubject.value,
       role: 'ADMIN',

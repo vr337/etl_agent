@@ -88,3 +88,36 @@ class CommitResponse(BaseModel):
     expires_at: datetime
     run_id: uuid.UUID
     outbox_id: uuid.UUID
+
+
+class ApprovalSlotView(BaseModel):
+    """审批槽位事实（前端 ApprovalCard 消费；字段取自 `harness_approval_decisions`）。"""
+
+    role: str
+    decided_by: uuid.UUID | None = None
+    decision: str | None = None
+    reason: str | None = None
+    evidence_sha256: str | None = None
+    decided_at: datetime | None = None
+
+
+class PreparationListView(BaseModel):
+    """API-08 列表出参：项目下准备单（前端审批台消费；展示口径）。
+
+    与 `PreparationResponse`（创建出参）的差异：列表需带 `pipeline_version_id`、
+    `decision`（PDP 判决）与审批槽位事实，供前端「待四眼审批」卡与「申请人禁自批」
+    判定；创建出参只回新建事实。两模型指向同一行，无新增事实。
+    """
+
+    id: uuid.UUID
+    pipeline_version_id: uuid.UUID
+    decision: str = Field(description="PDP 判决（ALLOW / DENY / REQUIRE_APPROVAL / DEFER）")
+    risk_level: str
+    status: str
+    required_roles: list[str] = Field(default_factory=list)
+    required_approvals: int = 0
+    approvals: list[ApprovalSlotView] = Field(default_factory=list)
+    impact_report: dict[str, object] | None = None
+    rollback_plan: str | None = None
+    expires_at: datetime | None = None
+    created_at: datetime | None = None

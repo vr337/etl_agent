@@ -43,8 +43,10 @@ export async function createRelease(
   proposalId: string,
   payload: { canary_percent: number },
 ): Promise<ReleaseView> {
+  // 后端 POST 在**复数**路径（`/safety-proposals/{id}/releases`）；
+  // 单数 `/release` 只提供 GET（读取当前发布态），POST 会得到 405。
   const { data } = await client.post<ReleaseView>(
-    `/safety-proposals/${proposalId}/release`,
+    `/safety-proposals/${proposalId}/releases`,
     payload,
   )
   return data

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from etl_agent.auth.actor_resolver import ActorContext
 from etl_agent.auth.dependencies import require_actor_for_project, require_project_member
 from etl_agent.infrastructure.database import get_session
 from etl_agent.infrastructure.models import RollbackCleanupRequest, RollbackRequest
+from etl_agent.infrastructure.pagination import paginate
 from etl_agent.rollback import service as rollback_service
 from etl_agent.rollback.cleanup import scan_expired_rollbacks
 from etl_agent.rollback.errors import RollbackNotFound
@@ -33,6 +34,7 @@ from etl_agent.rollback.schemas import (
     RollbackCleanupView,
     RollbackCreateRequest,
     RollbackDecisionRequest,
+    RollbackListView,
     RollbackResponse,
 )
 
@@ -76,6 +78,55 @@ def _cleanup_view(row: RollbackCleanupRequest) -> RollbackCleanupView:
         executed_at=row.executed_at,
         created_at=row.created_at,
     )
+
+
+def _list_item_view(row: RollbackRequest) -> RollbackListView:
+    """回滚行 → 列表项（前端契约口径；不含业务数据，AC-02）。
+
+    `execution_run_id` 即后端 `run_id`；`risk_level` 后端无对应列
+    （PDP 判决在 Harness 副作用准备单），如实回 None。
+    """
+    return RollbackListView(
+        id=row.id,
+        execution_run_id=row.run_id,
+        status=row.status,
+        risk_level=None,
+        artifact_manifest=row.artifact_manifest,
+        created_at=row.created_at,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/executions/{run_id}/rollbacks",
+    response_model=list[RollbackListView],
+)
+async def list_rollbacks(
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> list[RollbackListView]:
+    """列出某次执行的受管回滚申请（API-13 列表，联调修复新增）。
+
+    校验：运行必须属于路径项目（跨项目统一 404，AC-12，与 POST 申请入口一致）。
+    只含治理事实与制品引用，不含业务数据（AC-02）。
+    分页 + `X-Total-Count` 响应头；列表体为裸数组（与前端消费方式一致）。
+    """
+    owner = await rollback_service.run_project(session, run_id)
+    if owner != project_id:
+        raise RollbackNotFound("执行运行不存在或不属于当前项目")
+    rows, total = await paginate(
+        session,
+        select(RollbackRequest).where(RollbackRequest.run_id == run_id),
+        order_by=(RollbackRequest.created_at.desc(), RollbackRequest.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [_list_item_view(row) for (row,) in rows]
 
 
 @router.post(

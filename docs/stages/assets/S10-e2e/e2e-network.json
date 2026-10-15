@@ -1,0 +1,118 @@
+{
+  "bootstrap": {
+    "actorIsSubject": true,
+    "stored": {
+      "actor_id": "admin@demo.local",
+      "project_id": "ed969b57-8971-480b-b1bb-54208ce809e5"
+    }
+  },
+  "totalApiRequests": 21,
+  "statusCounts": {
+    "200": 16,
+    "201": 1,
+    "404": 4
+  },
+  "authOrMethodErrors": [],
+  "projectScopedRequests": [
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/executions"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/connections"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/preparations"
+    },
+    {
+      "method": "GET",
+      "status": 404,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/evidence-stream/verify"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/connections"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/preparations"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/executions"
+    },
+    {
+      "method": "GET",
+      "status": 404,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/evidence-stream/verify"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/executions"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/preparations"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/connections"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/file-assets"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/profiles"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/connections"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/profiles"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/agent-runs"
+    },
+    {
+      "method": "GET",
+      "status": 404,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/evidence-stream/events?after_sequence=0&limit=5"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/benchmark-runs"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/safety-proposals"
+    },
+    {
+      "method": "GET",
+      "status": 404,
+      "path": "/api/v1/projects/ed969b57-8971-480b-b1bb-54208ce809e5/evidence-stream/verify"
+    }
+  ]
+}
