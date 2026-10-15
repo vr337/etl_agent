@@ -127,7 +127,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./seatunnel/conf:/opt/seatunnel/config:rw
       - ./seatunnel/plugins:/opt/seatunnel/plugins:ro
       - D:/Documents/Docker/volume/app/etl_agent/file_assets:/data/file-assets:ro
     healthcheck:
