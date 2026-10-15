@@ -12,6 +12,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.2 章 execution_runs / 第 3.
 - CANCELLING 只允许到 CANCELLED（取消确认）或 FAILED（取消期间引擎失败）；
 - 非法迁移抛 `ExecutionStateConflict`，且不写任何事件（失败不留半迁移现场）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -47,9 +48,7 @@ ALL_STATUSES: tuple[str, ...] = (
 )
 
 # 终态集合（FR-39：终态运行不可再推进，查询与回滚入口按此判活）
-TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED}
-)
+TERMINAL_STATUSES: frozenset[str] = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
 
 # 迁移白名单（跳跃迁移一律拒绝，如 QUEUED→RUNNING）
 #
@@ -123,9 +122,7 @@ async def load_run_by_preparation(
     return (
         (
             await session.execute(
-                select(ExecutionRun).where(
-                    ExecutionRun.harness_preparation_id == preparation_id
-                )
+                select(ExecutionRun).where(ExecutionRun.harness_preparation_id == preparation_id)
             )
         )
         .scalars()

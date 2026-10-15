@@ -42,6 +42,7 @@ from etl_agent.observability.logging import configure_logging
 from etl_agent.observability.otel import setup_otel, shutdown_otel
 from etl_agent.profiles.router import router as profiles_router
 from etl_agent.projects.router import router as projects_router
+from etl_agent.rollback.router import router as rollback_router
 from etl_agent.scheduling.router import router as scheduling_router
 from etl_agent.versions.router import router as versions_router
 from etl_agent.worker.capability_handoff import RedisCapabilityHandoff
@@ -156,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(harness_router)
     app.include_router(execution_router)
     app.include_router(scheduling_router)
+    app.include_router(rollback_router)
     return app
 
 

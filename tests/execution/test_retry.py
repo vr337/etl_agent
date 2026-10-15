@@ -3,6 +3,7 @@
 覆盖：稳定 SeaTunnel JobId（同一版本恒定）、`retry_of_run_id` / `attempt_number` 追溯链、
 重试必须重新授权（不复用旧令牌，ADR-02）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -54,9 +55,7 @@ async def test_retry_chain_stays_flat(db_session: AsyncSession, make_run: RunFac
     assert context["attempt_number"] == 3
 
 
-async def test_retry_does_not_reuse_token(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_retry_does_not_reuse_token(db_session: AsyncSession, make_run: RunFactory) -> None:
     """重试不携带旧令牌上下文（重试必须重新 prepare→approve→commit，ADR-02）。"""
     original = await make_run(status="FAILED")
     context = await build_retry_context(db_session, original)

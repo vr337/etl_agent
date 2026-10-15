@@ -1,14 +1,17 @@
-"""M-K 执行与数据面 — 质量分流路由与 QualityReport 生成（FR-44）。
+"""M-K 质量与发布 — 质量分流路由与 QualityReport 生成（FR-44，S8 完整化）。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-K / 第 5.2 章 quality_reports
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-K / 第 5.2 章 quality_reports / 第 8 章「性能 · 运行时预算硬上限」
 覆盖 FR：FR-44（错误分流与质量报告：未命中规则数据写入错误表并记录原始值与违规原因；
-QualityReport 含 PASSED/WARNING/FAILED/INCOMPLETE、总/通过/拒绝行数、拒绝率、错误码统计、诊断）
-对应 AC：AC-06（有效数据落入影子表、错误数据按质量契约分流写入错误表）
+QualityReport 含 PASSED/WARNING/FAILED/INCOMPLETE、总/通过/拒绝行数、拒绝率、错误码统计、诊断）、
+FR-45（预警比例 0.8 与最低质量行数 100）、FR-46（隔离强制 FAILED）
+对应 AC：AC-06（有效数据落入影子表、错误数据按质量契约分流写入错误表）、
+AC-07（质量报告 PASSED 是原子发布的前置门禁）、AC-08（隔离后不得判 PASSED）
 
 口径（SPEC 2.8.4 例外条款 / PRD 10.5）：**原始值与违规原因只落数据面错误表**
 （SeaTunnel 引擎侧写入），报告 / 证据 / 快照只回聚合（总数、拒绝率、错误码计数）。
 本模块只做「聚合 → 报告」的确定性计算，不触碰任何业务数据正文。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -29,6 +32,9 @@ STATUS_INCOMPLETE = "INCOMPLETE"
 
 # 预警比例（FR-45 冻结契约：0.8 触发预警；质量契约超限前 80% 即 WARNING）
 WARNING_RATIO = 0.8
+
+# 最低质量行数（SPEC 5.2 冻结预算：样本不足 100 行不足以判「通过」，按 INCOMPLETE 处理）
+DEFAULT_MIN_QUALITY_ROWS = 100
 
 
 @dataclass(frozen=True)
@@ -65,18 +71,45 @@ def route_outcome(contract: dict[str, Any], outcome: QualityOutcome) -> QualityO
 
 
 def classify_quality(
-    contract: dict[str, Any], outcome: QualityOutcome
+    contract: dict[str, Any],
+    outcome: QualityOutcome,
+    *,
+    min_quality_rows: int | None = None,
+    quarantined: bool = False,
 ) -> tuple[str, float | None]:
-    """质量状态判定（FR-44 + FR-45 预警比例）。
+    """质量状态判定（FR-44 + FR-45 预警比例 + FR-46 隔离阻断）。
 
-    - INCOMPLETE：引擎未回传总行数（无法判定）；
-    - FAILED：拒绝行数或拒绝率超出契约阈值（max_rejected_rows / max_reject_rate）；
-    - WARNING：达到阈值的 80%（预警比例 0.8，FR-45）；
-    - PASSED：其余。
+    判定顺序即优先级：
+
+    1. **QUARANTINE** → FAILED：隔离是监督动作的判决（数据已被判不可信），
+       即使总行数与拒绝率都达标也不得判 PASSED（S8 提示词 §8.8）；
+    2. 引擎未回传总行数 → INCOMPLETE（判定不了，不臆造通过）；
+    3. 总行数低于**最低质量行数**（默认 100）→ INCOMPLETE：样本量不足以支撑
+       「质量通过」的结论，按「判不了」处理而不是「通过」；
+    4. 拒绝行数 / 拒绝率超阈值 → FAILED；
+    5. 达到阈值 80%（预警比例 0.8，FR-45）→ WARNING；
+    6. 其余 → PASSED。
+
+    Args:
+        contract: QualityContract（`max_rejected_rows` / `max_reject_rate` / `min_quality_rows`）。
+        outcome: 引擎回传的分流聚合事实。
+        min_quality_rows: 最低质量行数；缺省取契约值，再缺省 100（SPEC 5.2 冻结预算）。
+        quarantined: 运行是否已被隔离（由监督域判定后传入）。
     """
+    if quarantined:
+        return STATUS_FAILED, (
+            (outcome.rejected_rows / outcome.total_rows) if outcome.total_rows else None
+        )
     if outcome.total_rows is None:
         return STATUS_INCOMPLETE, None
     total = outcome.total_rows
+    threshold_rows = (
+        min_quality_rows
+        if min_quality_rows is not None
+        else int(contract.get("min_quality_rows") or DEFAULT_MIN_QUALITY_ROWS)
+    )
+    if total < threshold_rows:
+        return STATUS_INCOMPLETE, (outcome.rejected_rows / total if total > 0 else 0.0)
     reject_rate = (outcome.rejected_rows / total) if total > 0 else 0.0
     max_rows = contract.get("max_rejected_rows")
     max_rate = contract.get("max_reject_rate")
@@ -98,25 +131,48 @@ async def generate_quality_report(
     run_id: uuid.UUID,
     contract: dict[str, Any],
     outcome: QualityOutcome,
+    *,
+    min_quality_rows: int | None = None,
+    quarantined: bool = False,
 ) -> QualityReport:
     """生成 / 更新运行的质量报告（幂等：run_id 唯一，重复调用更新同一行）。
 
     报告字段（SPEC 5.2 quality_reports）：status / 行列数 / reject_rate /
     valid_sink / error_sink / rules（契约规则引用）/ diagnostics（错误码统计等聚合事实）。
+
+    Args:
+        contract: QualityContract（阈值 + 规则引用）。
+        outcome: 引擎回传的分流聚合事实。
+        min_quality_rows: 最低质量行数（缺省取契约值 → 100）。
+        quarantined: 是否已被隔离（隔离即 FAILED，见 `classify_quality`）。
     """
     routed = route_outcome(contract, outcome)
-    status, reject_rate = classify_quality(contract, routed)
+    status, reject_rate = classify_quality(
+        contract, routed, min_quality_rows=min_quality_rows, quarantined=quarantined
+    )
     diagnostics: list[dict[str, Any]] = [
         {"kind": "error_codes", "counts": dict(routed.error_codes)},
     ]
-    if status == STATUS_INCOMPLETE:
+    if quarantined:
+        diagnostics.append(
+            {"kind": "quarantined", "detail": "运行已被监督隔离，质量判定强制 FAILED（FR-46）"}
+        )
+    if status == STATUS_INCOMPLETE and routed.total_rows is not None:
+        threshold_rows = (
+            min_quality_rows
+            if min_quality_rows is not None
+            else int(contract.get("min_quality_rows") or DEFAULT_MIN_QUALITY_ROWS)
+        )
+        diagnostics.append(
+            {
+                "kind": "insufficient_rows",
+                "detail": f"总行数 {routed.total_rows} 低于最低质量行数 {threshold_rows}",
+            }
+        )
+    elif status == STATUS_INCOMPLETE:
         diagnostics.append({"kind": "engine_metrics_missing", "detail": "引擎未回传总行数"})
     existing = (
-        (
-            await session.execute(
-                select(QualityReport).where(QualityReport.run_id == run_id)
-            )
-        )
+        (await session.execute(select(QualityReport).where(QualityReport.run_id == run_id)))
         .scalars()
         .first()
     )
@@ -155,3 +211,17 @@ def _contract_rules(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return rules
+
+
+__all__ = [
+    "DEFAULT_MIN_QUALITY_ROWS",
+    "STATUS_FAILED",
+    "STATUS_INCOMPLETE",
+    "STATUS_PASSED",
+    "STATUS_WARNING",
+    "WARNING_RATIO",
+    "QualityOutcome",
+    "classify_quality",
+    "generate_quality_report",
+    "route_outcome",
+]

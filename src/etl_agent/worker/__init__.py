@@ -17,11 +17,13 @@ from etl_agent.worker import beat_schedule  # noqa: F401  -- 导入副作用：�
 from etl_agent.worker.celery_app import app
 
 # 任务模块导入即完成 @app.task 注册（Beat 以注册名装配，见 beat_schedule）
-from etl_agent.worker.tasks import (  # noqa: F401  -- 导入副作用：注册四类周期任务
+from etl_agent.worker.tasks import (  # noqa: F401  -- 导入副作用：注册六类周期任务
     consume_outbox,
     credential_scan,
     heartbeat,
+    rollback_cleanup_scan,
     schedule_scan,
+    supervise,
 )
 
 __all__ = ["app"]

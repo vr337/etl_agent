@@ -3,6 +3,7 @@
 覆盖：API-11 触发受管执行（Operator 校验 + 即时派发 + 幂等）、API-12 状态与事件流、
 API-14 质量报告、跨项目 403 / 404 隔离。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -71,7 +72,9 @@ async def test_router_trigger_dispatched_false_when_broker_down(
 
 
 async def test_router_trigger_rejects_terminal_run(
-    app: FastAPI, db_session: AsyncSession, seeded: SeededWorkspace,
+    app: FastAPI,
+    db_session: AsyncSession,
+    seeded: SeededWorkspace,
     seeded_execution: SeededExecution,
 ) -> None:
     """终态运行不可重复触发（重试须新建运行，FR-42）。"""
@@ -139,7 +142,9 @@ async def test_router_trigger_unknown_preparation_is_404(
 
 
 async def test_router_query_execution(
-    app: FastAPI, db_session: AsyncSession, seeded: SeededWorkspace,
+    app: FastAPI,
+    db_session: AsyncSession,
+    seeded: SeededWorkspace,
     seeded_execution: SeededExecution,
 ) -> None:
     """API-12：返回状态 + 事件流 + 行数 / 字节 + 监督快照（S7 恒 None）。"""
@@ -191,8 +196,9 @@ async def test_router_quality_report(
         db_session,
         seeded_execution.run_id,
         CONTRACT,
-        QualityOutcome(total_rows=10, passed_rows=9, rejected_rows=1,
-                       error_codes={"NULL_ID": 1}),
+        QualityOutcome(
+            total_rows=1000, passed_rows=999, rejected_rows=1, error_codes={"NULL_ID": 1}
+        ),
     )
     async with make_client(app) as client:
         response = await client.get(
@@ -204,5 +210,5 @@ async def test_router_quality_report(
     body = response.json()
     assert body["run_id"] == str(seeded_execution.run_id)
     assert body["status"] == "PASSED"
-    assert body["total_rows"] == 10 and body["rejected_rows"] == 1
+    assert body["total_rows"] == 1000 and body["rejected_rows"] == 1
     assert body["valid_sink"] == "orders_wide_shadow"

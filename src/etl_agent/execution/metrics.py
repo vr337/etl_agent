@@ -8,6 +8,7 @@ source_bytes / sink_bytes / table_metrics）/ 第 6.1 章 API-12
 口径：控制面只存**聚合指标**（SPEC 5.3 Execution State 行：治理事实与聚合指标），
 表级明细以 `table_metrics` JSON 承载 `{table, rows, bytes}` 列表——不含任何业务数据正文。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

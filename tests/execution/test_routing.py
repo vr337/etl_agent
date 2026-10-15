@@ -3,6 +3,7 @@
 覆盖：有效数据 → 影子表、错误数据 → 错误表（原始值 + 违规原因只在数据面错误表）、
 四态判定（PASSED / WARNING / FAILED / INCOMPLETE）、拒绝率与错误码统计。
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -48,8 +49,13 @@ def test_routing_valid_to_shadow_and_invalid_to_error() -> None:
     """有效数据落影子表、错误数据落错误表（去向由契约声明，控制面只登记事实）。"""
     routed = route_outcome(
         CONTRACT,
-        QualityOutcome(total_rows=100, passed_rows=90, rejected_rows=10,
-                       valid_sink="engine-default", error_sink="engine-default"),
+        QualityOutcome(
+            total_rows=100,
+            passed_rows=90,
+            rejected_rows=10,
+            valid_sink="engine-default",
+            error_sink="engine-default",
+        ),
     )
     assert routed.valid_sink == "orders_wide_shadow"
     assert routed.error_sink == "orders_wide_error"
@@ -76,9 +82,10 @@ def test_classify_passed_warning_failed_incomplete() -> None:
         STATUS_FAILED
     )
     # 拒绝行数阈值优先：行数超限即 FAILED（即使比例很低）
-    assert classify_quality(
-        CONTRACT, QualityOutcome(total_rows=1_000_000, rejected_rows=101)
-    )[0] == STATUS_FAILED
+    assert (
+        classify_quality(CONTRACT, QualityOutcome(total_rows=1_000_000, rejected_rows=101))[0]
+        == STATUS_FAILED
+    )
 
 
 def test_metrics_from_engine_payload() -> None:
@@ -109,10 +116,10 @@ async def test_generate_quality_report_is_idempotent(
     """同一运行重复生成只更新同一行（run_id 唯一，SPEC 5.2）。"""
     run = await make_run()
     first = await generate_quality_report(
-        db_session, run.id, CONTRACT, QualityOutcome(total_rows=10, rejected_rows=1)
+        db_session, run.id, CONTRACT, QualityOutcome(total_rows=1000, rejected_rows=1)
     )
     second = await generate_quality_report(
-        db_session, run.id, CONTRACT, QualityOutcome(total_rows=10, rejected_rows=5)
+        db_session, run.id, CONTRACT, QualityOutcome(total_rows=1000, rejected_rows=500)
     )
     rows = (
         (await db_session.execute(select(QualityReport).where(QualityReport.run_id == run.id)))
@@ -121,7 +128,7 @@ async def test_generate_quality_report_is_idempotent(
     )
     assert len(rows) == 1
     assert first.id == second.id
-    assert rows[0].rejected_rows == 5
+    assert rows[0].rejected_rows == 500
     assert rows[0].status == STATUS_FAILED  # 50% > 10% 阈值
 
 
@@ -179,24 +186,18 @@ async def test_apply_metrics_writes_table_metrics(
             tables=[TableMetric(table="orders_wide", rows=90, bytes=900)],
         ),
     )
-    assert run.table_metrics == {
-        "tables": [{"table": "orders_wide", "rows": 90, "bytes": 900}]
-    }
+    assert run.table_metrics == {"tables": [{"table": "orders_wide", "rows": 90, "bytes": 900}]}
     assert run.last_observed_at is not None
     assert run.last_observed_at.year > 2020
 
 
-async def test_report_isolated_per_run(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_report_isolated_per_run(db_session: AsyncSession, make_run: RunFactory) -> None:
     """报告按运行隔离（不同运行各自一行）。"""
     first = await make_run()
     second = await make_run()
     await generate_quality_report(db_session, first.id, CONTRACT, QualityOutcome(total_rows=1))
     await generate_quality_report(db_session, second.id, CONTRACT, QualityOutcome(total_rows=2))
-    total = (
-        (await db_session.execute(select(QualityReport))).scalars().all()
-    )
+    total = (await db_session.execute(select(QualityReport))).scalars().all()
     assert {item.run_id for item in total} == {first.id, second.id}
 
 
@@ -206,6 +207,15 @@ def test_report_view_never_includes_plaintext() -> None:
 
     fields = set(QualityReportView.model_fields)
     assert fields == {
-        "run_id", "status", "total_rows", "passed_rows", "rejected_rows", "reject_rate",
-        "valid_sink", "error_sink", "rules", "diagnostics", "generated_at",
+        "run_id",
+        "status",
+        "total_rows",
+        "passed_rows",
+        "rejected_rows",
+        "reject_rate",
+        "valid_sink",
+        "error_sink",
+        "rules",
+        "diagnostics",
+        "generated_at",
     }

@@ -2,6 +2,7 @@
 
 覆盖：七态全可达、非法迁移拒绝、终态不可再迁移、每次迁移写事件流并刷新 last_observed_at。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -57,13 +58,17 @@ async def test_state_machine_all_transitions(
 
     # 七态集合完整（SPEC 5.2 注释）
     assert set(execution_service.ALL_STATUSES) == {
-        "QUEUED", "SUBMITTED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLING", "CANCELLED",
+        "QUEUED",
+        "SUBMITTED",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLING",
+        "CANCELLED",
     }
 
 
-async def test_illegal_transition_rejected(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_illegal_transition_rejected(db_session: AsyncSession, make_run: RunFactory) -> None:
     """跳跃迁移（QUEUED→RUNNING）拒绝，且不留下半迁移现场。"""
     run = await make_run()
     with pytest.raises(ExecutionStateConflict):
@@ -72,9 +77,7 @@ async def test_illegal_transition_rejected(
     assert await _events(db_session, run.id) == []
 
 
-async def test_terminal_cannot_transition(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_terminal_cannot_transition(db_session: AsyncSession, make_run: RunFactory) -> None:
     """终态不可再迁移（FR-39）。"""
     run = await make_run(status="SUCCEEDED")
     with pytest.raises(ExecutionStateConflict):
@@ -107,14 +110,10 @@ async def test_stage_of_mapping() -> None:
     assert execution_service.stage_of("CANCELLED") == "cancel"
 
 
-async def test_load_run_by_preparation(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_load_run_by_preparation(db_session: AsyncSession, make_run: RunFactory) -> None:
     """按准备单回溯运行（一准备单一运行，SPEC 5.2 UK）。"""
     run = await make_run()
-    found = await execution_service.load_run_by_preparation(
-        db_session, run.harness_preparation_id
-    )
+    found = await execution_service.load_run_by_preparation(db_session, run.harness_preparation_id)
     assert found is not None and found.id == run.id
 
 
@@ -138,9 +137,7 @@ async def test_load_run_not_found(db_session: AsyncSession) -> None:
         await execution_service.load_run(db_session, uuid.uuid4())
 
 
-async def test_run_status_survives_reload(
-    db_session: AsyncSession, make_run: RunFactory
-) -> None:
+async def test_run_status_survives_reload(db_session: AsyncSession, make_run: RunFactory) -> None:
     """状态迁移落库（会话内 flush 后可重新加载到同一事实）。"""
     run = await make_run()
     await execution_service.transition(db_session, run, "SUBMITTED")
