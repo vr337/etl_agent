@@ -1,0 +1,33 @@
+{
+  "name": "etl-agent-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ETL Agent 治理型 ETL 平台 — 前端控制台（M-P / FR-53~58）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "lint": "eslint .",
+    "capture": "node scripts/capture-screens.mjs"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "pinia": "^2.2.6",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "@vue/eslint-config-typescript": "^14.1.3",
+    "eslint": "^9.14.0",
+    "eslint-plugin-vue": "^9.31.0",
+    "playwright": "^1.64.1",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.13.0",
+    "vite": "^5.4.10",
+    "vue-tsc": "^2.1.10"
+  }
+}
