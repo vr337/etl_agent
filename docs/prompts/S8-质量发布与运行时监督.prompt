@@ -1,0 +1,718 @@
+# ============================================================
+# WorkBuddy — S8 阶段执行指令
+# 阶段：质量发布与运行时监督（T-15 + T-16）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001~006
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S8
+- 阶段名称：质量发布与运行时监督
+- 覆盖任务：T-15（M-K 质量与发布）、T-16（M-L 监督与回滚）
+- 依赖：S1~S7
+- 对应 AC：**AC-07（原子 Swap + 实时指标与质量报告）**、**AC-08（硬中断 + 根因诊断 + 受管回滚）**
+- SPEC 依据：SPEC v1.0.3-Baseline 第 3.2 章 M-K/M-L、第 5.2 章（runtime_supervision_snapshots / quality_reports / rollback_requests / rollback_cleanup_requests）、第 6.1 章 API-13、第 6.4 章错误码、第 8 章「性能 · 运行时预算硬上限」、附录 A.1、ADR-04、ADR-06、ADR-07、ADR-08
+- PRD 依据：etl_agent-PRD_v1.1.1-Baseline FR-43/44/45/46/47/48 + AC-07/08
+- 追加件：AMEND-001~006
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:/Documents/Docker/volume/app/etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S8-supervision |
+| 上游 tag | stage-S7-done |
+
+## 三、前置检查
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S8-supervision
+3. git log --oneline -3 显示 S7 合并 + AMEND-006 提交
+4. 工作区干净：git status 无 tracked 变更
+5. 上游 tag 存在：git tag --list | Select-String "stage-S7-done"
+6. 容器健康：
+   docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. 双库可访问
+9. S1 数据模型已落地（4 张 S8 表）：
+   runtime_supervision_snapshots / quality_reports /
+   rollback_requests / rollback_cleanup_requests
+10. S7 产出已就位：
+    Test-Path src\etl_agent\worker\       → True
+    Test-Path src\etl_agent\execution\    → True
+    Test-Path src\etl_agent\scheduling\   → True
+    Test-Path src\etl_agent\observability\ → True
+11. 基线 + AMEND-001~006（均 Accepted）
+12. 代码规范文件存在
+13. 引擎 submit-job 500 已知（S7 遗留 1）：S8 用 mock 引擎验证原子 Swap 链路，
+    真实引擎 e2e 留 S10（人类已裁决，见 S8 吸收清单）
+```
+
+任一项不满足 → 输出阻塞报告。
+
+## 四、S7 → S8 吸收清单（本阶段必须遵循）
+
+来自 S7 阶段报告的 7 项遗留 + 2 项人类裁决：
+
+1. **引擎 submit-job 500（S7 遗留 1）**：**人类裁决 C——S8 用 mock 引擎**验证原子 Swap 链路；真实引擎 e2e 留 S10 前，届时优先换官方 `apache/seatunnel` 镜像或改 CLI 提交。S8 不得因引擎问题阻塞。
+2. **调度环境继承（S7 遗留 6）**：**人类裁决 A——接受现状**。S8 不改 `pipeline_schedules` 契约；调度触发的准备单须先由手工执行建立环境/tool 事实。
+3. **`advance_running_executions` 推进点复用（S7 建议）**：S8 的监督判定挂在 `_finalize_run` 之后，不重写推进逻辑（S7 建议 3）。
+4. **PDP rule_evidence 与证据账本串联（S7 遗留 4）**：**留 S9/M-P**——S8 不实现 FR-36 哈希链。
+5. **watermark_window 落点（S7 遗留 5）**：S8 不改——当前在 `impact_report.requested_input.schedule_context`；若需运行中心直接展示，走 AMEND 流程增列。
+6. **容器级 healthcheck（S7 遗留 2）**：S8 沿用 S7 口径——Worker 存活由 `worker_heartbeats`（10s/35s）承载，不加容器级探针。
+7. **SeaTunnel conf 来源（S7 遗留 3）**：S8 不改 `infra/seatunnel/conf/`——若换镜像 tag，部署方需重新导出。
+8. **S7 的 `LeaseManager` 协议**：S8 的监督引擎若需加锁，复用同一协议。
+9. **S7 的 `_finalize_run` 与 `execution_routing`**：S8 的"质量报告 FAILED → 监督动作"判定挂在此后，不重写推进。
+
+## 五、`.env` 修改规则（S4 起强制）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新 | 每阶段新增变量时 |
+| `infra/.env` | **人类** | 引入新密钥时；**禁止 WorkBuddy 修改** |
+
+**S8 预期不新增密钥**；若需新增监督参数，只改 `.env.example`。
+
+## 六、任务清单
+
+### T-15 M-K 质量与发布
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-15.1 | 原子 Swap（Doris `REPLACE TABLE ... PROPERTIES('swap'='true')`） | src\etl_agent\execution\atomic_swap.py |
+| T-15.2 | Swap 前置校验（同 Schema + 质量报告 PASSED 门禁） | src\etl_agent\execution\publish.py |
+| T-15.3 | QualityReport 完整化（PASSED/WARNING/FAILED/INCOMPLETE + 错误码分布 + 诊断） | src\etl_agent\execution\routing.py（扩展） |
+| T-15.4 | 发布状态机（影子表 → 就绪 → Swap → 正式表） | src\etl_agent\execution\publish.py |
+| T-15.5 | 领域错误码 | src\etl_agent\execution\errors.py（扩展） |
+
+### T-16 M-L 运行时监督与受管回滚
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-16.1 | 监督契约（6 条规则注册表） | src\etl_agent\supervision\contracts.py |
+| T-16.2 | 规则：P0 记录预算 | src\etl_agent\supervision\rules\p0_record_budget.py |
+| T-16.3 | 规则：P0 字节预算 | src\etl_agent\supervision\rules\p0_byte_budget.py |
+| T-16.4 | 规则：P1 超时 | src\etl_agent\supervision\rules\p1_timeout.py |
+| T-16.5 | 规则：P0 输出放大比 | src\etl_agent\supervision\rules\p0_amplification.py |
+| T-16.6 | 规则：P1 拒绝率 | src\etl_agent\supervision\rules\p1_reject_rate.py |
+| T-16.7 | 规则：P3 预算预警 | src\etl_agent\supervision\rules\p3_budget_warning.py |
+| T-16.8 | 快照服务（周期 + `snapshot_sha256`） | src\etl_agent\supervision\snapshot.py |
+| T-16.9 | 减损动作（CONTINUE/THROTTLE/PAUSE/CANCEL/QUARANTINE） | src\etl_agent\supervision\mitigation.py |
+| T-16.10 | 硬中断（CANCEL 引擎作业） | src\etl_agent\supervision\interrupt.py |
+| T-16.11 | QUARANTINE 阻断发布（与 T-15 联动） | src\etl_agent\supervision\quarantine.py |
+| T-16.12 | 外部减损动作独立重试（NOT_REQUIRED/PENDING/APPLYING/APPLIED/FAILED） | src\etl_agent\supervision\external_mitigation.py |
+| T-16.13 | 可解释根因诊断（9 类失败分类 + 阶段 + 可重试性 + 修复建议） | src\etl_agent\diagnosis\service.py |
+| T-16.14 | 回滚申请/审批/执行状态机 | src\etl_agent\rollback\service.py |
+| T-16.15 | 回滚副作用（`ROLLBACK_DORIS` + `CLEANUP_DORIS` 同 Harness 协议） | src\etl_agent\rollback\side_effects.py |
+| T-16.16 | 回滚制品清单（AVAILABLE/ROLLED_BACK/ROLLBACK_PENDING/CLEANUP_PENDING/INVALID_METADATA） | src\etl_agent\rollback\artifacts.py |
+| T-16.17 | 保留期管理（默认 7 天 + 容量预警阈值 20） | src\etl_agent\rollback\retention.py |
+| T-16.18 | 到期清理申请 | src\etl_agent\rollback\cleanup.py |
+| T-16.19 | 领域错误码 | src\etl_agent\supervision\errors.py、diagnosis\errors.py、rollback\errors.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API-13 受管回滚申请 | src\etl_agent\rollback\router.py、schemas.py |
+| Worker 任务：监督快照周期 | src\etl_agent\worker\tasks\supervise.py |
+| Worker 任务：回滚制品到期清理扫描 | src\etl_agent\worker\tasks\rollback_cleanup_scan.py |
+| Beat 周期任务新增 2 项 | src\etl_agent\worker\beat_schedule.py（扩展） |
+| config.py 新增 S8 配置 | src\etl_agent\config.py（更新） |
+| API 路由注册 | src\etl_agent\main.py（更新） |
+| 端到端测试 | tests\supervision\、tests\diagnosis\、tests\rollback\、tests\execution\test_publish.py |
+
+## 七、目录结构
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S8 变量）
+├── pyproject.toml                      （S8 预期不新增依赖）
+├── uv.lock
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 rollback 路由）
+│   ├── config.py                       （更新：S8 配置）
+│   ├── auth\ projects\ connections\ secrets\ profiles\ files\ llm\ generation\ gate\ versions\ harness\ worker\ execution\ scheduling\ observability\  （S2~S7，不动或小幅扩展）
+│   ├── supervision\                    （新增：T-16 监督）
+│   │   ├── __init__.py
+│   │   ├── contracts.py
+│   │   ├── snapshot.py
+│   │   ├── mitigation.py
+│   │   ├── interrupt.py
+│   │   ├── quarantine.py
+│   │   ├── external_mitigation.py
+│   │   ├── errors.py
+│   │   └── rules\
+│   │       ├── __init__.py
+│   │       ├── p0_record_budget.py
+│   │       ├── p0_byte_budget.py
+│   │       ├── p1_timeout.py
+│   │       ├── p0_amplification.py
+│   │       ├── p1_reject_rate.py
+│   │       └── p3_budget_warning.py
+│   ├── diagnosis\                      （新增：T-16 根因诊断）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── classifiers.py              （9 类失败分类）
+│   │   └── errors.py
+│   └── rollback\                       （新增：T-16 受管回滚）
+│       ├── __init__.py
+│       ├── service.py
+│       ├── side_effects.py             （ROLLBACK_DORIS / CLEANUP_DORIS）
+│       ├── artifacts.py
+│       ├── retention.py
+│       ├── cleanup.py
+│       ├── router.py
+│       ├── schemas.py
+│       └── errors.py
+└── tests\
+    ├── conftest.py                     （S8 扩展）
+    ├── helpers.py
+    ├── supervision\
+    │   ├── __init__.py
+    │   ├── test_contracts.py
+    │   ├── test_rules_p0_record_budget.py
+    │   ├── test_rules_p0_byte_budget.py
+    │   ├── test_rules_p1_timeout.py
+    │   ├── test_rules_p0_amplification.py
+    │   ├── test_rules_p1_reject_rate.py
+    │   ├── test_rules_p3_budget_warning.py
+    │   ├── test_snapshot.py            （snapshot_sha256）
+    │   ├── test_mitigation.py          （5 类动作）
+    │   ├── test_interrupt.py           （AC-08 核心）
+    │   ├── test_quarantine.py          （QUARANTINE 阻断发布）
+    │   └── test_external_mitigation.py （5 态重试）
+    ├── diagnosis\
+    │   ├── __init__.py
+    │   ├── test_classifiers.py         （9 类失败分类）
+    │   └── test_service.py             （AC-08 核心：根因诊断）
+    ├── rollback\
+    │   ├── __init__.py
+    │   ├── test_state_machine.py
+    │   ├── test_side_effects.py        （Harness 协议复用）
+    │   ├── test_artifacts.py           （5 态）
+    │   ├── test_retention.py           （7 天 + 20 件预警）
+    │   ├── test_cleanup.py
+    │   └── test_router.py
+    └── execution\
+        ├── test_atomic_swap.py         （AC-07 核心）
+        └── test_publish.py
+```
+
+## 八、核心实现要点
+
+### 8.1 原子 Swap（T-15.1，AC-07 核心）
+
+**API**：由 Worker 在质量报告 PASSED 后自动触发（无需 API）。
+
+**SQL**（Doris）：
+```sql
+-- 前置：影子表已写入 + 质量报告 PASSED + 同 Schema 校验通过
+ALTER TABLE <target> REPLACE WITH TABLE <target>_shadow PROPERTIES('swap'='true');
+```
+
+**前置校验**（缺一不可）：
+1. QualityReport.status == PASSED；
+2. 影子表与正式表 Schema 一致（列名 + 类型）；
+3. 未被 QUARANTINE 阻断；
+4. 监督快照 action 不为 QUARANTINE。
+
+**约束**：
+- **S7 只创建影子表 + 写入**；**S8 做 Swap**；
+- Swap 是**幂等**的（同一运行重复触发不重复 Swap）；
+- Swap 失败 → `ExecutionRun.status=FAILED` + 诊断 + 可回滚。
+
+### 8.2 质量报告完整化（T-15.3）
+
+**QualityReport 状态**：
+| 状态 | 触发 |
+|------|------|
+| PASSED | 无拒绝行 / 拒绝率 = 0 |
+| WARNING | 拒绝率 ≤ 阈值但 > 0（预警线 80%） |
+| FAILED | 拒绝率 > 阈值 / 拒绝行数 > 阈值 |
+| INCOMPLETE | 引擎未回传总行数 |
+
+**报告字段**：`total_rows / passed_rows / rejected_rows / reject_rate / valid_sink / error_sink / rules / diagnostics / generated_at`。
+
+**约束**：
+- 报告只回聚合，不回原始数据（S7 已实现）；
+- 错误表保留原始值 + 违规原因（SPEC 2.8.4 例外条款）；
+- 拒绝率阈值从 `preparation.impact_report` 的 QualityContract 读。
+
+### 8.3 监督契约（T-16.1）
+
+**冻结预算**（SPEC 5.2）：
+
+| 项 | 默认 | 规则 |
+|----|------|------|
+| 最大记录数 | 10,000,000 | P0 记录预算 |
+| 最大字节 | 10 GiB | P0 字节预算 |
+| 最长时长 | 3600 s | P1 超时 |
+| 输出放大比 | ≤ 2.0 | P0 输出放大 |
+| 拒绝率 | ≤ 0.5 | P1 拒绝率 |
+| 最低质量行数 | 100 | （检查下限，不足 PASSED 转 INCOMPLETE） |
+| 预警比例 | 0.8 | P3 预算预警 |
+
+### 8.4 6 条监督规则（T-16.2~T-16.7）
+
+| rule_id | 命中条件 | 减损动作 | risk |
+|---------|---------|---------|------|
+| SUPERVISION-P0-RECORD | 记录数 > 预算 | CANCEL | P0 |
+| SUPERVISION-P0-BYTE | 字节数 > 预算 | CANCEL | P0 |
+| SUPERVISION-P1-TIMEOUT | 时长 > 预算 | CANCEL | P1 |
+| SUPERVISION-P0-AMPLIFICATION | 输出放大比 > 2.0 | CANCEL | P0 |
+| SUPERVISION-P1-REJECT-RATE | 拒绝率 > 0.5 | CANCEL + QUARANTINE | P1 |
+| SUPERVISION-P3-WARNING | 任一预算 > 80% | THROTTLE 或 PAUSE（软动作） | P3 |
+
+**聚合规则**：
+- 最严动作胜出（CANCEL > QUARANTINE > PAUSE > THROTTLE > CONTINUE）；
+- 最严风险胜出（P0 > P1 > P2 > P3）。
+
+**约束**：
+- 监督动作**只能收窄权限，不能扩权**（SPEC 8）；
+- 硬中断**不改作业语义**，只终止。
+
+### 8.5 快照（T-16.8）
+
+**周期**：Worker 侧每 10s 一次（与心跳同频，可配）。
+
+**快照字段**：
+```
+run_id / action / risk_level /
+rule_matches json（仅规则证据）/
+observed json（仅聚合指标：records/bytes/duration/amplification/reject_rate）/
+snapshot_sha256
+```
+
+**约束**：
+- `observed` **只含聚合指标**，不含日志正文（SPEC 8「可观测」行）；
+- `rule_matches` **只含规则证据**，不含原始数据；
+- `snapshot_sha256` 稳定（同输入同输出）。
+
+### 8.6 减损动作（T-16.9）
+
+| 动作 | 效果 |
+|------|------|
+| CONTINUE | 继续（预算内） |
+| THROTTLE | 限速（提高监控频率） |
+| PAUSE | 暂停引擎作业（可恢复） |
+| CANCEL | 硬中断（终止引擎作业） |
+| QUARANTINE | 隔离：阻断后续发布 + 原子 Swap |
+
+**QUARANTINE 效果**：
+- `ExecutionRun.quarantined_at` 写入时间戳；
+- `ExecutionRun.supervision_action=QUARANTINE`；
+- **发布链路检查**：若 `quarantined_at IS NOT NULL` → 拒绝原子 Swap。
+
+### 8.7 硬中断（T-16.10，AC-08 核心）
+
+**触发**：监督规则命中 CANCEL。
+
+**流程**：
+```
+1. 写 supervision_snapshot（action=CANCEL）
+2. 调 SeaTunnel stop-job
+3. ExecutionRun：RUNNING → CANCELLING
+4. 等引擎终止确认
+5. ExecutionRun：CANCELLING → CANCELLED
+6. 生成失败快照（failure_category / failure_stage）
+7. 触发诊断（T-16.13）
+```
+
+**约束**：
+- 引擎终止失败 → 独立重试（`external_mitigation` 状态机）；
+- 硬中断不可逆（CANCELLED 是终态）。
+
+### 8.8 QUARANTINE（T-16.11）
+
+**触发**：拒绝率超限（P1 规则）。
+
+**效果**：
+- 阻断质量报告 PASSED 判定（即使总行数达标也判 FAILED）；
+- 阻断原子 Swap；
+- 生成失败快照 + 诊断。
+
+### 8.9 外部减损动作独立重试（T-16.12）
+
+**状态机**：`NOT_REQUIRED → PENDING → APPLYING → APPLIED / FAILED`。
+
+**约束**：
+- 外部减损动作（如 SeaTunnel stop-job）失败**不影响**监督快照写入；
+- 独立重试，独立跟踪；
+- 重试预算默认 3 次（可配）。
+
+### 8.10 可解释根因诊断（T-16.13，AC-08 核心）
+
+**9 类失败分类**：
+
+| 分类 | 典型场景 |
+|------|---------|
+| CONFIGURATION | HOCON 语法错误 / 参数缺失 |
+| CREDENTIALS | 凭据物化失败 / 鉴权失败 |
+| CONNECTIVITY | 网络不可达 / 连接超时 |
+| SOURCE_SCHEMA | 源 Schema 漂移 |
+| SINK_WRITE | 目标写入失败 |
+| ENGINE | 引擎 NPE / 内部错误 |
+| OBSERVABILITY | OTel / 日志异常 |
+| CANCELLATION | 监督硬中断 |
+| UNKNOWN | 未分类 |
+
+**诊断字段**：
+```
+failure_category / failure_stage / retryable / diagnosis（修复建议）
+```
+
+**约束**：
+- 诊断**不包含原始错误栈全文**（只含摘要）；
+- 修复建议**可解释**（"字段 X 类型不匹配，请检查源 Schema"）。
+
+### 8.11 回滚申请/审批/执行（T-16.14，AC-08 核心）
+
+**API-13**：`POST /api/v1/executions/{run_id}/rollback`
+
+**走 Harness 协议**（与 S6 一致）：
+```
+1. 创建副作用准备单（HarnessSideEffectPreparation）
+2. PDP 决策（默认 P0 → 双人审批）
+3. 四眼审批
+4. Commit → 签发 Capability
+5. Outbox → Worker 消费
+6. 执行 ROLLBACK_DORIS 副作用
+```
+
+**回滚动作**：
+- 清理影子表未发布数据；
+- 释放资源；
+- 恢复原状态（正式表不动）。
+
+### 8.12 回滚制品清单（T-16.16）
+
+**5 态**：
+| 状态 | 含义 |
+|------|------|
+| AVAILABLE | 可回滚 |
+| ROLLED_BACK | 已回滚 |
+| ROLLBACK_PENDING | 回滚进行中 |
+| CLEANUP_PENDING | 待清理 |
+| INVALID_METADATA | 元数据无效 |
+
+### 8.13 保留期管理（T-16.17）
+
+- **保留期**：默认 7 天（可配）；
+- **容量预警阈值**：默认 20 件；
+- **到期清理**：Worker 周期扫描 → 生成清理申请 → 走 Harness 协议执行。
+
+### 8.14 错误码（S8 新增）
+
+**新增（S8 若引用，将生成 AMEND-007 草稿）**：
+```
+BIZ_404_ROLLBACK_NOT_FOUND             404
+BIZ_409_ROLLBACK_STATE_CONFLICT        409
+BIZ_422_SWAP_SCHEMA_MISMATCH           422
+BIZ_422_SWAP_QUARANTINED               422
+BIZ_422_SWAP_QUALITY_FAILED            422
+BIZ_422_DIAGNOSIS_UNAVAILABLE          422
+```
+
+**复用**：
+```
+HARNESS_403_POLICY_DENY / HARNESS_409_* （S6 + AMEND-005）
+BIZ_409_STATE_CONFLICT                  （版本/执行状态机）
+BIZ_404_EXECUTION_NOT_FOUND             （AMEND-006）
+BIZ_503_SEATUNNEL_UNAVAILABLE           （AMEND-006）
+```
+
+## 九、测试清单（关键用例）
+
+### tests/supervision/
+
+| 用例 | 断言 |
+|------|------|
+| test_6_rules_registered | 6 条规则全注册 |
+| test_p0_record_budget_hit | 记录超预算 → CANCEL |
+| test_p0_byte_budget_hit | 字节超预算 → CANCEL |
+| test_p1_timeout_hit | 超时 → CANCEL |
+| test_p0_amplification_hit | 放大比 > 2.0 → CANCEL |
+| test_p1_reject_rate_hit | 拒绝率 > 0.5 → **CANCEL + QUARANTINE** |
+| test_p3_warning_hit | 80% 预警 → THROTTLE/PAUSE |
+| test_aggregation_strictest_wins | 最严动作胜出 |
+| test_snapshot_sha256_stable | 同输入同输出 |
+| test_quarantine_blocks_swap | **AC-07/AC-08 联动**：QUARANTINE 后 Swap 被拒 |
+| test_external_mitigation_retry | 5 态重试 |
+
+### tests/diagnosis/
+
+| 用例 | 断言 |
+|------|------|
+| test_9_classifiers | 9 类失败分类全可达 |
+| test_classify_configuration | HOCON 语法错误 → CONFIGURATION |
+| test_classify_credentials | 物化失败 → CREDENTIALS |
+| test_classify_cancellation | 硬中断 → CANCELLATION |
+| test_diagnosis_no_full_stack | 诊断不含完整错误栈 |
+| test_retryable_judgment | 可重试性判定正确 |
+
+### tests/rollback/
+
+| 用例 | 断言 |
+|------|------|
+| test_state_machine_all_transitions | 回滚状态机全可达 |
+| test_side_effect_harness_protocol | **AC-08 核心**：ROLLBACK_DORIS 走 S6 Harness 协议 |
+| test_artifact_5_states | 制品清单 5 态 |
+| test_retention_7_days | 保留期默认 7 天 |
+| test_capacity_warning_threshold_20 | 容量预警阈值 20 |
+| test_cleanup_scheduled | 到期清理扫描可触发 |
+| test_router_rollback_requires_approval | API-13 需四眼审批 |
+
+### tests/execution/
+
+| 用例 | 断言 |
+|------|------|
+| test_atomic_swap_success | **AC-07 核心**：质量 PASSED → Swap 成功 |
+| test_atomic_swap_schema_mismatch | Schema 不一致 → 422 |
+| test_atomic_swap_quality_failed | 质量 FAILED → 422 |
+| test_atomic_swap_quarantined | QUARANTINE → 422 |
+| test_atomic_swap_idempotent | 重复 Swap → 幂等 |
+| test_zero_plaintext_rollback_responses | **AC-02**：回滚响应无明文 |
+
+## 十、验收命令（DoD 必须附输出）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S8 不新增；S1 的 4 张 S8 表应在）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\supervision\ tests\diagnosis\ tests\rollback\ -v
+uv run pytest tests\execution\test_atomic_swap.py tests\execution\test_publish.py -v
+uv run pytest tests -q   # 全量回归
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\supervision\ src\etl_agent\diagnosis\ src\etl_agent\rollback\ src\etl_agent\execution\ src\etl_agent\config.py
+
+# 6. 凭据零明文
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 7. AC-07 专项：原子 Swap + 质量报告
+uv run pytest tests\execution\test_atomic_swap.py tests\execution\test_publish.py -v
+
+# 8. AC-08 专项：硬中断 + 诊断 + 回滚
+uv run pytest tests\supervision\test_interrupt.py tests\supervision\test_quarantine.py tests\diagnosis\ tests\rollback\ -v
+
+# 9. 监督规则全注册核对
+uv run python -c "from etl_agent.supervision.contracts import RULE_IDS; print(RULE_IDS)"
+# 期望：6 条规则 ID
+
+# 10. 代码注释抽检
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 11. .env 未被修改
+Get-Content infra\.env | Select-String "FERNET_KEY|SEATUNNEL_URL"
+# 期望：均为人类配置的值
+```
+
+## 十一、DoD（20 项）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降
+[ ] DoD-3  监督测试通过：tests/supervision/ 全绿
+[ ] DoD-4  诊断测试通过：tests/diagnosis/ 全绿
+[ ] DoD-5  回滚测试通过：tests/rollback/ 全绿
+[ ] DoD-6  原子 Swap 测试通过：tests/execution/test_atomic_swap.py 全绿
+[ ] DoD-7  回归测试通过：S1~S7 全部保持（461 passed, 2 skipped）
+[ ] DoD-8  AC-07 原子 Swap + 实时指标 + 质量报告：
+       - 质量 PASSED → Swap 成功
+       - Schema 不一致 / 质量 FAILED / QUARANTINE → 422
+       - Swap 幂等
+       - 实时指标可查询（API-12）
+[ ] DoD-9  AC-08 硬中断 + 根因诊断 + 受管回滚：
+       - 6 条监督规则命中 → 对应减损动作（CANCEL/QUARANTINE）
+       - 硬中断 → SeaTunnel stop-job → CANCELLED
+       - 根因诊断 9 类分类 + 阶段 + 可重试性 + 修复建议
+       - 受管回滚走 Harness 协议（ROLLBACK_DORIS）
+[ ] DoD-10 QUARANTINE 阻断发布：quarantined_at 非空 → Swap 被拒
+[ ] DoD-11 监督快照 snapshot_sha256 稳定
+[ ] DoD-12 外部减损动作独立重试（5 态）
+[ ] DoD-13 回滚制品清单 5 态
+[ ] DoD-14 保留期 7 天 + 容量预警阈值 20
+[ ] DoD-15 AC-02 凭据零明文：回滚响应无明文
+[ ] DoD-16 Lint / Type 干净
+[ ] DoD-17 未修改基线：git diff 中无 *-Baseline 文件
+[ ] DoD-18 代码注释合规
+[ ] DoD-19 上下文读取确认（12 文件）+ 遗留分类归档（含 AMEND-007 草稿）
+[ ] DoD-20 .env 未被修改
+```
+
+DoD 全过 → 调 git_ship。
+
+## 十二、git_ship / github_ops 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S8-supervision
+  base_branch: master
+  commit_message: |
+    feat(S8): 质量发布与运行时监督 [SPEC v1.0.3-Baseline + AMEND-001~006]
+
+    覆盖任务：T-15（M-K 质量与发布）、T-16（M-L 监督与回滚）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-04 / ADR-06 / ADR-07 / ADR-08
+    追加件：AMEND-001~006
+    对应 AC：AC-07（原子 Swap + 实时指标与质量报告）、AC-08（硬中断 + 根因诊断 + 受管回滚）
+    DoD：20 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    # WorkBuddy 按实际产出自动列出
+  tag: stage-S8-done
+  push: true
+  auto_pr: false
+```
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S8-supervision
+      base: master
+      title: "[S8] 质量发布与运行时监督"
+      body: |
+        ## 阶段
+        S8 — 质量发布与运行时监督
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001~006
+
+        ## 覆盖任务
+        T-15（M-K 质量与发布）、T-16（M-L 监督与回滚）
+
+        ## 对应 AC
+        - AC-07（原子 Swap + 实时指标与质量报告）
+        - AC-08（硬中断 + 根因诊断 + 受管回滚）
+
+        ## DoD 结果
+        - [x] 20 项全部通过（详见阶段报告）
+
+        ## 关键红线
+        - QUARANTINE 阻断发布与原子 Swap
+        - 监督动作只能收窄权限（不扩权）
+        - 回滚走 Harness 协议（ROUND 2 复用 S6）
+        - 诊断不含完整错误栈
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S9；AMEND-007 草稿见阶段报告末尾>
+      labels:
+        - "stage:S8"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-07"
+        - "ac:AC-08"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-15 M-K 质量与发布"
+        - "T-16 M-L 监督与回滚"
+```
+
+## 十三、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（AC-02 红线）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止监督动作扩权**（SPEC 8：只能收窄权限，不能修改作业语义）。
+15. **禁止 QUARANTINE 后仍执行原子 Swap**（AC-07/AC-08 联动红线）。
+16. **禁止诊断含完整错误栈正文**（只含摘要 + 分类 + 阶段 + 可重试性 + 建议）。
+17. **禁止回滚绕过 Harness 协议**（ROUND 2 与 S6 同协议）。
+18. **禁止外部减损动作失败阻塞监督快照写入**（独立状态机）。
+19. **禁止 S8 实现 S9 的证据账本哈希链**（FR-36 属 M-P）。
+20. **禁止 S8 实现 S10 的前端**。
+21. **禁止 WorkBuddy 修改 `infra\.env`**；只能改 `.env.example`。
+22. 禁止复述代码行为的冗余注释。
+23. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+24. **禁止因引擎 submit-job 500 阻塞 S8**：S8 用 mock 引擎验证原子 Swap 链路（人类已裁决 C）。
+
+## 十四、启动指令
+
+收到 `START S8` 后，按以下顺序执行：
+
+### 第一步：读取上下文（必须全部完成）
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-43~48、AC-07/08）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-K/M-L、5.2、6.1 API-13、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001~006（6 份）
+5. 读 docs/prompts/S7-执行调度与数据面.prompt
+6. 读 docs/stages/S7-执行调度与数据面-阶段报告.md（重点：7 项遗留 + 2 项人类裁决）
+7. 读 docs/stages/S7-执行调度与数据面-阶段报告.md 的「S6 → S7 吸收清单落实」
+8. 读 src/etl_agent/execution/routing.py（S7 产出，S8 的 QualityReport 在其上扩展）
+9. 读 src/etl_agent/execution/service.py（S7 产出，S8 的 _finalize_run 挂点）
+10. 读 src/etl_agent/harness/prepare/service.py（S6 产出，S8 的副作用准备单复用）
+```
+
+**读取确认**：阶段报告开头列出 12 个文件读取状态。
+
+### 第二步：执行前置检查（第三节）
+
+### 第三步：输出任务清单（第六节）
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-007 草稿**。
+
+现在，等待 `START S8` 指令。
