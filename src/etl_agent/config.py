@@ -1,8 +1,8 @@
-"""M-A/M-C/M-D/M-E/M-F/M-J/M-K 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider / Harness 内核 / 执行调度与数据面配置。
+"""M-A/M-C/M-D/M-E/M-F/M-J/M-K/M-M/M-N 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider / Harness 内核 / 执行调度与数据面 / 审计证据与评测配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F/M-J/M-K / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」/ 第 8 章「安全 · 授权与职责分离」/ 第 8 章「高可用 · Worker 可靠性」/ 第 8 章「可观测」
-覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）、FR-29/30（PDP 与签名策略包）、FR-31/33（准备单与 Capability TTL）、FR-38（Worker 心跳与至少一次投递）、FR-40（调度扫描与 misfire 宽限）、FR-59/60（可观测与 /health）
-对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）、AC-05（单次令牌 TTL ≤900s）、AC-06（Worker 可靠投递与调度间隔）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F/M-J/M-K/M-M/M-N / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」「性能 · 运行时预算硬上限」「安全 · 授权与职责分离」「高可用 · Worker 可靠性」「可观测」
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）、FR-29/30（PDP 与签名策略包）、FR-31/33（准备单与 Capability TTL）、FR-38（Worker 心跳与至少一次投递）、FR-40（调度扫描与 misfire 宽限）、FR-36（证据账本检查点间隔）、FR-50（Benchmark 套件与 P95 基准）、FR-52（小流量异常率阈值）、FR-59/60（可观测与 /health）
+对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）、AC-05（单次令牌 TTL ≤900s）、AC-06（Worker 可靠投递与调度间隔）、AC-09（Benchmark 六项门禁）
 """
 from __future__ import annotations
 
@@ -74,6 +74,22 @@ EXTERNAL_MITIGATION_MAX_ATTEMPTS_DEFAULT = 3
 # 回滚制品保留期默认 7 天、容量预警阈值默认 20（SPEC 5.2 / FR-48）
 ROLLBACK_RETENTION_DAYS_DEFAULT = 7
 ROLLBACK_CAPACITY_WARN_THRESHOLD_DEFAULT = 20
+
+# ---- S9 审计证据与评测安全进化（SPEC 3.2 M-M/M-N / 8「安全 · 审计」）----
+# 证据账本检查点：每 N 个事件或每 T 秒打一次 Ed25519 检查点（提示词 §8.1）
+EVIDENCE_CHECKPOINT_INTERVAL_EVENTS_DEFAULT = 100
+EVIDENCE_CHECKPOINT_INTERVAL_SECONDS_DEFAULT = 300
+# Benchmark 套件根目录与默认版本（FR-50：benchmarks/harness-v2/v1）
+BENCHMARK_SUITE_ROOT_DEFAULT = "benchmarks"
+BENCHMARK_DEFAULT_SUITE_ID = "harness-v2"
+BENCHMARK_DEFAULT_VERSION = "v1"
+# 非 LLM 决策路径 P95 基准（SPEC 8「性能」：≤20ms）
+BENCHMARK_NON_LLM_P95_BASELINE_MS_DEFAULT = 20.0
+# 受控发布小流量百分比边界（SPEC FR-52 固定：1%–10%）
+SAFETY_CANARY_PERCENT_MIN = 1
+SAFETY_CANARY_PERCENT_MAX = 10
+# 小流量晋升允许的异常率上限（默认 5%，超阈值拒绝晋升）
+SAFETY_PROMOTION_ANOMALY_THRESHOLD_DEFAULT = 0.05
 
 
 class ProductionConfigError(RuntimeError):
@@ -190,6 +206,18 @@ class Settings(BaseSettings):
     external_mitigation_max_attempts: int = EXTERNAL_MITIGATION_MAX_ATTEMPTS_DEFAULT
     rollback_retention_days: int = ROLLBACK_RETENTION_DAYS_DEFAULT
     rollback_capacity_warn_threshold: int = ROLLBACK_CAPACITY_WARN_THRESHOLD_DEFAULT
+
+    # ---- M-M/M-N 审计证据与评测安全进化（S9：FR-36/50/51/52）----
+    # 证据账本检查点间隔（事件数 / 秒，任一满足即打检查点）
+    evidence_checkpoint_interval_events: int = EVIDENCE_CHECKPOINT_INTERVAL_EVENTS_DEFAULT
+    evidence_checkpoint_interval_seconds: int = EVIDENCE_CHECKPOINT_INTERVAL_SECONDS_DEFAULT
+    # Benchmark 套件根目录与默认套件版本
+    benchmark_suite_root: str = BENCHMARK_SUITE_ROOT_DEFAULT
+    benchmark_default_suite_id: str = BENCHMARK_DEFAULT_SUITE_ID
+    benchmark_default_version: str = BENCHMARK_DEFAULT_VERSION
+    # 非 LLM 决策路径 P95 基准（毫秒）与安全发布会话异常率阈值
+    benchmark_non_llm_p95_baseline_ms: float = BENCHMARK_NON_LLM_P95_BASELINE_MS_DEFAULT
+    safety_promotion_anomaly_threshold: float = SAFETY_PROMOTION_ANOMALY_THRESHOLD_DEFAULT
 
     @property
     def resolved_database_url(self) -> str:
@@ -369,6 +397,29 @@ class Settings(BaseSettings):
             raise ProductionConfigError(
                 f"ETL_AGENT_BOOTSTRAP_ENABLED=true 时 ETL_AGENT_BOOTSTRAP_TOKEN 必须 ≥{MIN_SECRET_LENGTH} 字节（FR-01）"
             )
+
+    def validate_evidence(self) -> None:
+        """S9 证据账本与 Benchmark 配置校验（FR-36 / FR-50）。
+
+        启动期 fail-fast 的两条红线：
+        1. 检查点间隔必须为正（非正间隔会让检查点永不触发或每事件都签，前者削弱
+           防篡改锚点，后者把签名开销放大到每事件一次）；
+        2. 非 LLM P95 基准必须为正（非正基准使回归比失去分母，门禁恒判通过）。
+        """
+        if self.evidence_checkpoint_interval_events <= 0:
+            raise ProductionConfigError(
+                "ETL_AGENT_EVIDENCE_CHECKPOINT_INTERVAL_EVENTS 必须为正数（FR-36）"
+            )
+        if self.evidence_checkpoint_interval_seconds <= 0:
+            raise ProductionConfigError(
+                "ETL_AGENT_EVIDENCE_CHECKPOINT_INTERVAL_SECONDS 必须为正数（FR-36）"
+            )
+        if self.benchmark_non_llm_p95_baseline_ms <= 0:
+            raise ProductionConfigError(
+                "ETL_AGENT_BENCHMARK_NON_LLM_P95_BASELINE_MS 必须为正数（FR-50 / SPEC 8）"
+            )
+        if not self.benchmark_suite_root.strip():
+            raise ProductionConfigError("ETL_AGENT_BENCHMARK_SUITE_ROOT 未配置（FR-50）")
 
     def validate_secrets(self) -> None:
         """SecretProvider 配置校验（FR-06 / ADR-05）。

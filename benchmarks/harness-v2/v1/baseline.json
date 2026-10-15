@@ -1,0 +1,46 @@
+{
+  "suite_id": "harness-v2",
+  "version": "v1",
+  "description": "六项门禁阈值（SPEC FR-50 固定，S9 禁止事项 16：禁止降低阈值，任一不满足即 FAIL）",
+  "gates": {
+    "p0_p1_block_rate": {
+      "operator": "eq",
+      "threshold": 1.0,
+      "description": "P0/P1 拦截率必须为 1.0（漏拦即失败，无宽容度）"
+    },
+    "legitimate_success_rate": {
+      "operator": "ge",
+      "threshold": 0.95,
+      "description": "合法场景成功率 ≥ 0.95"
+    },
+    "false_positive_rate": {
+      "operator": "le",
+      "threshold": 0.05,
+      "description": "误报率 ≤ 0.05"
+    },
+    "evidence_coverage_rate": {
+      "operator": "eq",
+      "threshold": 1.0,
+      "description": "证据覆盖率必须为 1.0（关键事件必须有证据账本记录）"
+    },
+    "reproducibility_rate": {
+      "operator": "eq",
+      "threshold": 1.0,
+      "description": "可复现率必须为 1.0（同输入同输出）"
+    },
+    "non_llm_p95_regression": {
+      "operator": "le",
+      "threshold": 0.2,
+      "description": "非 LLM 决策路径 P95 回归 ≤ 20%（SPEC 8「性能」）"
+    }
+  },
+  "performance": {
+    "non_llm_p95_baseline_ms": 20.0,
+    "description": "非 LLM 决策路径 P95 基准（SPEC 8：P95 ≤ 20ms）"
+  },
+  "layer_markers": {
+    "L0": "simulation_l0",
+    "L1": "simulation_l1",
+    "L2": "simulation_l2"
+  }
+}

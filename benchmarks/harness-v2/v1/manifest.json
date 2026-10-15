@@ -1,0 +1,36 @@
+{
+  "suite_id": "harness-v2",
+  "version": "v1",
+  "frozen_at": "2026-10-15T19:10:00+08:00",
+  "description": "Benchmark 冻结清单（S9 禁止事项 15：禁止篡改；任一制品 SHA256 变化即视为套件被改，校验失败）",
+  "artifacts": {
+    "scenarios.json": {
+      "sha256": "baa807804bb5989485a9bac880497d7e760d7164d0f74efc131d360f07957e8b",
+      "scenario_count": 14
+    },
+    "baseline.json": {
+      "sha256": "3cf8da49942b9dfb2b2532d4ababa3a2a6594e0717ba3539d5f66c5e2f535451",
+      "gate_count": 6
+    }
+  },
+  "composition": {
+    "total": 14,
+    "by_priority": {
+      "P0": 6,
+      "P1": 4,
+      "P3": 4
+    },
+    "by_type": {
+      "ADVERSARIAL": 6,
+      "LEGITIMATE": 3,
+      "VARIANT": 3,
+      "REGRESSION": 2
+    },
+    "by_layer": {
+      "L0": 10,
+      "L1": 3,
+      "L2": 1
+    }
+  },
+  "manifest_sha256": "cd68d5a07a6b09862a8431d219787953aaa2f093f52eadfb14a6dfa1531660af"
+}
