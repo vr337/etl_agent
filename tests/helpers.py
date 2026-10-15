@@ -179,3 +179,116 @@ class SeededWorkspace:
     ENGINEER_A = "engineer-a"
     ADMIN_B = "admin-b"
     OUTSIDER = "outsider"
+
+
+# ============================================================
+# S7：执行 / 调度用例的共享测试替身
+# ============================================================
+
+# 含全部 8 个端点占位符的候选 HOCON（物化用例的输入形态，与 S6 登记契约一致）
+S7_TEST_HOCON = (
+    "env {\n"
+    '  job.mode = "BATCH"\n'
+    "}\n"
+    "source {\n"
+    "  Jdbc {\n"
+    '    host = "${SRC_HOST}"\n'
+    '    port = "${SRC_PORT}"\n'
+    '    database = "${SRC_DB}"\n'
+    '    username = "${SRC_USER}"\n'
+    '    password = "${SRC_PASSWORD}"\n'
+    "  }\n"
+    "}\n"
+    "sink {\n"
+    "  Jdbc {\n"
+    '    host = "${SINK_HOST}"\n'
+    '    port = "${SINK_PORT}"\n'
+    '    database = "${SINK_DB}"\n'
+    '    username = "${SINK_USER}"\n'
+    '    password = "${SINK_PASSWORD}"\n'
+    "  }\n"
+    "}\n"
+)
+
+
+class FakeSeaTunnelClient:
+    """SeaTunnel 客户端测试替身（记录调用，按脚本回传状态）。
+
+    不发起任何网络 / 子进程调用：REST 与 CLI 通道的真实性由
+    `tests/worker/test_seatunnel_client.py` 用 httpx MockTransport 与
+    伪 CLI 脚本单独验证。
+    """
+
+    def __init__(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        check_ok: bool = True,
+        job_id: str = "seatunnel-job-1",
+    ) -> None:
+        self.submitted: list[str] = []
+        self.job_names: list[str] = []
+        self.checked: list[str] = []
+        self.stopped: list[str] = []
+        self._statuses = list(statuses or ["FINISHED"])
+        self._check_ok = check_ok
+        self._job_id = job_id
+        self.metrics: dict[str, object] = {
+            "source_rows": 10,
+            "sink_rows": 9,
+            "source_bytes": 1024,
+            "sink_bytes": 900,
+            "tables": [{"table": "orders_wide", "rows": 9, "bytes": 900}],
+            "quality": {"total_rows": 10, "passed_rows": 9, "rejected_rows": 1,
+                        "error_codes": {"NULL_ID": 1}},
+        }
+
+    async def submit_job(self, hocon: str, *, job_name: str = "") -> str:
+        self.submitted.append(hocon)
+        self.job_names.append(job_name)
+        return self._job_id
+
+    async def job_status(self, job_id: str) -> object:
+        from etl_agent.worker.seatunnel_client import EngineJobStatus
+
+        status = self._statuses.pop(0) if len(self._statuses) > 1 else self._statuses[0]
+        return EngineJobStatus(job_id=job_id, status=status, metrics=dict(self.metrics))
+
+    async def stop_job(self, job_id: str) -> None:
+        self.stopped.append(job_id)
+
+    async def check(self, hocon: str) -> dict[str, object]:
+        self.checked.append(hocon)
+        return {"ok": self._check_ok, "summary": "engine check passed" if self._check_ok else "boom"}
+
+
+class RecordingDispatcher:
+    """API-11 即时派发的测试替身（记录被调用次数，不连 Broker）。"""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls = 0
+        self._fail = fail
+
+    def __call__(self) -> None:
+        self.calls += 1
+        if self._fail:
+            raise RuntimeError("broker unavailable")
+
+
+@dataclass(frozen=True)
+class SeededExecution:
+    """已 Commit 的受管执行事实（AC-06 用例的起点，全部为治理事实与引用）。"""
+
+    project_id: uuid.UUID
+    version_id: uuid.UUID
+    preparation_id: uuid.UUID
+    run_id: uuid.UUID
+    outbox_id: uuid.UUID
+    token_id: uuid.UUID
+    token: str
+    connection_id: uuid.UUID
+    plan: dict[str, object]
+    hocon: str
+    handoff: object
+
+

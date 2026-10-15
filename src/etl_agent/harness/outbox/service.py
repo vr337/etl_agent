@@ -123,5 +123,104 @@ async def mark_failed(
     return row
 
 
+def retry_backoff_seconds(retry_count: int, *, base_seconds: int = DEFAULT_LOCK_SECONDS) -> int:
+    """指数退避窗口（FR-35：`base * 2^retry_count`，夹取上限 base*32 防无限拉长）。
+
+    `retry_count` 为**已失败次数**（mark_failed 递增后的值）：第 1 次失败后等 base，
+    第 2 次等 2*base……上限 32*base（默认 960s）。
+    """
+    if retry_count <= 0:
+        return base_seconds
+    capped: int = min(retry_count, 5)
+    return base_seconds * (1 << capped)
+
+
+async def requeue_failed(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    max_retries: int = 5,
+    backoff_base_seconds: int = DEFAULT_LOCK_SECONDS,
+) -> list[uuid.UUID]:
+    """把退避窗口已过的 FAILED 命令重新置 PENDING（S7 扫描器入口，FR-35 重试语义）。
+
+    口径：
+    - `retry_count < max_retries` 且 `now - locked_until >= backoff` → 重新 PENDING；
+    - 超过最大重试次数 → 保持 FAILED 终态（不再自动重试，由运维介入）；
+    - `locked_until` 作为「下次可重试时刻」由 mark_failed 写入。
+    """
+    moment = now or datetime.now(UTC)
+    rows = (
+        (
+            await session.execute(
+                select(HarnessCommandOutbox).where(HarnessCommandOutbox.status == STATUS_FAILED)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    requeued: list[uuid.UUID] = []
+    for row in rows:
+        if row.retry_count >= max_retries:
+            continue
+        due_at = row.locked_until or row.created_at
+        backoff = retry_backoff_seconds(row.retry_count, base_seconds=backoff_base_seconds)
+        if moment < due_at + timedelta(seconds=backoff):
+            continue
+        row.status = STATUS_PENDING
+        row.locked_until = None
+        requeued.append(row.id)
+    if requeued:
+        await session.flush()
+    return requeued
+
+
+async def requeue_stale_sending(
+    session: AsyncSession, *, now: datetime | None = None
+) -> list[uuid.UUID]:
+    """把锁已过期的 SENDING 命令重新置 PENDING（Worker 崩溃孤儿回收，FR-35）。
+
+    执行中的 Worker 会经 `refresh_lock` 续锁（轮询频率远小于锁窗口），因此
+    「锁过期」只可能意味着持有者已失联。回收后由消费侧幂等兜底：
+    Replay Guard 拒绝令牌二次消费（FR-34），稳定 JobId 让引擎识别同一作业（FR-42）。
+    """
+    moment = now or datetime.now(UTC)
+    rows = (
+        (
+            await session.execute(
+                select(HarnessCommandOutbox).where(HarnessCommandOutbox.status == STATUS_SENDING)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    requeued: list[uuid.UUID] = []
+    for row in rows:
+        if row.locked_until is not None and row.locked_until > moment:
+            continue
+        row.status = STATUS_PENDING
+        row.locked_until = None
+        requeued.append(row.id)
+    if requeued:
+        await session.flush()
+    return requeued
+
+
+async def refresh_lock(
+    session: AsyncSession,
+    command_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
+    lock_seconds: int = DEFAULT_LOCK_SECONDS,
+) -> None:
+    """续锁（执行中 Worker 周期性调用，证明持有者存活；SENDING 行不被误回收）。"""
+    moment = now or datetime.now(UTC)
+    row = await session.get(HarnessCommandOutbox, command_id)
+    if row is None:
+        raise _not_found()
+    row.locked_until = moment + timedelta(seconds=lock_seconds)
+    await session.flush()
+
+
 def _not_found() -> LookupError:
     return LookupError("Outbox 命令不存在")

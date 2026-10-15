@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from etl_agent.config import Settings
 
@@ -30,7 +31,7 @@ def checkpoint_dsn(settings: Settings) -> str:
 
 
 @asynccontextmanager
-async def open_checkpointer(settings: Settings) -> AsyncIterator[object]:
+async def open_checkpointer(settings: Settings) -> AsyncIterator[Any]:
     """打开连到 `etl_checkpoint` 库的 Checkpointer（应用生命周期内复用）。
 
     调用方负责 `async with` 生命周期；应用启动时建一次、关闭时释放，

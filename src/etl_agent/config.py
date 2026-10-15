@@ -1,8 +1,8 @@
-"""M-A/M-C/M-D/M-E/M-F/M-J 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider / Harness 内核配置。
+"""M-A/M-C/M-D/M-E/M-F/M-J/M-K 横切配置 — 应用配置加载、生产启动强制校验、SecretProvider / 文件资产 / LLM Provider / Harness 内核 / 执行调度与数据面配置。
 
-SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F/M-J / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」/ 第 8 章「安全 · 授权与职责分离」
-覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）、FR-29/30（PDP 与签名策略包）、FR-31/33（准备单与 Capability TTL）
-对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）、AC-05（单次令牌 TTL ≤900s）
+SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-A/M-C/M-D/M-E/M-F/M-J/M-K / 第 4.2 章环境差异 / 第 4.4 章初始化与配置要点 / 第 8 章「性能 · LLM 生成」/ 第 8 章「安全 · 授权与职责分离」/ 第 8 章「高可用 · Worker 可靠性」/ 第 8 章「可观测」
+覆盖 FR：FR-58/65（认证双模式）、FR-01（Bootstrap Token）、FR-06（SecretProvider 双模式）、FR-12（采样上限）、FR-13（文件资产上限与挂载根目录）、FR-18（LLM Provider 选择）、FR-21（候选预算硬上限）、FR-29/30（PDP 与签名策略包）、FR-31/33（准备单与 Capability TTL）、FR-38（Worker 心跳与至少一次投递）、FR-40（调度扫描与 misfire 宽限）、FR-59/60（可观测与 /health）
+对应 AC：AC-11（生产缺失配置拒绝启动）、AC-02（凭据零明文：密钥只来自环境变量）、AC-04（有限修复预算 ≤3）、AC-05（单次令牌 TTL ≤900s）、AC-06（Worker 可靠投递与调度间隔）
 """
 from __future__ import annotations
 
@@ -37,6 +37,32 @@ CAPABILITY_TTL_SECONDS_MAX = 900
 
 # Ed25519 密钥 hex 长度：32 字节（私钥种子与公钥原始点均为 32 字节）
 HARNESS_KEY_HEX_LENGTH = 64
+
+# ---- S7 执行调度与数据面（SPEC 4.3 / 8「高可用 · Worker 可靠性」）----
+# Worker 心跳 10s 上报、35s 判失活（FR-38 / SPEC 8 高可用行）
+WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 10
+WORKER_INACTIVE_SECONDS_DEFAULT = 35
+# Outbox 扫描 2s、指数退避重试（FR-35 / ADR-06：至少一次投递）
+OUTBOX_SCAN_INTERVAL_SECONDS_DEFAULT = 2
+OUTBOX_MAX_RETRIES_DEFAULT = 5
+OUTBOX_RETRY_BACKOFF_SECONDS_DEFAULT = 5
+OUTBOX_LOCK_SECONDS_DEFAULT = 30
+# 调度扫描 30s、凭据告警扫描 3600s（FR-40 / FR-10 / SPEC 4.3）
+SCHEDULER_SCAN_INTERVAL_SECONDS_DEFAULT = 30
+CREDENTIAL_SCAN_INTERVAL_SECONDS_DEFAULT = 3600
+# misfire 默认宽限 120s（FR-40）
+SCHEDULE_MISFIRE_GRACE_SECONDS_DEFAULT = 120
+SCHEDULE_DEFAULT_TIMEZONE = "Asia/Shanghai"
+# RUNNING 执行推进：单遍扫描内轮询引擎的最长等待与轮询间隔
+EXECUTION_POLL_INTERVAL_SECONDS_DEFAULT = 2
+EXECUTION_POLL_MAX_WAIT_SECONDS_DEFAULT = 300
+# SeaTunnel 引擎（SPEC 2.1：REST :8080 + CLI --check）
+SEATUNNEL_SUBMIT_TIMEOUT_SECONDS_DEFAULT = 30
+SEATUNNEL_CHECK_TIMEOUT_SECONDS_DEFAULT = 120
+# Capability 令牌交接（Worker 通道）：Redis 键前缀与 TTL（缺省随 Capability TTL）
+CAPABILITY_HANDOFF_KEY_PREFIX = "harness:capability"
+# OTel 导出超时 10s（SPEC 8「可观测」）
+OTEL_EXPORT_TIMEOUT_SECONDS_DEFAULT = 10
 
 
 class ProductionConfigError(RuntimeError):
@@ -120,6 +146,32 @@ class Settings(BaseSettings):
     harness_capability_ttl_seconds: int = CAPABILITY_TTL_SECONDS_DEFAULT
     # 准备单 TTL 秒（FR-31：300–7 天，默认 24h；越界即拒绝启动）
     harness_preparation_ttl_seconds: int = PREPARATION_TTL_SECONDS_DEFAULT
+
+    # ---- 数据面引擎 SeaTunnel（S7：FR-20/38）----
+    seatunnel_url: str = "http://localhost:8080"
+    seatunnel_submit_timeout_seconds: int = SEATUNNEL_SUBMIT_TIMEOUT_SECONDS_DEFAULT
+    seatunnel_check_timeout_seconds: int = SEATUNNEL_CHECK_TIMEOUT_SECONDS_DEFAULT
+
+    # ---- Celery Worker / Beat（S7：FR-38/40 / ADR-06）----
+    worker_heartbeat_interval_seconds: int = WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
+    worker_inactive_seconds: int = WORKER_INACTIVE_SECONDS_DEFAULT
+    outbox_scan_interval_seconds: int = OUTBOX_SCAN_INTERVAL_SECONDS_DEFAULT
+    outbox_max_retries: int = OUTBOX_MAX_RETRIES_DEFAULT
+    outbox_retry_backoff_seconds: int = OUTBOX_RETRY_BACKOFF_SECONDS_DEFAULT
+    outbox_lock_seconds: int = OUTBOX_LOCK_SECONDS_DEFAULT
+    scheduler_scan_interval_seconds: int = SCHEDULER_SCAN_INTERVAL_SECONDS_DEFAULT
+    credential_scan_interval_seconds: int = CREDENTIAL_SCAN_INTERVAL_SECONDS_DEFAULT
+    schedule_misfire_grace_seconds: int = SCHEDULE_MISFIRE_GRACE_SECONDS_DEFAULT
+    execution_poll_interval_seconds: int = EXECUTION_POLL_INTERVAL_SECONDS_DEFAULT
+    execution_poll_max_wait_seconds: int = EXECUTION_POLL_MAX_WAIT_SECONDS_DEFAULT
+    # Capability 令牌交接（Worker 通道）：令牌本体只经 Redis 传递，不落业务库（AC-02）
+    capability_handoff_key_prefix: str = CAPABILITY_HANDOFF_KEY_PREFIX
+    capability_handoff_ttl_seconds: int = CAPABILITY_TTL_SECONDS_DEFAULT
+
+    # ---- M-O 可观测（S7：FR-59/60）----
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""
+    otel_export_timeout_seconds: int = OTEL_EXPORT_TIMEOUT_SECONDS_DEFAULT
 
     @property
     def resolved_database_url(self) -> str:
@@ -234,10 +286,48 @@ class Settings(BaseSettings):
                     "ENV=prod 必须配置 ETL_AGENT_HARNESS_PUBLIC_KEYS（Ed25519 32 字节 hex，FR-30）"
                 )
 
+    def validate_worker(self) -> None:
+        """执行调度配置校验（S7：FR-38/40 / SPEC 8「高可用 · Worker 可靠性」）。
+
+        启动期 fail-fast 的三条红线：
+        1. 四类周期任务间隔必须为正数（Beat 装配前置，零/负间隔会让任务永不触发或忙轮询）；
+        2. misfire 宽限必须为正（FR-40：默认 120s，非正宽限使「错过」判定永假）；
+        3. SeaTunnel 引擎地址必填（执行面唯一出口，ADR-01：Worker 只认受管指令打到的引擎）；
+        4. OTel 启用时端点必填（FR-60：开关开而不配置端点等于静默丢弃遥测）。
+        """
+        positive: list[tuple[str, int]] = [
+            ("ETL_AGENT_WORKER_HEARTBEAT_INTERVAL_SECONDS", self.worker_heartbeat_interval_seconds),
+            ("ETL_AGENT_WORKER_INACTIVE_SECONDS", self.worker_inactive_seconds),
+            ("ETL_AGENT_OUTBOX_SCAN_INTERVAL_SECONDS", self.outbox_scan_interval_seconds),
+            ("ETL_AGENT_OUTBOX_MAX_RETRIES", self.outbox_max_retries),
+            ("ETL_AGENT_OUTBOX_RETRY_BACKOFF_SECONDS", self.outbox_retry_backoff_seconds),
+            ("ETL_AGENT_OUTBOX_LOCK_SECONDS", self.outbox_lock_seconds),
+            ("ETL_AGENT_SCHEDULER_SCAN_INTERVAL_SECONDS", self.scheduler_scan_interval_seconds),
+            ("ETL_AGENT_CREDENTIAL_SCAN_INTERVAL_SECONDS", self.credential_scan_interval_seconds),
+            ("ETL_AGENT_SCHEDULE_MISFIRE_GRACE_SECONDS", self.schedule_misfire_grace_seconds),
+            ("ETL_AGENT_EXECUTION_POLL_INTERVAL_SECONDS", self.execution_poll_interval_seconds),
+            ("ETL_AGENT_EXECUTION_POLL_MAX_WAIT_SECONDS", self.execution_poll_max_wait_seconds),
+            ("ETL_AGENT_SEATUNNEL_SUBMIT_TIMEOUT_SECONDS", self.seatunnel_submit_timeout_seconds),
+            ("ETL_AGENT_SEATUNNEL_CHECK_TIMEOUT_SECONDS", self.seatunnel_check_timeout_seconds),
+            ("ETL_AGENT_CAPABILITY_HANDOFF_TTL_SECONDS", self.capability_handoff_ttl_seconds),
+            ("ETL_AGENT_OTEL_EXPORT_TIMEOUT_SECONDS", self.otel_export_timeout_seconds),
+        ]
+        invalid = [f"{name}={value}" for name, value in positive if value <= 0]
+        if invalid:
+            raise ProductionConfigError(
+                "执行调度间隔/超时必须为正数: " + ", ".join(invalid)
+            )
+        if not self.seatunnel_url.strip():
+            raise ProductionConfigError("ETL_AGENT_SEATUNNEL_URL 未配置（FR-38：执行面唯一引擎出口）")
+        if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
+            raise ProductionConfigError(
+                "ETL_AGENT_OTEL_ENABLED=true 时 ETL_AGENT_OTEL_EXPORTER_OTLP_ENDPOINT 必填（FR-60）"
+            )
+
     def validate_bootstrap(self) -> None:
         """Bootstrap 配置校验（FR-01）：启用时 Token 必须 ≥32 字节。
 
-        启动期fail-fast，避免运行到首次初始化才发现 Token 不合规。
+        启动期 fail-fast，避免运行到首次初始化才发现 Token 不合规。
         """
         if self.bootstrap_enabled and len(self.bootstrap_token) < MIN_SECRET_LENGTH:
             raise ProductionConfigError(

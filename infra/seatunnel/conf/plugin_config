@@ -1,0 +1,7 @@
+--seatunnel-connectors--
+connector-jdbc
+connector-doris
+connector-file-local
+connector-file-hadoop
+connector-hive
+--end--

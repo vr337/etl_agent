@@ -1,0 +1,668 @@
+# ============================================================
+# WorkBuddy — S7 阶段执行指令
+# 阶段：执行调度与数据面（T-13 + T-14 + T-20）
+# 依据：etl_agent-SPEC_v1.0.3-Baseline + AMEND-001~005
+# 环境：Windows + PowerShell + Docker Desktop（WSL 2 后端）+ uv
+# ============================================================
+
+## 一、阶段信息
+
+- 阶段编号：S7
+- 阶段名称：执行调度与数据面
+- 覆盖任务：T-13（M-J/M-K 执行 Worker）、T-14（调度）、T-20（M-O 可观测）
+- 依赖：S1~S6
+- 对应 AC：**AC-06（Worker 调度 SeaTunnel + 影子表 + 质量分流）**（部分：质量分流报告完整在 S8）
+- SPEC 依据：SPEC v1.0.3-Baseline 第 3.2 章 M-J/M-K/M-O、第 5.2 章（execution_runs / execution_events / quality_reports / worker_heartbeats）、第 6.1 章 API-11/12/14、第 6.4 章错误码、第 8 章「可用性 · Worker 可靠性」「可观测」、附录 A.1、ADR-06、ADR-07、ADR-08
+- PRD 依据：FR-38/39/40/41/42/43/44/49/59/60 + AC-06
+- 追加件：AMEND-001~005
+- 基线组合：BL-PRD-001 + BL-SPEC-002
+- 代码规范：docs/conventions/code-comments.md
+
+## 二、环境与路径
+
+| 项 | 值 |
+|----|-----|
+| 项目根目录 | D:\Desktop\code\etl_agent |
+| 数据卷路径 | D:\Documents\Docker\volume\app\etl_agent |
+| Docker 位置 | Docker Desktop（WSL 2 后端） |
+| 命令执行环境 | Windows PowerShell |
+| Python 包管理 | uv（ADR-08） |
+| GitHub 仓库 | https://github.com/vr337/etl_agent.git |
+| 默认分支 | master |
+| 工作分支 | feat/S7-execution |
+| 上游 tag | stage-S6-done |
+
+## 三、前置检查
+
+```
+1. cd D:\Desktop\code\etl_agent 成功
+2. git branch --show-current 输出 feat/S7-execution
+3. git log --oneline -3 显示 S6 合并 + AMEND-005 提交
+4. 工作区干净：git status 无 tracked 变更
+5. 上游 tag 存在：git tag --list | Select-String "stage-S6-done"
+6. 容器健康（基础层）：
+   docker compose -f infra\docker-compose.yml ps
+   → etl_agent_postgres (healthy)、etl_agent_redis (healthy)
+7. uv 环境就绪：uv run python -c "import etl_agent; print('ok')" → ok
+8. 双库可访问
+9. S1 数据模型已落地（4 张 S7 表）：
+   worker_heartbeats / execution_runs / execution_events / quality_reports
+10. S6 产出已就位：
+    Test-Path src\etl_agent\versions\  → True
+    Test-Path src\etl_agent\harness\   → True
+11. 基线文件 + AMEND-001~005（均 Accepted）
+12. infra\.env 已含 S7 变量（人类已配）
+13. 代码规范文件存在
+14. Dockerfile.api 存在：Test-Path infra\Dockerfile.api
+15. compose 已含 4 个新服务：
+    docker compose -f infra\docker-compose.yml config | Select-String "worker|beat|seatunnel"
+    → 三个服务名均出现
+```
+
+任一项不满足 → 输出阻塞报告。
+
+## 四、S6 → S7 吸收清单（本阶段必须遵循）
+
+来自 S6 阶段报告的 8 项：
+
+1. **Outbox 扫描 / 发送 / 重试调度**：`harness/outbox/service.py` 的 `claim_next` / `mark_sent` / `mark_failed` 已就绪；S7 接 Celery Beat 周期任务（SPEC 8：扫描 2s、指数退避重试）
+2. **Replay Guard 真实调用点在 Worker**：S7 拉取 Outbox 后先 `CapabilityVerifier` 验签 → 再消费令牌 → 最后调 SeaTunnel
+3. **执行租约持久化实现**：`harness/lease.py` 是进程内实现；S7 保留协议，可换 DB/Redis
+4. **真实引擎检查**：`gate/engine_check.py::EngineChecker` 协议已就位；S7 在 Worker 侧物化运行期变量后调 SeaTunnel `--check`，只回传脱敏摘要（FR-20）
+5. **占位符变量名契约**：`configs/credential_placeholders.yaml` 的 10 个变量必须与 Worker 侧 `credential_materialization` 一致（SRC_PASSWORD / SINK_HOST 等）
+6. **PDP rule_evidence 与证据账本串联**：S7 若做 FR-36 哈希链需与 `harness_policy_decisions.policy_package_sha256` 串联
+7. **监督契约快照**：S7 按 `preparation.supervision_contract` 执行，摘要已写入 `ExecutionRun.supervision_contract_sha256`
+8. **API-11/12/13**：S7 实现 API-11（触发执行）/ API-12（查询执行）；API-13（回滚申请）在 S8 做
+
+## 五、`.env` 修改规则（S4 起强制）
+
+| 文件 | 谁维护 | 何时改 |
+|------|-------|-------|
+| `infra/.env.example` | **WorkBuddy** 按需更新 | 每阶段新增变量时 |
+| `infra/.env` | **人类**（第三节已完成） | 引入新密钥时；**禁止 WorkBuddy 修改** |
+
+## 六、任务清单
+
+### T-13 执行 Worker（M-J / M-K）
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-13.1 | Celery 应用装配（Broker / 结果后端 / 序列化） | src\etl_agent\worker\celery_app.py |
+| T-13.2 | 任务：消费 Outbox（验签 → 消费令牌 → 执行） | src\etl_agent\worker\tasks\consume_outbox.py |
+| T-13.3 | 任务：Worker 心跳（10s） | src\etl_agent\worker\tasks\heartbeat.py |
+| T-13.4 | 任务：凭据到期扫描（3600s） | src\etl_agent\worker\tasks\credential_scan.py |
+| T-13.5 | 任务：调度扫描（30s） | src\etl_agent\worker\tasks\schedule_scan.py |
+| T-13.6 | Secret 物化（占位符注入，10 个变量） | src\etl_agent\worker\credential_materialization.py |
+| T-13.7 | SeaTunnel 客户端（REST + CLI `--check`） | src\etl_agent\worker\seatunnel_client.py |
+| T-13.8 | ExecutionRun 状态机（QUEUED→SUBMITTED→RUNNING→终态） | src\etl_agent\execution\service.py |
+| T-13.9 | ExecutionEvent 事件流 | src\etl_agent\execution\events.py |
+| T-13.10 | 表级指标采集（源/目标行数/字节） | src\etl_agent\execution\metrics.py |
+| T-13.11 | 影子表预复制（Doris `CREATE LIKE`） | src\etl_agent\execution\shadow.py |
+| T-13.12 | 质量分流路由（有效 sink / 错误 sink） | src\etl_agent\execution\routing.py |
+| T-13.13 | 执行取消（CANCELLING→CANCELLED） | src\etl_agent\execution\cancel.py |
+| T-13.14 | 执行重试（稳定 JobId + retry_of_run_id） | src\etl_agent\execution\retry.py |
+| T-13.15 | 领域错误码 | src\etl_agent\execution\errors.py |
+
+### T-14 调度
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-14.1 | Celery Beat 配置（4 类周期任务） | src\etl_agent\worker\beat_schedule.py |
+| T-14.2 | PipelineSchedule CRUD + cron 解析 | src\etl_agent\scheduling\service.py |
+| T-14.3 | misfire 策略（SKIP / FIRE_ONCE，宽限 120s） | src\etl_agent\scheduling\misfire.py |
+| T-14.4 | 水印增量同步（推进 + watermark_window） | src\etl_agent\scheduling\watermark.py |
+| T-14.5 | API 路由 + schemas | src\etl_agent\scheduling\router.py、schemas.py |
+| T-14.6 | 领域错误码 | src\etl_agent\scheduling\errors.py |
+
+### T-20 可观测（M-O）
+
+| 子任务 | 内容 | 产出文件 |
+|--------|------|---------|
+| T-20.1 | OTel 初始化（FastAPI / HTTPX / SQLAlchemy / Celery 四组件） | src\etl_agent\observability\otel.py |
+| T-20.2 | OTLP 导出（超时 10s；可关闭） | src\etl_agent\observability\exporters.py |
+| T-20.3 | 结构化日志（含 trace_id） | src\etl_agent\observability\logging.py |
+| T-20.4 | 错误响应附 trace_id（全局异常处理器） | src\etl_agent\observability\errors.py |
+| T-20.5 | `/health` 扩展（含 Worker 健康摘要，脱敏） | src\etl_agent\observability\health.py |
+
+### 公共产出
+
+| 内容 | 产出文件 |
+|------|---------|
+| API-11 触发受管执行 + API-12 查询执行 | src\etl_agent\execution\router.py、schemas.py |
+| config.py 新增 S7 配置 | src\etl_agent\config.py（更新） |
+| API 路由注册 | src\etl_agent\main.py（更新） |
+| 端到端测试 | tests\worker\、tests\execution\、tests\scheduling\、tests\observability\ |
+
+## 七、目录结构
+
+```
+D:\Desktop\code\etl_agent\
+├── .env.example                        （更新：新增 S7 变量）
+├── pyproject.toml                      （新增：celery[redis] / opentelemetry-* 等）
+├── uv.lock
+├── infra\
+│   ├── docker-compose.yml              （人类已加 4 服务）
+│   ├── Dockerfile.api                  （人类已建）
+│   └── seatunnel\                      （S7 新增）
+│       ├── conf\
+│       └── plugins\
+├── src\etl_agent\
+│   ├── main.py                         （更新：注册 execution/scheduling 路由）
+│   ├── config.py                       （更新：S7 配置）
+│   ├── auth\ projects\ connections\ secrets\ profiles\ files\ llm\ generation\ gate\ versions\ harness\  （S2~S6，不动）
+│   ├── worker\                         （新增：Celery 应用与任务）
+│   │   ├── __init__.py
+│   │   ├── celery_app.py
+│   │   ├── beat_schedule.py
+│   │   ├── credential_materialization.py
+│   │   ├── seatunnel_client.py
+│   │   ├── errors.py
+│   │   └── tasks\
+│   │       ├── __init__.py
+│   │       ├── consume_outbox.py
+│   │       ├── heartbeat.py
+│   │       ├── credential_scan.py
+│   │       └── schedule_scan.py
+│   ├── execution\                      （新增：M-K 执行）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── events.py
+│   │   ├── metrics.py
+│   │   ├── shadow.py
+│   │   ├── routing.py
+│   │   ├── cancel.py
+│   │   ├── retry.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── errors.py
+│   ├── scheduling\                     （新增：T-14）
+│   │   ├── __init__.py
+│   │   ├── service.py
+│   │   ├── misfire.py
+│   │   ├── watermark.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── errors.py
+│   └── observability\                  （新增：M-O）
+│       ├── __init__.py
+│       ├── otel.py
+│       ├── exporters.py
+│       ├── logging.py
+│       ├── errors.py
+│       └── health.py
+└── tests\
+    ├── conftest.py                     （S7 扩展）
+    ├── helpers.py
+    ├── worker\
+    │   ├── __init__.py
+    │   ├── test_consume_outbox.py      （AC-06 核心）
+    │   ├── test_credential_materialization.py
+    │   ├── test_seatunnel_client.py
+    │   ├── test_heartbeat.py
+    │   └── test_beat_schedule.py
+    ├── execution\
+    │   ├── test_state_machine.py
+    │   ├── test_shadow_swap.py
+    │   ├── test_routing.py
+    │   ├── test_cancel.py
+    │   ├── test_retry.py
+    │   ├── test_router.py
+    │   └── test_zero_plaintext.py
+    ├── scheduling\
+    │   ├── test_cron.py
+    │   ├── test_misfire.py
+    │   ├── test_watermark.py
+    │   └── test_router.py
+    └── observability\
+        ├── test_otel_init.py
+        ├── test_logging.py
+        ├── test_health.py
+        └── test_trace_id.py
+```
+
+## 八、核心实现要点
+
+### 8.1 Celery 应用（T-13.1）
+
+```python
+# src/etl_agent/worker/celery_app.py
+app = Celery("etl_agent", broker=settings.redis_url, backend=settings.redis_url)
+app.conf.update(
+    task_acks_late=True,                    # ADR-06：至少一次投递
+    worker_prefetch_multiplier=1,           # 防饥饿
+    task_reject_on_worker_lost=True,        # Worker 挂 → 任务重投
+    timezone="Asia/Shanghai",
+)
+```
+
+**关键**：`acks_late` + `prefetch_multiplier=1` + `reject_on_worker_lost`（SPEC 8「可用性 · Worker 可靠性」）。
+
+### 8.2 消费 Outbox（T-13.2，AC-06 核心）
+
+**流程**（ADR-06 / FR-38）：
+
+```
+1. 拉取 Outbox（status=PENDING, locked_until < now, 加锁）
+2. 加载 CapabilityGrant → CapabilityVerifier.verify（签名 + exp + claims）
+3. ReplayGuard.consume(token_sha256)（令牌仅消费一次）
+4. 物化 Secret（credential_materialization：把 ${SRC_PASSWORD} 等 10 个占位符替换为明文）
+5. 调用 SeaTunnel REST 提交作业（得到 seatunnel_job_id）
+6. ExecutionRun：QUEUED → SUBMITTED → RUNNING
+7. 周期回传指标（行数 / 字节 / 表级）
+8. 完成：
+   - 有效数据 → 影子表
+   - 错误数据 → 错误表（QualityContract 分流）
+   - QualityReport 生成（PASSED/WARNING/FAILED/INCOMPLETE）
+   - mark_sent（Outbox）
+```
+
+**约束**：
+- **凭证明文只在内存**，不写日志 / 不落库 / 不回响应；
+- **S7 不做监督**（S8 做 QUARANTINE / CANCEL）；
+- **S7 不做原子 Swap**（S8 做 `REPLACE TABLE ... swap=true`）；
+- **S7 只做影子表写入 + QualityReport 生成**。
+
+### 8.3 Secret 物化（T-13.6）
+
+**契约**（S6 吸收 5）：
+
+从 `configs/credential_placeholders.yaml` 读取 10 个变量名：
+```
+SRC_HOST / SRC_PORT / SRC_DATABASE / SRC_USER / SRC_PASSWORD
+SINK_HOST / SINK_PORT / SINK_DATABASE / SINK_USER / SINK_PASSWORD
+FILE_ASSET_BASE
+```
+
+用 SecretProvider 读取真实凭据 → 替换 HOCON 中的 `${VAR}` → 得到可执行的 HOCON。
+
+**约束**：
+- 物化后的 HOCON **不落库**（避免凭证明文入业务库）；
+- 内存中只在提交 SeaTunnel 前短暂持有；
+- 提交后立即释放引用。
+
+### 8.4 SeaTunnel 客户端（T-13.7）
+
+**REST 提交**：`POST {SEATUNNEL_URL}/hazelcast/rest/maps/submit-job`。
+
+**CLI `--check`**：真实引擎检查（S5 stub → 真实）：
+```bash
+seatunnel.sh --config <hocon> --check
+```
+**只回传脱敏摘要**（不含 HOCON 正文，不含凭据）。
+
+### 8.5 ExecutionRun 状态机（T-13.8）
+
+```
+QUEUED → SUBMITTED → RUNNING → SUCCEEDED
+                             → FAILED
+                             → CANCELLING → CANCELLED
+```
+
+**每次状态迁移**：
+- 写 `ExecutionEvent`（level / stage / event_type / message）
+- 更新 `last_observed_at`
+
+### 8.6 影子表与分流（T-13.11 / T-13.12）
+
+**影子表预复制**（S7 只创建，不 Swap）：
+```sql
+CREATE TABLE <target>_shadow LIKE <target>;
+```
+
+**质量分流**：
+- QualityContract 的 `valid_sink` 指向影子表；
+- `error_sink` 指向错误表；
+- 未命中规则的数据 → 错误表（**记原始值 + 违规原因**，SPEC 2.8.4 例外条款）；
+- QualityReport 汇总：总/通过/拒绝行数 + reject_rate + 错误码统计 + 诊断。
+
+**S7 不做原子 Swap**（S8 做）。
+
+### 8.7 Celery Beat 调度（T-14.1）
+
+**4 类周期任务**（SPEC 4.3）：
+
+| 任务 | 周期 | 说明 |
+|------|------|------|
+| Worker 心跳 | 10s | 上报 `worker_heartbeats` |
+| 凭据告警扫描 | 3600s | 检查到期 / 过期凭据 |
+| 调度扫描 | 30s | 扫描 `pipeline_schedules` |
+| Outbox 扫描 | 2s | 消费 PENDING 命令 |
+
+**Beat 部署形态**：单实例（S7 先这样；Q11/S-Q3 待决议多实例）。
+
+### 8.8 水印增量（T-14.4）
+
+- `watermark_column` / `watermark_initial` / `watermark_lag_seconds`（S1 已建字段）；
+- 调度推进水印值并记录 `watermark_window`；
+- 驱动 `WATERMARK_INCREMENTAL` 模式的执行。
+
+### 8.9 misfire 策略（T-14.3）
+
+- `SKIP`：错过就跳过；
+- `FIRE_ONCE`：错过补跑一次；
+- 宽限默认 120s（SPEC FR-40）。
+
+### 8.10 OTel 可观测（T-20）
+
+**四组件埋点**：
+- FastAPI：`FastAPIInstrumentor`
+- HTTPX：`HTTPXClientInstrumentor`
+- SQLAlchemy：`SQLAlchemyInstrumentor`
+- Celery：`CeleryInstrumentor`
+
+**OTLP 导出**：超时 10s；`ETL_AGENT_OTEL_ENABLED=false` 时不上报。
+
+**结构化日志**：JSON 格式 + `trace_id` 字段。
+
+**错误响应**：全局异常处理器自动附 `trace_id`。
+
+**`/health` 扩展**：
+- 存活状态
+- **Worker 健康摘要**（最近心跳时间、活跃 worker 数；**脱敏**）
+- **不主动读凭据**
+
+### 8.11 API-11 / API-12
+
+**API-11**：`POST /api/v1/projects/{project_id}/executions`
+- 触发受管执行（Operator 权限）
+- Body：`{pipeline_version_id, preparation_id, trigger: "MANUAL"}`
+
+**API-12**：`GET /api/v1/executions/{run_id}`
+- 返回状态 + 事件流 + 行数 / 字节 + 监督快照（S8 补全）
+
+### 8.12 错误码（S7 新增）
+
+**新增（S7 若引用，将生成 AMEND-006 草稿）**：
+```
+BIZ_404_EXECUTION_NOT_FOUND            404
+BIZ_409_EXECUTION_STATE_CONFLICT       409
+BIZ_422_SEATUNNEL_SUBMIT_FAILED        422
+BIZ_422_SEATUNNEL_CHECK_FAILED         422
+BIZ_422_CREDENTIAL_MATERIALIZATION_FAILED  422
+BIZ_503_SEATUNNEL_UNAVAILABLE          503
+```
+
+**复用**：
+```
+AUTH_403_*                              （S2）
+BIZ_404_* / BIZ_409_* / BIZ_422_*       （AMEND-001~005）
+HARNESS_*                               （SPEC 6.4 + AMEND-005）
+```
+
+## 九、测试清单（关键用例）
+
+### tests/worker/（AC-06 核心）
+
+| 用例 | 断言 |
+|------|------|
+| test_consume_outbox_happy_path | **AC-06 核心**：Outbox → 验签 → 消费令牌 → 物化 Secret → SeaTunnel 提交（mock）→ SUCCEEDED |
+| test_consume_outbox_replay_rejected | 令牌二次消费 → HARNESS_409_CAPABILITY_REPLAYED |
+| test_consume_outbox_signature_invalid | 签名篡改 → HARNESS_401_CAPABILITY_INVALID |
+| test_credential_materialization_10_vars | 10 个占位符全部替换；无残留 `${` |
+| test_credential_materialization_no_leak | 物化后 HOCON 不落库；日志无明文 |
+| test_seatunnel_client_submit | mock REST 提交成功 |
+| test_seatunnel_client_check | `--check` 返回脱敏摘要 |
+| test_heartbeat_writes_db | 心跳写 worker_heartbeats |
+
+### tests/execution/
+
+| 用例 | 断言 |
+|------|------|
+| test_state_machine_all_transitions | QUEUED→...→CANCELLED 全可达 |
+| test_shadow_table_create_like | 影子表预复制 SQL 正确 |
+| test_routing_valid_to_shadow | 有效数据 → 影子表 |
+| test_routing_invalid_to_error | 错误数据 → 错误表（含原始值 + 违规原因） |
+| test_quality_report_generation | PASSED / FAILED 正确 |
+| test_cancel | CANCELLING→CANCELLED + 原因记录 |
+| test_retry_stable_job_id | 重试复用 SeaTunnel JobId |
+| test_router_trigger_execution | API-11 触发受管执行 |
+| test_router_query_execution | API-12 返回状态 + 事件流 |
+| test_zero_plaintext_execution_responses | **AC-02**：执行响应无明文 |
+
+### tests/scheduling/
+
+| 用例 | 断言 |
+|------|------|
+| test_cron_parsing | cron + 时区解析 |
+| test_misfire_skip | 错过 → 跳过 |
+| test_misfire_fire_once | 错过 → 补跑一次 |
+| test_watermark_advance | 水印推进 + window 记录 |
+| test_scan_interval_30s | 扫描周期正确 |
+
+### tests/observability/
+
+| 用例 | 断言 |
+|------|------|
+| test_otel_init_all_four | 4 组件埋点初始化 |
+| test_otel_disabled_no_export | 关闭时不上报 |
+| test_structured_logging_json | JSON 格式 + trace_id |
+| test_error_response_trace_id | 错误响应含 trace_id |
+| test_health_worker_summary | `/health` 含 worker 摘要（脱敏） |
+| test_health_no_credential_read | `/health` 不主动读凭据 |
+
+## 十、验收命令（DoD 必须附输出）
+
+```powershell
+cd D:\Desktop\code\etl_agent
+
+# 1. 前置检查
+git log --oneline -3
+docker compose -f infra\docker-compose.yml ps
+
+# 2. 同步依赖
+uv sync --extra dev
+
+# 3. 迁移（S7 不新增）
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+
+# 4. 单元测试
+uv run pytest tests\worker\ tests\execution\ tests\scheduling\ tests\observability\ -v
+uv run pytest tests -q   # 全量回归
+
+# 5. Lint / Type
+uv run ruff check src\ tests\
+uv run mypy src\etl_agent\worker\ src\etl_agent\execution\ src\etl_agent\scheduling\ src\etl_agent\observability\ src\etl_agent\config.py
+
+# 6. 凭据零明文
+Get-ChildItem -Recurse -File -Include "*.py","*.yml","*.yaml","*.ini","*.sql","*.toml" |
+  Where-Object { $_.FullName -notmatch "\\\.git\\|\\\.venv\\" } |
+  Select-String -Pattern "(password|secret|token)\s*=\s*['\`"][^'\`"]{3,}['\`"]"
+
+# 7. AC-06 专项：Worker 消费 Outbox
+uv run pytest tests\worker\test_consume_outbox.py -v
+
+# 8. 凭据物化契约核对（S6 吸收 5）
+Select-String -Path configs\credential_placeholders.yaml -Pattern "SRC_|SINK_|FILE_ASSET_BASE"
+# 期望：10 个变量名可见
+
+# 9. 代码注释抽检
+Get-ChildItem -Recurse -File -Path src\etl_agent\ -Include "*.py" |
+  Where-Object { $_.Name -ne "__init__.py" } |
+  ForEach-Object {
+    $head = Get-Content $_.FullName -TotalCount 10 -Raw
+    if ($head -notmatch "SPEC 依据" -or $head -notmatch "覆盖 FR" -or $head -notmatch "对应 AC") {
+      Write-Output "MISSING HEADER: $($_.FullName)"
+    }
+  }
+
+# 10. .env 未被修改
+Get-Content infra\.env | Select-String "SEATUNNEL_URL|FERNET_KEY"
+# 期望：均为人类配置的值
+
+# 11. 容器可起（exec profile）
+docker compose -f infra\docker-compose.yml --profile exec up -d
+docker compose -f infra\docker-compose.yml ps
+# 期望：PG + Redis + worker + beat + seatunnel 全 healthy
+docker compose -f infra\docker-compose.yml --profile exec down
+```
+
+## 十一、DoD（22 项）
+
+```
+[ ] DoD-1  产出文件齐全：第七节目录结构全部存在
+[ ] DoD-2  Alembic 可升可降
+[ ] DoD-3  Worker 测试通过：tests/worker/ 全绿
+[ ] DoD-4  执行测试通过：tests/execution/ 全绿
+[ ] DoD-5  调度测试通过：tests/scheduling/ 全绿
+[ ] DoD-6  可观测测试通过：tests/observability/ 全绿
+[ ] DoD-7  回归测试通过：S1~S6 全部保持（299 passed, 2 skipped）
+[ ] DoD-8  AC-06 Worker 消费 Outbox：
+       - 验签 → 消费令牌 → 物化 Secret → 提交 SeaTunnel（mock）→ SUCCEEDED
+       - 令牌二次消费 → HARNESS_409_CAPABILITY_REPLAYED
+       - 签名篡改 → HARNESS_401_CAPABILITY_INVALID
+[ ] DoD-9  Secret 物化：10 个占位符全替换；物化后不落库
+[ ] DoD-10 SeaTunnel 客户端：REST 提交 + CLI --check（mock 可跑）
+[ ] DoD-11 ExecutionRun 状态机：7 态全可达
+[ ] DoD-12 影子表预复制：CREATE LIKE SQL 正确
+[ ] DoD-13 质量分流：有效 → 影子表；错误 → 错误表（原始值 + 违规原因）
+[ ] DoD-14 QualityReport 生成：PASSED / WARNING / FAILED / INCOMPLETE
+[ ] DoD-15 Celery Beat 4 类周期任务：调度配置就位
+[ ] DoD-16 misfire 策略：SKIP / FIRE_ONCE 语义正确
+[ ] DoD-17 水印增量：推进 + window 记录
+[ ] DoD-18 OTel 四组件埋点：初始化 + 可关闭
+[ ] DoD-19 结构化日志 + trace_id：错误响应含 trace_id
+[ ] DoD-20 `/health` 含 Worker 摘要（脱敏）
+[ ] DoD-21 AC-02 凭据零明文：执行响应 / 日志 / 物化后 HOCON 无明文
+[ ] DoD-22 Lint / Type / 基线 / 注释 / 上下文读取 / 遗留归档（含 AMEND-006 草稿）/ .env 未改
+```
+
+DoD 全过 → 调 git_ship。
+
+## 十二、git_ship / github_ops 参数
+
+```yaml
+skill: git_ship
+params:
+  branch: feat/S7-execution
+  base_branch: master
+  commit_message: |
+    feat(S7): 执行调度与数据面 [SPEC v1.0.3-Baseline + AMEND-001~005]
+
+    覆盖任务：T-13（M-J/M-K 执行 Worker）、T-14（调度）、T-20（M-O 可观测）
+    SPEC 依据：第 3.2 / 5.2 / 6.1 / 6.4 / 8 章 / 附录 A.1 / ADR-06 / ADR-07 / ADR-08
+    追加件：AMEND-001~005
+    对应 AC：AC-06（Worker 调度 SeaTunnel + 影子表 + 质量分流）
+    DoD：22 项全部通过（详见阶段报告）
+    包管理：uv（uv.lock 已锁定）
+    代码规范：遵循 docs/conventions/code-comments.md
+  files:
+    # WorkBuddy 按实际产出自动列出
+  tag: stage-S7-done
+  push: true
+  auto_pr: false
+```
+
+```yaml
+plugin: github_ops
+actions:
+  - action: create_or_update_pr
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      head: feat/S7-execution
+      base: master
+      title: "[S7] 执行调度与数据面"
+      body: |
+        ## 阶段
+        S7 — 执行调度与数据面
+
+        ## 基线
+        - PRD: etl_agent-PRD_v1.1.1-Baseline（BL-PRD-001）
+        - SPEC: etl_agent-SPEC_v1.0.3-Baseline（BL-SPEC-002）
+        - 追加件: AMEND-001~005
+
+        ## 覆盖任务
+        T-13（M-J/M-K 执行 Worker）、T-14（调度）、T-20（M-O 可观测）
+
+        ## 对应 AC
+        - AC-06（Worker 调度 SeaTunnel + 影子表 + 质量分流）
+
+        ## DoD 结果
+        - [x] 22 项全部通过（详见阶段报告）
+
+        ## 关键红线
+        - Worker 侧验签 + Replay Guard 消费令牌
+        - 凭据物化：10 占位符全替换；物化后 HOCON 不落库
+        - 质量分流：有效 → 影子表；错误 → 错误表（原始值 + 违规原因）
+        - S7 不做原子 Swap（S8）
+
+        ## 遗留问题
+        <如有，标注是否阻塞 S8；AMEND-006 草稿见阶段报告末尾>
+      labels:
+        - "stage:S7"
+        - "spec:v1.0.3-Baseline"
+        - "ac:AC-06"
+      milestone: "etl_agent v1.0 实施"
+
+  - action: update_milestone
+    params:
+      repo: https://github.com/vr337/etl_agent.git
+      milestone: "etl_agent v1.0 实施"
+      completed:
+        - "T-13 M-J/M-K 执行 Worker"
+        - "T-14 调度"
+        - "T-20 M-O 可观测"
+```
+
+## 十三、禁止事项
+
+1.  DoD 未全过时禁止调 git_ship。
+2.  禁止修改任何 `*-Baseline` 文件。
+3.  禁止跳过测试直接提交。
+4.  禁止把凭证明文写入任何提交内容（AC-02 红线）。
+5.  禁止多个阶段混在同一次提交。
+6.  禁止在无任务清单的情况下开始编码。
+7.  禁止自行修改 SPEC 定义的模块边界、接口契约、错误码、状态机。
+8.  禁止把 S11（条件数据源）纳入主线。
+9.  禁止在 `agent_runs` 表加 Prompt / 候选正文字段。
+10. 禁止解析 `.pen` 文件。
+11. **禁止用 pip 替代 uv**。
+12. **禁止手改 uv.lock**。
+13. 禁止修改 `docs/prd/`、`docs/spec/` 下的基线文件与归档文件。
+14. **禁止物化后的 HOCON 落库或进日志**（AC-02 红线）；只在内存短暂持有。
+15. **禁止绕过 Replay Guard 直接执行**（FR-34）。
+16. **禁止 S7 做原子 Swap**（S8 做）；S7 只创建影子表 + 写入 + 生成 QualityReport。
+17. **禁止 S7 做监督硬中断 / QUARANTINE**（S8 做）。
+18. **禁止 S7 消费令牌后不落 `consumed_at`**（Replay Guard 事实）。
+19. **禁止 Worker 与 API 版本不一致**（ADR-02）。
+20. **禁止 WorkBuddy 修改 `infra\.env`**；只能改 `.env.example`。
+21. 禁止复述代码行为的冗余注释。
+22. **禁止 AMEND 草稿自动提交**（人类审核后提交）。
+23. 禁止在 S7 实现 S8 的监督硬中断 / QUARANTINE / 原子 Swap。
+
+## 十四、启动指令
+
+收到 `START S7` 后：
+
+### 第一步：读取上下文
+
+```
+1. 读 docs/conventions/code-comments.md
+2. 读 docs/prd/etl_agent-PRD_v1.1.1-Baseline.md（重点 FR-38~44/49/59/60、AC-06）
+3. 读 docs/spec/etl_agent-SPEC_v1.0.3-Baseline.md（重点 3.2 M-J/M-K/M-O、5.2、6.1 API-11/12/14、6.4、8）
+4. 读 docs/spec/amendments/AMEND-001~005（5 份）
+5. 读 docs/prompts/S6-版本与Harness内核.prompt
+6. 读 docs/stages/S6-版本与Harness内核-阶段报告.md
+7. 读 configs/credential_placeholders.yaml
+```
+
+**读取确认**：阶段报告开头列出 12 个文件读取状态。
+
+### 第二步：前置检查（第三节）
+
+### 第三步：输出任务清单
+
+### 第四步：编码 + 测试 + DoD 自检
+
+### 第五步：调 git_ship → github_ops
+
+### 第六步：生成阶段报告 + 遗留分类归档
+
+### 第七步：自动提交阶段报告
+
+### 第八步：输出阶段报告
+
+**不自动提交 AMEND-006 草稿**。
+
+现在，等待 `START S7` 指令。
