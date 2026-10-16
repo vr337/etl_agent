@@ -475,7 +475,13 @@ async def _materialize(
         secret_values: dict[str, str] = {}
         if connection.secret_ref is not None:
             secret_values = await provider.read(connection.secret_ref)
-        values.update(values_for_connection(connection, secret_values, prefix))
+        # T-ENGINE-02：host_map 仅在物化（本路径）生效——执行视角重写；
+        # API 探测路径仍用连接行原值（宿主机视角），两视角各取所需。
+        values.update(
+            values_for_connection(
+                connection, secret_values, prefix, host_map=settings.host_map
+            )
+        )
         clear_values(secret_values)  # 明文只在 values 中保留一份引用（AC-02）
     if _is_file_source(plan.get("source")):
         values["FILE_ASSET_BASE"] = settings.file_asset_root

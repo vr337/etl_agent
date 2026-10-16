@@ -23,8 +23,9 @@
 
 | 阶段 | 遗留 # | 摘要 | 分类 | 处理 |
 |------|-------|------|------|------|
-| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-ENGINE-02） |
-| S10 | 7 | 生成模板硬编码 PG 驱动 +  worker 容器内寻址不可达 | 独立排期 | **T-ENGINE-02** |
+| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-ENGINE-03） |
+| S10 | 7 | 生成模板硬编码 PG 驱动 + worker 容器内寻址不可达 + worker 镜像漏插件索引 | **已修（真引擎通到执行阶段）** | ✅ **T-ENGINE-02 Closed** |
+| S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | 独立排期 | **T-ENGINE-03** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
@@ -32,6 +33,7 @@
 | S10 | 4 | 影子表执行通道为 Logging，不建真实 Doris 表 | 独立排期 | **T-SHADOW-01** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
 | S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
+| — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
 
 ## 三、独立运维事项
 
@@ -58,31 +60,82 @@
     + connector 白名单 + cluster-members=seatunnel:5801），镜像 2.71GB，启动日志/容器 env 双证据
   - ✅ 14 个新测试 + 904 passed 全量绿
 - **仍未闭环**：**AC-16「Doris 有真实数据」未达成**——真引擎首次执行暴露**生成模板缺陷**
-  （详见 **T-ENGINE-02**），本 PR 按 X3 范围控制不修；T-SHADOW-01（影子表通道）在真实链路
-  下同样仍未实现（当前 HOCON 为裸 `insert into order_wide` 直插目标表，非原子 Swap 语义）
-- **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（生成模板，阻塞 AC-16 闭环）
+  （T-ENGINE-02 已修，链路通到执行阶段），落库最后一公里由 **T-ENGINE-03**（sink SQL 形态）
+  阻断；T-SHADOW-01（影子表通道）在真实链路下同样仍未实现（当前 HOCON 为裸
+  `insert into order_wide` 直插目标表，非原子 Swap 语义）
+- **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（已 Closed）；T-ENGINE-03（阻塞 AC-16 闭环）
 - **当前镜像**：`flowpilot/seatunnel:2.3.13`（compose e2e/exec）
 
-### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达（新，Open）
+### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达 + worker 镜像漏插件索引 —— **Closed**
 
-- **状态**：Open（2026-10-16，T-ENGINE-01 真引擎首跑暴露；独立 PR 立项）
+- **状态**：**Closed**（2026-10-16，fix/T-ENGINE-02）——真引擎已通到「作业执行阶段」，
+  DoD 达成（不管最终 SUCCEEDED/FAILED）；落库最后一公里转 **T-ENGINE-03** 独立立项。
 - **发现**：T-ENGINE-01 步骤 4 前置判定（生成 HOCON 后读 checkpoint 候选正文）
 - **缺陷 1（驱动/协议硬编码）**：HOCON 模板 source/sink 均硬编码
   `driver = "org.postgresql.Driver"` + `jdbc:postgresql://`，**不按连接的
   `connector_type`（MYSQL / DORIS）渲染**。物化后 source 指向 MySQL 容器
   （MySQL 协议）、sink 指向 Doris FE（MySQL 协议）→ PostgreSQL 驱动连 MySQL
-  协议端口，JDBC 握手即败。mock 时代引擎不出水故完全不可见。
+  协议端口，JDBC 握手即败。mock 时代引擎不出水故完全不可见。**已修**：
+  `llm/mock_provider.py` 按 connector_type 选驱动/URL（MYSQL/DORIS→MySQL 驱动，
+  PG 保持；未知回落 PG + warning）。
 - **缺陷 2（执行视角寻址）**：物化取连接行 host/port **原值**（演示数据按宿主机视角填
   `127.0.0.1:13306/9030`），而引擎提交发生在 **worker 容器内**——`127.0.0.1` 是它自己，
-  source/sink 均不可达。需要「执行视角 host 解析」（容器网络名映射或连接行执行字段）。
-- **附带（次要）**：`insert into order_wide` 裸 INSERT 无列清单，列序依赖 JDBC 默认排序。
-- **影响**：**AC-16 不闭环**——真引擎模式下所有作业必然失败（两个缺陷各自都可致命）；
-  T-ENGINE-01 的 CLI 提交通道已就绪，此为其下游唯一阻断。
-- **修复范围**：生成域（HOCON 模板渲染按 connector_type 选 driver/URL + 执行视角
-  寻址解析）；改动涉及契约面，可能需 AMEND 登记；引擎侧驱动不缺
-  （lib 已有 postgresql-42.7.5 / mysql-connector-j-8.4.0，worker 白名单含 connector-jdbc）。
-- **关联**：T-ENGINE-01（上游已就绪）；T-SHADOW-01（影子表通道，真实链路另一缺口）；
-  T-SHADOW-02（valid_sink 契约漂移，修复时一并评估）
+  source/sink 均不可达。**已修**：新增 `ETL_AGENT_HOST_MAP` 执行视角映射
+  （worker 物化时替换 `127.0.0.1:13306→mysql:3306` / `127.0.0.1:9030→doris-fe:9030`；
+  API 探测路径用原值不动）。
+- **缺陷 3（真实引擎 metrics 键）**：真实引擎键名与 mock 不同，`source_rows/sink_rows`
+  恒空。**已修**：`execution/metrics.py` 增加真实键兜底
+  （`TableSourceReceivedCount`→source_rows；`TableSinkWriteCount`/`SinkCommittedCount`→sink_rows）。
+- **缺陷 4（worker 镜像漏插件索引，步骤 4 实测暴露）**：worker 镜像只 COPY 了 4 个白名单
+  jar，**漏 COPY `/opt/seatunnel/connectors/plugin-mapping.properties`**（插件名→jar 工件名的
+  翻译索引）。SeaTunnel 提交时先查该表把 `Jdbc` 译成 `connector-jdbc` 再找 jar；索引缺失
+  → `PluginIdentifier{pluginName='Jdbc'} not found`，与 jar 是否齐全无关（实证：把引擎全部
+  84 个 jar 拷进 worker 仍失败）。**已修**：`infra/Dockerfile.worker` 追加同源 stage COPY
+  （全量、不裁剪——该文件是惰性索引，多余映射无害）；`test_deploy_contract.py` 补两条静态
+  断言（必须有该文件 + connectors 目录只含白名单 jar，防调试污染泄漏）。
+- **run19 实证（2026-10-16 19:31，真引擎 real-cli）**：13 步跑到 STEP 12，
+  `status=RUNNING · 源行数=3006 · 目标行数=3006`（20s 轮询窗口内未到终态）；
+  终态 `FAILED / engine_status=FAILED / failure_stage=**run**`（非 submit），
+  job_id=1163439178180984833。引擎侧插件解析成功
+  （`needed jar urls [connector-jdbc-2.3.13.jar]`），源端真实读到数据
+  （`SourceReceivedCount=4008`，含中文地址行）→ **驱动 + 寻址 + 插件全部生效**。
+  证据账本 `valid=true · event_count=9`。**判定：链路已通到执行阶段，本 PR 达成 DoD**。
+- **剩余阻断 → T-ENGINE-03**：最终 FAILED 是 sink SQL 不完整（见下），属生成域新缺陷。
+- **关联**：T-ENGINE-01（上游已就绪）；T-ENGINE-03（sink SQL，下游唯一阻断）；
+  T-SHADOW-01（影子表通道）；T-SHADOW-02（valid_sink 契约漂移）
+
+### T-ENGINE-03：生成的 sink `query` 非完整 INSERT，SeaTunnel 原样下发致 Doris 解析失败（新，Open）
+
+- **状态**：Open（2026-10-16，T-ENGINE-02 步骤 4 真引擎 run19 暴露；独立 PR 立项）
+- **现象**：run19 作业提交成功、源端读到数据，但 sink 首行即败。引擎日志
+  `[FieldNamedPreparedStatement] PrepareStatement sql is:` → **`insert into order_wide`**
+  （无列清单、无 `VALUES` 占位符）；Doris FE 解析器报
+  `mismatched input ';' expecting {'(', 'VALUES', 'SELECT', ...} (line 1, pos 22)`，
+  经 `JdbcConnectorException COMMON-08/COMMON-10` 冒泡为 `table source_db.orders sink throw error`。
+- **根因**：SeaTunnel JdbcSink 使用 `query` 选项时**原样作为 PreparedStatement 下发、不补
+  VALUES 子句**——`query` 必须是完整可执行 SQL（`insert into t (c1,c2) values (?,?)`）或改用
+  `table` 选项由连接器生成。当前生成模板产出 `query = "insert into order_wide"`，既无列清单
+  也无占位符 → 任何一行都会失败（**非脏行型**，是 SQL 形态缺陷）。
+- **来源**：本项此前已在 T-ENGINE-02 记为「附带（次要）：裸 INSERT 无列清单，列序依赖 JDBC
+  默认排序」——**实测该"次要项"是硬阻断**（不是列序问题，是语句不完整）。
+- **影响**：AC-16 仍不闭环——真引擎链路最后一公里（落库）被挡；Doris `order_wide` 恒 0 行。
+- **修复方向**（待裁决）：生成模板 sink 段改输出 `table = "order_wide"`（由 JdbcSink 按目标表
+  生成 INSERT），或渲染成带列清单 + `values (?,...)` 的完整 `query`。涉及契约面，可能需 AMEND。
+- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01/02（影子表与 valid_sink 契约）
+
+### T-LLM-01：HOCON 的 sink/URL/driver 形态不应由 LLM 决定（新，Open，不阻塞）
+
+- **状态**：Open（2026-10-16 记账，不阻塞当前排期）
+- **背景**：T-ENGINE-02（驱动/URL 按 connector_type 渲染）与 T-ENGINE-03（sink `query`→`table`）
+  修改的是 `llm/mock_provider.py` 里的 HOCON 渲染。当前 mock provider 是**确定性模板**，
+  这些修复直接落在模板上；但若将来接入**真 LLM** 生成 HOCON，同样的坑会重演——
+  LLM 可能再次输出硬编码 PG 驱动、错误寻址、或非完整 sink SQL。
+- **结论/建议**：真 LLM 接入时，HOCON 的 **sink 形态 / JDBC URL / driver** 必须由后端
+  **确定性模板**渲染（按连接的 `connector_type` + 执行视角 host 解析 + 目标表列清单），
+  LLM 只负责**语义层**（选表、选字段、转换规则），不决定协议与 SQL 形态。
+- **动作**：真 LLM 接入前，把 mock_provider 的确定性渲染抽为可复用的「HOCON 渲染器」，
+  LLM 输出经该渲染器落地。
+- **关联**：T-ENGINE-02（Closed）；T-ENGINE-03（sink SQL 形态）；`llm/mock_provider.py`
 
 ### T-DEMO-01：demo seed 脏行 3 不可落库（address 超列宽）
 

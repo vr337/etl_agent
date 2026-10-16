@@ -12,12 +12,15 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-F / 第 6.4 章错误
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from etl_agent.config import Settings
 from etl_agent.llm.errors import MockProviderForbidden
 from etl_agent.llm.provider import GeneratedCandidate
+
+logger = logging.getLogger(__name__)
 
 PlanFactory = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
 
@@ -74,32 +77,74 @@ def compliant_plan(
     }
 
 
+# T-ENGINE-02：连接器类型 → (JDBC URL 前缀, driver class)。
+# Doris FE 讲 MySQL 协议（9030 与 MySQL 同端口探查/写入），故 DORIS 与 MYSQL 同 driver；
+# MYSQL/DORIS 所需的 mysql-connector-j 已在引擎 lib/（实测），worker 白名单含 connector-jdbc。
+# TODO(T-ENGINE-02)：未覆盖类型（ORACLE/SQL_SERVER/HIVE/HDFS/LOCAL_FILE）暂回落 POSTGRESQL
+# 并打 warning——按演示所需最小集，不过度通用化；需要时在此表追加一行。
+_JDBC_CONNECTORS: dict[str, tuple[str, str]] = {
+    "MYSQL": ("jdbc:mysql://", "com.mysql.cj.jdbc.Driver"),
+    "DORIS": ("jdbc:mysql://", "com.mysql.cj.jdbc.Driver"),
+    "POSTGRESQL": ("jdbc:postgresql://", "org.postgresql.Driver"),
+}
+_DEFAULT_JDBC = _JDBC_CONNECTORS["POSTGRESQL"]
+
+
+def _jdbc_target(profile: dict[str, Any]) -> tuple[str, str]:
+    """按 profile 的 connector_type 解析 (URL 前缀, driver class)。
+
+    未覆盖类型：回落 POSTGRESQL 并 warning（不静默——T-ENGINE-01 真跑时
+    「静默用错 driver」正是缺陷 1 的教训）。
+    """
+    connector = str(profile.get("connector_type") or "").upper()
+    target = _JDBC_CONNECTORS.get(connector)
+    if target is None:
+        logger.warning(
+            "HOCON 渲染：connector_type=%r 未被 _JDBC_CONNECTORS 覆盖，回落 POSTGRESQL"
+            "（T-ENGINE-02 TODO：按需扩充映射表，勿静默）",
+            connector or "<empty>",
+        )
+        return _DEFAULT_JDBC
+    return target
+
+
+def _jdbc_block(profile: dict[str, Any], prefix: str, query: str) -> str:
+    """渲染一个 Jdbc 块（driver/URL 按连接器类型，凭据仍走占位符，FR-68）。
+
+    用字符串拼接而非 f-string：`${VAR}` 字面量在 f-string 里需双花括号转义，
+    易错（本次首版即踩坑）；拼接形态与占位符契约一一对应，直读。
+    """
+    url_prefix, driver = _jdbc_target(profile)
+    return (
+        "  Jdbc {\n"
+        '    url = "' + url_prefix + "${" + prefix + "_HOST}:${" + prefix + "_PORT}/${" + prefix + '_DB}"\n'
+        '    driver = "' + driver + '"\n'
+        '    user = "${' + prefix + '_USER}"\n'
+        '    password = "${' + prefix + '_PASSWORD}"\n'
+        '    query = "' + query + '"\n'
+        "  }\n"
+    )
+
+
 def compliant_hocon(source_profile: dict[str, Any], sink_profile: dict[str, Any]) -> str:
-    """构造合规 HOCON：凭据一律 `${ENV}` 占位符（FR-68：图内只传占位符）。"""
+    """构造合规 HOCON：凭据一律 `${ENV}` 占位符（FR-68：图内只传占位符）。
+
+    T-ENGINE-02：driver / URL 按 profile 的 `connector_type` 渲染
+    （MYSQL / DORIS → `jdbc:mysql://` + `com.mysql.cj.jdbc.Driver`；
+    POSTGRESQL 保持原形态），真实引擎才连得上源与目标。
+    """
     return (
         "env {\n"
         '  job.mode = "BATCH"\n'
         "}\n"
         "\n"
         "source {\n"
-        "  Jdbc {\n"
-        '    url = "jdbc:postgresql://${SRC_HOST}:${SRC_PORT}/${SRC_DB}"\n'
-        '    driver = "org.postgresql.Driver"\n'
-        '    user = "${SRC_USER}"\n'
-        '    password = "${SRC_PASSWORD}"\n'
-        f'    query = "select * from {source_profile.get("table_name")}"\n'
-        "  }\n"
-        "}\n"
+        + _jdbc_block(source_profile, "SRC", f"select * from {source_profile.get('table_name')}")
+        + "}\n"
         "\n"
         "sink {\n"
-        "  Jdbc {\n"
-        '    url = "jdbc:postgresql://${SINK_HOST}:${SINK_PORT}/${SINK_DB}"\n'
-        '    driver = "org.postgresql.Driver"\n'
-        '    user = "${SINK_USER}"\n'
-        '    password = "${SINK_PASSWORD}"\n'
-        f'    query = "insert into {sink_profile.get("table_name")}"\n'
-        "  }\n"
-        "}\n"
+        + _jdbc_block(sink_profile, "SINK", f"insert into {sink_profile.get('table_name')}")
+        + "}\n"
     )
 
 

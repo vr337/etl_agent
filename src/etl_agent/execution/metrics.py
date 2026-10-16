@@ -71,9 +71,18 @@ async def apply_metrics(
 def metrics_from_engine_payload(payload: dict[str, Any]) -> ExecutionMetrics:
     """从引擎回传载荷构造聚合指标（未知字段忽略，缺失维度为 None）。
 
-    期望形态（SeaTunnel 作业指标或等价结构）：
+    期望形态一（mock / 演示态，SeaTunnel 作业指标或等价结构）：
     `{"source_rows": 100, "sink_rows": 90, "source_bytes": 2048, "sink_bytes": 1024,
       "tables": [{"table": "orders", "rows": 90, "bytes": 1024}]}`
+
+    期望形态二（真实引擎 REST `/job-info` 的 metrics，T-ENGINE-02 实测）：
+    `{"TableSourceReceivedCount": {"Source[0].orders": "1002"},
+      "TableSinkWriteCount": {"Sink[0].orders": "1000"},
+      "SinkCommittedCount": "1000", ...}`
+    ——值为字符串、行数指标为「顶点→计数」嵌套 dict；本函数对两种形态兼容
+    （mock 键优先，真实键兜底），bytes / tables 在真实形态下留 None / []（TODO）。
+
+    null-safe：任何缺失 / 畸形（非数字字符串、空 dict）都不抛，对应维度为 None。
     """
     tables = [
         TableMetric(
@@ -84,13 +93,57 @@ def metrics_from_engine_payload(payload: dict[str, Any]) -> ExecutionMetrics:
         for item in _as_list(payload.get("tables"))
         if isinstance(item, dict)
     ]
+    source_rows = _as_int(payload.get("source_rows"))
+    if source_rows is None:
+        # 真实引擎：TableSourceReceivedCount 为 {顶点: "计数"} 嵌套，取合计
+        source_rows = _as_nested_sum(payload.get("TableSourceReceivedCount"))
+    sink_rows = _as_int(payload.get("sink_rows"))
+    if sink_rows is None:
+        # 优先按写入计数，退化用提交计数（真实引擎两者都有时写入更贴近落库）
+        sink_rows = _as_nested_sum(payload.get("TableSinkWriteCount"))
+    if sink_rows is None:
+        sink_rows = _as_nested_sum(payload.get("SinkCommittedCount"))
     return ExecutionMetrics(
-        source_rows=_as_int(payload.get("source_rows")),
-        sink_rows=_as_int(payload.get("sink_rows")),
+        source_rows=source_rows,
+        sink_rows=sink_rows,
         source_bytes=_as_int(payload.get("source_bytes")),
         sink_bytes=_as_int(payload.get("sink_bytes")),
         tables=tables,
     )
+
+
+def _as_nested_sum(value: object) -> int | None:
+    """真实引擎行数指标聚合：嵌套 dict 取 value 合计，扁平标量取原值（null-safe）。
+
+    Args:
+        value: `{"Source[0].orders": "1002"}` / `"1002"` / 1002 / None / 畸形值。
+
+    Returns:
+        int | None：取不到有效数字时 None（由调用方降级，不抛异常）。
+    """
+    if isinstance(value, dict):
+        total = 0
+        matched = False
+        for item in value.values():
+            number = _coerce_int(item)
+            if number is not None:
+                total += number
+                matched = True
+        return total if matched else None
+    return _coerce_int(value)
+
+
+def _coerce_int(value: object) -> int | None:
+    """宽松整数转换（bool 不算 int；数字字符串去空白；其余 None）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return None
 
 
 def _as_list(value: object) -> list[object]:
