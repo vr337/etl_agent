@@ -69,3 +69,35 @@ def test_route_outcome_with_none_metrics_is_incomplete_not_crash() -> None:
     status, reject_rate = classify_quality({}, outcome)
     assert status == "INCOMPLETE"
     assert reject_rate is None
+
+
+# T-SHADOW-01 双路分流作业的载荷形态（run21 预期）：两个 sink 各一个键
+DUAL_SINK_METRICS: dict[str, object] = {
+    "TableSourceReceivedCount": {"Source[0].source_db.orders": "1002"},
+    "TableSinkWriteCount": {
+        "Sink[0].doris_dw.order_wide_shadow": "1000",
+        "Sink[1].doris_dw.order_wide_error": "2",
+    },
+    "SinkCommittedCount": "1000",
+    # 扁平合计（各 sink 之和）——**不可直接当有效行数**
+    "SinkWriteCount": "1002",
+}
+
+
+def test_dual_sink_metrics_split_by_table_suffix() -> None:
+    """T-SHADOW-01：双路分流按 **sink 表名后缀**分键取行数，不用扁平合计。
+
+    扁平 `SinkWriteCount` = 影子表 + 错误表 = 1002；若拿它当 `sink_rows`，
+    `rejected = source - sink` 会恒为 0，质量报告读不出分流事实（DoD 的 1000/2）。
+    """
+    metrics = metrics_from_engine_payload(dict(DUAL_SINK_METRICS))
+    assert metrics.source_rows == 1002
+    assert metrics.sink_rows == 1000  # 影子表那一路（有效数据）
+    assert metrics.rejected_rows == 2  # 错误表那一路（脏数据）
+
+
+def test_single_sink_metrics_still_use_flat_sum() -> None:
+    """单 sink 作业（未分流）无 `_shadow` / `_error` 键 → 退回嵌套合计，不回归。"""
+    metrics = metrics_from_engine_payload(dict(REAL_JOB_INFO_METRICS))
+    assert metrics.sink_rows == 1000
+    assert metrics.rejected_rows is None

@@ -59,9 +59,9 @@ from etl_agent.execution.service import (
     transition,
 )
 from etl_agent.execution.shadow import (
+    DorisShadowTableExecutor,
     LoggingShadowTableExecutor,
     ShadowTableExecutor,
-    shadow_table_name,
 )
 from etl_agent.generation.service import load_candidate_content
 from etl_agent.harness.broker.replay_guard import ReplayGuard
@@ -108,6 +108,11 @@ MAX_ADVANCE_PER_SCAN = 10
 # 默认候选正文加载器（Checkpoint 双库隔离：正文只在 etl_checkpoint，FR-67）
 CandidateLoader = Callable[[uuid.UUID], Awaitable[dict[str, object] | None]]
 
+# 数据面建表通道工厂（T-SHADOW-01）：入参是**执行视角**占位符变量表（含 SINK_*），
+# 出参为影子表 / 错误表执行器。做成工厂而非直接传实例，是因为执行器需要**每次运行**
+# 才可确定的 sink 连接坐标（连接行 + host_map 重写），无法在任务启动时预先构造。
+ShadowExecutorFactory = Callable[[dict[str, str]], ShadowTableExecutor]
+
 
 @dataclass
 class ScanSummary:
@@ -130,6 +135,7 @@ async def scan_outbox_once(
     settings: Settings | None = None,
     candidate_loader: CandidateLoader | None = None,
     shadow_executor: ShadowTableExecutor | None = None,
+    shadow_executor_factory: ShadowExecutorFactory | None = None,
     worker_id: str | None = None,
     now: datetime | None = None,
 ) -> ScanSummary:
@@ -141,7 +147,10 @@ async def scan_outbox_once(
         engine: SeaTunnel 客户端（Fake / Rest 由部署与测试注入）。
         settings: 应用配置；缺省全局配置。
         candidate_loader: 候选正文加载器（Checkpoint）；缺省走 generation 域加载。
-        shadow_executor: 影子表执行通道；缺省 Logging（无 Doris 的开发/测试环境）。
+        shadow_executor: 数据面建表通道**实例**（测试注入用，优先于 factory）。
+        shadow_executor_factory: 数据面建表通道**工厂**（生产用，T-SHADOW-01）——
+            按每次运行的执行视角 sink 坐标构造真实 `DorisShadowTableExecutor`；
+            两者都缺省时回落 `LoggingShadowTableExecutor`（无 Doris 的开发/测试环境）。
         worker_id: 执行租约持有者标识；缺省主机-PID。
         now: 时钟注入（测试）。
 
@@ -177,6 +186,7 @@ async def scan_outbox_once(
             settings=effective,
             candidate_loader=candidate_loader,
             shadow_executor=shadow_executor,
+            shadow_executor_factory=shadow_executor_factory,
             worker_id=worker_id,
         )
         await session.commit()
@@ -211,6 +221,7 @@ async def _consume_command(
     settings: Settings,
     candidate_loader: CandidateLoader | None,
     shadow_executor: ShadowTableExecutor | None,
+    shadow_executor_factory: ShadowExecutorFactory | None,
     worker_id: str | None,
 ) -> str:
     """消费一条 Outbox 命令（AC-06 全链路；返回 "submitted" 或失败原因摘要）。
@@ -306,18 +317,21 @@ async def _consume_command(
                 )
                 return "candidate-missing"
 
-            materialized = await _materialize(
-                session,
-                plan if isinstance(plan, dict) else {},
-                hocon,
-                settings,
-            )
-            shadow = await _ensure_shadow(
-                shadow_executor, plan if isinstance(plan, dict) else {}
-            )
-            quality_contract = (
-                plan.get("quality_contract") if isinstance(plan, dict) else None
-            )
+            plan_dict = plan if isinstance(plan, dict) else {}
+            # 取值一次：既用于物化 HOCON，也用于构造数据面建表通道的执行视角坐标
+            # （T-SHADOW-01：不重复读 Secret，两处寻址同源）
+            values = await _connection_values(session, plan_dict, settings)
+            try:
+                materialized = render_hocon(hocon, values, load_placeholder_contract())
+                data_plane = shadow_executor or _build_shadow_executor(
+                    values, factory=shadow_executor_factory
+                )
+            finally:
+                clear_values(values)
+
+            shadow = await _ensure_shadow(data_plane, plan_dict)
+            error_table = await _ensure_error_table(data_plane, plan_dict)
+            quality_contract = plan_dict.get("quality_contract")
             if isinstance(quality_contract, dict) and _shadow_contract_mismatch(
                 quality_contract, shadow
             ):
@@ -348,7 +362,7 @@ async def _consume_command(
                 run.id,
                 level="INFO",
                 event_type="execution.shadow_ready",
-                message=f"影子表就绪：{shadow}（S7 不 Swap，FR-43）",
+                message=f"数据面就绪：影子表 {shadow} / 错误表 {error_table}（S7 不 Swap，FR-43）",
                 stage="submit",
             )
             await refresh_lock(session, command.id, lock_seconds=settings.outbox_lock_seconds * 4)
@@ -451,18 +465,17 @@ async def _load_connection(
     return await session.get(DataConnection, connection_id)
 
 
-async def _materialize(
+async def _connection_values(
     session: AsyncSession,
     plan: dict[str, object],
-    hocon: str,
     settings: Settings,
-) -> str:
-    """物化 Secret：占位符 → 真实值（内存短暂持有，AC-02 红线）。
+) -> dict[str, str]:
+    """构造「占位符 → 真实值」映射（内存短暂持有，AC-02 红线）。
 
     取值来源：连接行非密字段（host / port / database_name）+ SecretProvider.read（用户名 / 口令）。
-    返回的 HOCON 含明文，**只在提交引擎前短暂持有**，调用方用完即弃引用（不落库 / 不进日志）。
+    T-ENGINE-02：host_map 只在**本路径**生效——执行视角重写（API 探测路径仍用连接行原值）。
+    T-SHADOW-01：数据面建表通道复用本函数取 `SINK_*` 执行视角坐标，不另起一套寻址。
     """
-    contract = load_placeholder_contract()
     values: dict[str, str] = {}
     provider = create_provider(session, settings)
     for role, prefix in (("source", "SRC"), ("sink", "SINK")):
@@ -475,8 +488,6 @@ async def _materialize(
         secret_values: dict[str, str] = {}
         if connection.secret_ref is not None:
             secret_values = await provider.read(connection.secret_ref)
-        # T-ENGINE-02：host_map 仅在物化（本路径）生效——执行视角重写；
-        # API 探测路径仍用连接行原值（宿主机视角），两视角各取所需。
         values.update(
             values_for_connection(
                 connection, secret_values, prefix, host_map=settings.host_map
@@ -485,10 +496,22 @@ async def _materialize(
         clear_values(secret_values)  # 明文只在 values 中保留一份引用（AC-02）
     if _is_file_source(plan.get("source")):
         values["FILE_ASSET_BASE"] = settings.file_asset_root
-    try:
-        return render_hocon(hocon, values, contract)
-    finally:
-        clear_values(values)
+    return values
+
+
+def _build_shadow_executor(
+    values: dict[str, str],
+    *,
+    factory: ShadowExecutorFactory | None = None,
+) -> ShadowTableExecutor:
+    """按执行视角坐标构造数据面建表通道（T-SHADOW-01）。
+
+    `SINK_*` 来自 `_connection_values`（**已过 host_map 重写**）——worker 容器内的
+    容器网络名，与引擎提交用的寻址同源。未注入 factory（开发/测试）时回落 Logging 通道。
+    """
+    if factory is None:
+        return LoggingShadowTableExecutor()
+    return factory(values)
 
 
 def _is_file_source(endpoint: object) -> bool:
@@ -516,6 +539,28 @@ async def _ensure_shadow(
     return await effective.ensure_shadow_table(str(target))
 
 
+async def _ensure_error_table(
+    executor: ShadowTableExecutor | None, plan: dict[str, object]
+) -> str:
+    """错误表幂等创建（T-SHADOW-01：脏数据分流目标，FR-44 / PRD 10.5 #4）。
+
+    业务列取自计划的 `sink.target_schema.columns`（生成侧已声明，无需查库）；
+    计划未声明目标表 / 列清单时返回空串（与 `_ensure_shadow` 同语义）。
+    """
+    sink = plan.get("sink")
+    target = sink.get("table") if isinstance(sink, dict) else None
+    if not target:
+        return ""
+    target_schema = sink.get("target_schema") if isinstance(sink, dict) else None
+    columns = (
+        target_schema.get("columns") if isinstance(target_schema, dict) else None
+    )
+    if not isinstance(columns, list) or not columns:
+        return ""
+    effective = executor or LoggingShadowTableExecutor()
+    return await effective.ensure_error_table(str(target), columns)
+
+
 def _quality_outcome(
     metrics_payload: dict[str, object], aggregated: ExecutionMetrics
 ) -> QualityOutcome:
@@ -537,8 +582,10 @@ def _quality_outcome(
         )
     total = aggregated.source_rows
     passed = aggregated.sink_rows
-    rejected = None
-    if total is not None and passed is not None:
+    # T-SHADOW-01：双路分流下优先取**错误表那一路**的写入计数（引擎按 sink 分键口径，
+    # 见 execution.metrics）；缺该键（单 sink 作业 / 老形态）时退回「源 − 有效」差值。
+    rejected = aggregated.rejected_rows
+    if rejected is None and total is not None and passed is not None:
         rejected = max(total - passed, 0)
     return QualityOutcome(
         total_rows=total,
@@ -736,9 +783,14 @@ async def _warn_if_stalled(
 
 
 def _shadow_contract_mismatch(contract: dict[str, object], shadow: str) -> bool:
-    """契约声明的 valid_sink 与计划推得的影子表是否一致（漂移即事件流留痕）。"""
+    """契约声明的 valid_sink 与计划推得的影子表是否一致（漂移即事件流留痕）。
+
+    T-SHADOW-02 命名统一后，`valid_sink` **就是影子表名本身**（`<目标表>_shadow`），
+    直接比较即可。不能再对它二次拼 `_shadow` 后缀——那会把 `order_wide_shadow`
+    拼成 `order_wide_shadow_shadow`，**恒判漂移**（run23 实证的误报）。
+    """
     valid_sink = contract.get("valid_sink")
-    return bool(valid_sink) and shadow_table_name(str(valid_sink)) != shadow
+    return bool(valid_sink) and str(valid_sink) != shadow
 
 
 async def _run() -> dict[str, object]:
@@ -760,6 +812,8 @@ async def _run() -> dict[str, object]:
                 handoff=handoff,
                 engine=engine,
                 settings=settings,
+                # T-SHADOW-01：数据面建表走真实 Doris 通道（按每次运行的执行视角坐标）
+                shadow_executor_factory=_doris_shadow_executor_factory,
             )
     finally:
         await redis.aclose()
@@ -771,6 +825,25 @@ async def _run() -> dict[str, object]:
         "finalized": summary.finalized,
         "failed": summary.failed,
     }
+
+
+def _doris_shadow_executor_factory(values: dict[str, str]) -> ShadowTableExecutor:
+    """生产通道：按执行视角 sink 坐标构造 Doris 数据面执行器（T-SHADOW-01）。
+
+    坐标取自 `_connection_values`（连接行 + host_map 重写），与引擎提交的寻址同源。
+    无完整 sink 坐标（计划无落库动作 / 未登记连接）时回落 Logging——此时
+    `_ensure_shadow` / `_ensure_error_table` 也不会真正建表（无目标表即返回空串）。
+    """
+    required = ("SINK_HOST", "SINK_PORT", "SINK_USER", "SINK_PASSWORD", "SINK_DB")
+    if not all(values.get(key) for key in required):
+        return LoggingShadowTableExecutor()
+    return DorisShadowTableExecutor(
+        host=values["SINK_HOST"],
+        port=int(values["SINK_PORT"]),
+        user=values["SINK_USER"],
+        password=values["SINK_PASSWORD"],
+        database=values["SINK_DB"],
+    )
 
 
 @app.task(name="worker.scan_outbox", bind=True, acks_late=True)
