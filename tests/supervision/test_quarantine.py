@@ -79,7 +79,7 @@ async def test_quarantine_blocks_swap(db_session, make_run) -> None:
         quality_contract={},
     )
     decision = await evaluate_publish_gate(
-        db_session, run, report=report, targets=targets, executor=LoggingSwapExecutor()
+        db_session, run, report=report, targets=targets
     )
     assert decision.allowed is False
     assert decision.code == SwapQuarantined.code

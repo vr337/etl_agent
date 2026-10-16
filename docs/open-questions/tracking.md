@@ -23,14 +23,14 @@
 
 | 阶段 | 遗留 # | 摘要 | 分类 | 处理 |
 |------|-------|------|------|------|
-| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 部分闭环：PR-A 已落，Swap 待 PR-B） |
+| S7 | 1 | SeaTunnel REST `submit-job` NPE | **已修（AC-16 真闭环）** | ✅ **T-ENGINE-01 Closed** |
 | S10 | 7 | 生成模板硬编码 PG 驱动 + worker 容器内寻址不可达 + worker 镜像漏插件索引 | **已修（真引擎通到执行阶段）** | ✅ **T-ENGINE-02 Closed** |
 | S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | **已修（run20 落数 1000 行）** | ✅ **T-ENGINE-03 Closed** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
-| S10 | 4 | 影子表/错误表执行通道为 Logging + 无质量分流（双路） | **PR-A 落盘中（fix/T-SHADOW-01a）** | **T-SHADOW-01** |
+| S10 | 4 | 影子表/错误表执行通道为 Logging + 无质量分流（双路） | **已修（PR-A + PR-B，AC-16 真闭环）** | ✅ **T-SHADOW-01 Closed** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | **已修（命名统一到 `_shadow`）** | ✅ **T-SHADOW-02 Closed** |
 | S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
 | — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
@@ -39,6 +39,9 @@
 | S10 | 10 | doris-init 注释与 PRD 10.5 #4 矛盾（本 PR 不动） | 独立排期 | **T-DOCS-01** |
 | S10 | 11 | etl_quality_summary 在 src/ 下零写入点（死表） | 独立排期 | **T-SHADOW-04** |
 | S10 | 12 | 数据面 DDL 失败未映射到 ENGINE 族（run21 暴露，本 PR 不动） | 独立排期 | **T-CLASSIFY-01** |
+| S10 | 13 | 发布四门禁散在三处 + 门禁函数曾有僵尸 `executor` 参数 | 独立排期 | **T-PUBLISH-01** |
+| S10 | 14 | Swap 失败的回退状态未区分（swap 已执行 / 未执行） | 独立排期 | **T-SWAP-01** |
+| S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | 独立排期 | **T-OBS-01** |
 
 ## 三、独立运维事项
 
@@ -64,12 +67,12 @@
   - ✅ `infra/Dockerfile.worker`（worker 专用镜像：JDK8 同源 + SeaTunnel 引擎客户端层裁剪
     + connector 白名单 + cluster-members=seatunnel:5801），镜像 2.71GB，启动日志/容器 env 双证据
   - ✅ 14 个新测试 + 904 passed 全量绿
-- **AC-16 部分闭环（Swap 待 PR-B）**：SPEC AC-16 含「→Swap」两段，T-SHADOW-01 PR-A
-  已落**第一段**——双路分流 / 影子表 / 错误表真实生效，run24 实证
-  `order_wide_shadow`=1000、`order_wide_error`=2、质量报告 PASSED、作业 SUCCEEDED；
-  **第二段「原子 Swap」属 PR-B（T-SHADOW-01 后续），尚未接线**，故 AC-16 **不标 Closed**
+- **AC-16 真闭环**（run25 实证）：SPEC AC-16 全段已通——连接→探查→生成→门禁→审批→
+  执行→影子表→**双路分流**→**原子 Swap**。`order_wide`=**1000**（swap 后正式表）、
+  `order_wide_shadow`=0（swap 后指向旧数据）、`order_wide_error`=2；
+  事件流含 `execution.published`（原子发布完成：order_wide ← order_wide_shadow）
 - **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（Closed）；T-ENGINE-03（Closed）；
-  T-SHADOW-01 PR-A（已闭环）；T-SHADOW-01 PR-B（Swap，AC-16 第二段）
+  T-SHADOW-01 PR-A（PR #20，已合）；T-SHADOW-01 PR-B（原子 Swap，已接线）
 - **当前镜像**：`flowpilot/seatunnel:2.3.13`（compose e2e/exec）
 
 ### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达 + worker 镜像漏插件索引 —— **Closed**
@@ -155,9 +158,9 @@
   `Reason: column_name[amount], null value for not null column, type=DECIMAL64(18, 2)`
   （源行 9001 amount NULL）→ 该行所在批次（`batch_size`=1000 的第二批，含 9001/9002）
   整批回滚，故 1002−1000=2（1 脏行 + 1 同批连带）。**错误分流缺失属 T-SHADOW-01**。
-- **影响**：AC-16 **部分闭环**——真引擎链路已落数；「脏行不毒化整批」的分流已由
-  T-SHADOW-01 **PR-A** 完成（run24 实证 1000 + 2）；AC-16 第二段「原子 Swap」待 PR-B。
-- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01 PR-A（已闭环）；
+- **影响**：AC-16 **已真闭环**——「脏行不毒化整批」的分流由 T-SHADOW-01 **PR-A** 完成
+  （run24 实证 1000 + 2），原子 Swap 由 **PR-B** 完成（run25 实证主表 1000）。
+- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01 PR-A + PR-B（已 Closed）；
   T-SHADOW-02（valid_sink 契约漂移，已 Closed）；T-DEMO-01（源端脏行口径）
 
 ### T-LLM-01：HOCON 的 sink/URL/driver 形态不应由 LLM 决定（新，Open，不阻塞）
@@ -257,10 +260,11 @@
 
 ### T-SHADOW-01：影子表执行通道为 Logging，不建真实 Doris 表
 
-- **状态**：**In Progress（PR-A 已闭环 · run24 全绿，fix/T-SHADOW-01a）**——分两 PR：
-  PR-A = 质量分流 + 影子表/错误表真实通道 + 命名统一（**本 PR 完成**：run24 实证
-  `order_wide_shadow`=1000 / `order_wide_error`=2 / 质量报告 PASSED / 作业 SUCCEEDED）；
-  PR-B = 原子 Swap 接线 + 发布门禁（AC-16 第二段，等 PR-A 合后启动）
+- **状态**：**Closed（PR-A + PR-B 全落）**——PR-A（fix/T-SHADOW-01a，PR #20）已合：
+  质量分流 + 影子表/错误表真实通道 + 命名统一（run24 实证 shadow=1000 / error=2）；
+  PR-B（fix/T-SHADOW-01b）：`_finalize_run` 接线 `publish_run` + 注入 `DorisSwapExecutor`，
+  四门禁 → 原子 Swap → 正式表发布（run25 实证 **order_wide=1000**）。
+  **AC-16 真闭环**（SPEC 全段：连接→探查→生成→门禁→审批→执行→影子表→分流→Swap）
 - **发现**：S10 场景 A 修复后重跑（2026-10-16，execution.shadow_ready 事件只有日志、
   Doris 侧 `order_wide_shadow` 无任何 worker 侧 DDL 痕迹）
 - **现象**：`consume_outbox.scan_outbox_once` 的 `shadow_executor` 参数缺省为
@@ -335,6 +339,56 @@
   （需 AMEND，参照 AMEND-006/007 格式）；② 在 `classify_failure` 里对
   `OperationalError` 文本做关键字映射（不改错误码表，**不需 AMEND**）
 - **关联**：T-SHADOW-01（run21 暴露）；`execution/metrics.py`；SPEC 6.4 错误码体系
+
+### T-PUBLISH-01：发布四门禁散在三处（新，Open）
+
+- **状态**：Open（低优先级，结构债）
+- **发现**：T-SHADOW-01 PR-B 探查（2026-10-16）
+- **现象**：`publish.py` 模块 docstring 原称「四道门禁」都在 `evaluate_publish_gate`，
+  实际只判 ①②；③（Schema 一致）在 `execute_atomic_swap` 内、④（幂等）在 `publish_run` 内。
+  且 `evaluate_publish_gate` 白收了一个**未使用的 `executor` 参数**（执行通道依赖漏进了
+  纯决策函数）
+- **PR-B 处置**：只做最小修正——删僵尸参数 + 把 docstring 改成「门禁分布表」让文档说真话。
+  **不**把 schema 校验挪进门禁函数（会让 Doris 被读两次，且属重构，不在「接线」范围内）
+- **修复方向**（待裁决）：把四道收拢到一个 `evaluate_publish_gate`（③ 的 schema 读取
+  作为其内部只读步骤，④ 的状态派生一并纳入），并删掉 `targets` 里当前也未使用的部分
+- **关联**：T-SHADOW-01 PR-B；`execution/publish.py` / `atomic_swap.py`
+
+### T-SWAP-01：Swap 失败的回退状态未区分（新，Open，低优先级）
+
+- **状态**：Open（低优先级）
+- **发现**：T-SHADOW-01 PR-B 探查（2026-10-16，人类裁决「本 PR 不做」）
+- **现象**：`publish_run` 在 `execute_atomic_swap` 抛异常时记 `execution.publish_failed`
+  后原样抛出，`_finalize_run` 一律把运行置 FAILED（ENGINE / finalize）。但
+  **「swap 本身失败」与「swap 已成功、后续落账失败」两种状态没有区分**——
+  事件消息只记 `{type(exc).__name__}`，运维无法从事件反推「表是否已经换了名字」
+- **影响**：swap 是元数据级瞬时操作，失败窗口极窄；但一旦真发生（Doris 半提交），
+  现状会让排障只能去 Doris 侧查 `SHOW TABLES` 人工比对
+- **修复方向**：在 `publish_failed` 事件里区分「未执行 / 已执行未确认」，或引入一次
+  执行后校验（`DESC` 两侧再比一次）
+- **关联**：T-SHADOW-01 PR-B；`execution/publish.py:205-221`
+
+### T-OBS-01：publish 状态无可视化渠道（新，Open）
+
+- **状态**：Open（前端 + API 增强）
+- **发现**：T-SHADOW-01 PR-B 方案评审（2026-10-16，人类提问「blocked 时运维从哪看到」）
+- **现象**（三处缺口）：
+  1. `ExecutionRun` **没有** publish / swap / 发布状态列（SPEC 5.2 未定义，属契约外）
+  2. `publish.current_publish_state()`（派生 PUBLISHED / BLOCKED / READY）**只被
+     `publish.py` 内部**用于幂等判断，**从未对外暴露**
+  3. 前端 `RuntimeCenter.vue` 调了 `getExecution()` 但**只用 `qualityReport`，不渲染
+     `events[]`**（`types.ts:246-247` 的 `ExecutionDetailView.events` 类型已定义、
+     **无任何组件消费**）
+- **当前唯一渠道**：`GET /api/v1/executions/{id}`（API-12）返回完整 `events[]`，
+  `execution.publish_blocked` 在其中（level=WARN, stage=finalize）→ **运维必须主动
+  翻事件流**，前端控制台看不到
+- **PR-B 的最小补偿**：`_finalize_run` 把「发布被阻断（原因）」写进
+  `execution.succeeded` 事件的 message，让运维在**不需要翻事件流**的情况下
+  从终态原因得知「成功但未发布」
+- **修复方向**（待裁决，属前端 + API 增强，超出 PR-B 范围）：① API-12 增
+  `publish_state` 派生字段（不改数据模型，纯派生）；② 前端运行中心渲染 `events[]`
+  或至少渲染 `publish_state` 徽标
+- **关联**：T-SHADOW-01 PR-B；PRD US-11（实时看到执行健康度）/ FR-44；SPEC 6.1 API-12
 
 ### T-SHADOW-02：质量契约 valid_sink 与派生影子表名漂移
 

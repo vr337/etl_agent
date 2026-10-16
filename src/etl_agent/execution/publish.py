@@ -7,16 +7,23 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-K / 第 6.1 章 API-1
 
 **四道门禁**（缺一不可，顺序即优先级）：
 
-| 序 | 门禁 | 失败码 | 为什么排在这个位置 |
-|----|------|--------|-------------------|
-| 1 | 未被 QUARANTINE（`quarantined_at` / `supervision_action`） | `BIZ_422_SWAP_QUARANTINED` | 隔离是**最高优先阻断**：它的处置是「先解除隔离并复盘」，与质量阈值无关；若排在质量之后，被隔离的运行会显示成「质量未过」，把人工判决掩盖成契约判决 |
-| 2 | 质量报告 `PASSED` | `BIZ_422_SWAP_QUALITY_FAILED` | WARNING / FAILED / INCOMPLETE 都不允许发布（INCOMPLETE = 判定不了，按不放行处理） |
-| 3 | 影子表与正式表 Schema 一致 | `BIZ_422_SWAP_SCHEMA_MISMATCH` | swap 会把影子表结构变成正式表结构，Schema 不同等于静默改表 |
-| 4 | 幂等：未发布过 | —（直接返回已发布） | 重复触发不得二次 swap |
+| 序 | 门禁 | 失败码 | 判定位置 |
+|----|------|--------|---------|
+| 1 | 未被 QUARANTINE（`quarantined_at` / `supervision_action`） | `BIZ_422_SWAP_QUARANTINED` | `evaluate_publish_gate` |
+| 2 | 质量报告 `PASSED` | `BIZ_422_SWAP_QUALITY_FAILED` | `evaluate_publish_gate` |
+| 3 | 影子表与正式表 Schema 一致 | `BIZ_422_SWAP_SCHEMA_MISMATCH` | `execute_atomic_swap`（swap 前读两侧 `DESC` 逐列比对） |
+| 4 | 幂等：未发布过 | —（直接返回已发布） | `publish_run`（由事件流派生） |
+
+**为什么第 3 道不在门禁函数里**（T-SHADOW-01 PR-B 修正说明）：本 PR 前 docstring 误称
+「四道都在 `evaluate_publish_gate`」，实际该函数只判 1、2 道，且白收了一个未使用的
+`executor` 参数。**本 PR 只做最小修正**（删僵尸参数 + 让文档说真话），不把 schema 校验
+挪进门禁函数——那会让 Doris 被读两次，且属重构，不在「接线」范围内。
+收拢到一处的后续事项见 tracking 的 **T-PUBLISH-01**。
 
 **发布状态机的状态载体**：SPEC 5.2 的 `execution_runs` 没有发布状态列，故状态由
 **事件流**（`execution.publish_*`）承载并由 `current_publish_state()` 派生——
 事件流是审计级事实源，比新增一列更符合「控制面只存治理事实」的口径（禁止事项 7 不改契约）。
+注意：派生状态**仅供本模块幂等判断使用，尚未对外暴露**（见 tracking 的 **T-OBS-01**）。
 """
 
 from __future__ import annotations
@@ -138,9 +145,15 @@ async def evaluate_publish_gate(
     *,
     report: QualityReport | None,
     targets: PublishTargets,
-    executor: SwapExecutor,
 ) -> PublishDecision:
-    """四道门禁裁决（不执行任何副作用；失败只返回裁决，不抛异常）。"""
+    """门禁裁决（第 1、2 道；不执行任何副作用，失败只返回裁决，不抛异常）。
+
+    `targets` 是**决策上下文**（要发布什么），故保留；`executor` 是执行通道依赖，
+    属错误分层，T-SHADOW-01 PR-B 已删（原先是白收未用的僵尸参数）。
+
+    第 3 道（Schema 一致）在 `execute_atomic_swap` 内判——它必须读两侧 `DESC`，
+    属执行期动作；第 4 道（幂等）在 `publish_run` 判。见模块 docstring 的门禁分布表。
+    """
     if is_quarantined(run):
         return PublishDecision(
             allowed=False,
@@ -177,7 +190,7 @@ async def publish_run(
         DependencyUnavailable:  目标端 Doris 不可达。
     """
     decision = await evaluate_publish_gate(
-        session, run, report=report, targets=targets, executor=executor
+        session, run, report=report, targets=targets
     )
     if not decision.allowed:
         await record_event(

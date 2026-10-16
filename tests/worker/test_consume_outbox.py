@@ -351,3 +351,208 @@ async def test_stalled_run_records_warn_once(
     )
     assert len(events) == 1
     assert events[0].level == "WARN"
+
+
+# ---------------------------------------------------------------------------
+# T-SHADOW-01 PR-B：原子 Swap 接线（AC-16 第二段）
+# ---------------------------------------------------------------------------
+
+
+def _plan_with_contract(base: dict[str, object], **overrides: object) -> dict[str, object]:
+    """在种子计划上覆盖质量契约字段（用于构造 blocked / FAILED 场景）。"""
+    plan = dict(base)
+    contract = dict(plan.get("quality_contract") or {})
+    contract.update(overrides)
+    plan["quality_contract"] = contract
+    return plan
+
+
+async def _event_of(
+    db_session: AsyncSession, run_id: uuid.UUID, event_type: str
+) -> ExecutionEvent | None:
+    return (
+        (
+            await db_session.execute(
+                select(ExecutionEvent).where(
+                    ExecutionEvent.run_id == run_id,
+                    ExecutionEvent.event_type == event_type,
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
+async def test_finalize_publishes_atomic_swap_when_quality_passed(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """T-SHADOW-01 PR-B：FINISHED + 质量 PASSED → 真调 `publish_run`（AC-16 第二段）。
+
+    此前 `publish_run` / `resolve_targets` 在 `src/` 下**零调用点**（与 F3 审计钩子同类
+    的死代码）——本断言就是接线的回归防线。
+    """
+    from etl_agent.execution.atomic_swap import LoggingSwapExecutor
+
+    run = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert run is not None
+    run.status = execution_service.STATUS_RUNNING
+    run.seatunnel_job_id = "job-x"
+    await db_session.flush()
+
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+    swap = LoggingSwapExecutor()
+
+    await advance_running_executions(
+        db_session,
+        engine,
+        settings=make_settings(),
+        candidate_loader=_loader(seeded_execution),
+        swap_executor=swap,
+    )
+
+    # 1) swap 真被执行（Logging 通道记录 SQL 与表对）
+    assert swap.swapped == [("orders_wide", "orders_wide_shadow")]
+    assert swap.executed == [
+        "ALTER TABLE orders_wide REPLACE WITH TABLE orders_wide_shadow PROPERTIES('swap'='true');"
+    ]
+    # 2) 事件流含 execution.published（证据链可整流）
+    assert await _event_of(db_session, run.id, "execution.published") is not None
+    # 3) 终态仍 SUCCEEDED
+    refreshed = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert refreshed is not None and refreshed.status == execution_service.STATUS_SUCCEEDED
+    # 4) 假消息已改：不再声称「S7 不 Swap」
+    quality_event = await _event_of(db_session, run.id, "execution.quality_report")
+    assert quality_event is not None
+    assert "S7 不 Swap" not in (quality_event.message or "")
+
+
+async def test_swap_falls_back_to_logging_without_factory(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """无 factory（开发/测试环境）→ 回落 LoggingSwapExecutor，发布链路不中断。"""
+    run = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert run is not None
+    run.status = execution_service.STATUS_RUNNING
+    run.seatunnel_job_id = "job-x"
+    await db_session.flush()
+
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+
+    await advance_running_executions(
+        db_session,
+        engine,
+        settings=make_settings(),
+        candidate_loader=_loader(seeded_execution),
+    )
+
+    assert await _event_of(db_session, run.id, "execution.published") is not None
+
+
+async def test_blocked_publish_does_not_block_succeeded(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """质量未过 → 发布被阻断，但**不阻塞 SUCCEEDED**（publish.py 既有契约）。
+
+    「不发布」是合法结果；终态原因里写明「发布被阻断」，运维不必翻事件流才知道
+    （T-OBS-01 的最小可观测补偿）。
+    """
+    from etl_agent.execution.atomic_swap import LoggingSwapExecutor
+
+    run = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert run is not None
+    run.status = execution_service.STATUS_RUNNING
+    run.seatunnel_job_id = "job-x"
+    await db_session.flush()
+
+    # Fake 引擎回传 rejected=100；把阈值压到 1 → 质量 FAILED → 门禁②阻断
+    plan = _plan_with_contract(seeded_execution.plan, max_rejected_rows=1)
+
+    async def _load(version_id: uuid.UUID) -> dict[str, object] | None:
+        return {"etl_plan": plan, "hocon": seeded_execution.hocon}
+
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+    swap = LoggingSwapExecutor()
+
+    await advance_running_executions(
+        db_session,
+        engine,
+        settings=make_settings(),
+        candidate_loader=_load,
+        swap_executor=swap,
+    )
+
+    assert swap.swapped == []  # 未发布
+    blocked = await _event_of(db_session, run.id, "execution.publish_blocked")
+    assert blocked is not None and blocked.level == "WARN"
+    refreshed = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert refreshed is not None and refreshed.status == execution_service.STATUS_SUCCEEDED
+    succeeded = await _event_of(db_session, run.id, "execution.succeeded")
+    assert succeeded is not None
+    assert "发布被阻断" in (succeeded.message or "")
+
+
+async def test_swap_failure_fails_the_run(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """swap 抛异常 → 运行置 FAILED（ENGINE / finalize），并留 publish_failed 事件。"""
+
+    class _FailingSwap:
+        async def describe_columns(self, table: str) -> list[object]:
+            return []
+
+        async def swap(self, *, target_table: str, shadow_table: str) -> str:
+            raise RuntimeError("doris down")
+
+    run = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert run is not None
+    run.status = execution_service.STATUS_RUNNING
+    run.seatunnel_job_id = "job-x"
+    await db_session.flush()
+
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+
+    await advance_running_executions(
+        db_session,
+        engine,
+        settings=make_settings(),
+        candidate_loader=_loader(seeded_execution),
+        swap_executor=_FailingSwap(),
+    )
+
+    refreshed = await db_session.get(ExecutionRun, seeded_execution.run_id)
+    assert refreshed is not None
+    assert refreshed.status == execution_service.STATUS_FAILED
+    assert refreshed.failure_category == "ENGINE"
+    assert refreshed.failure_stage == "finalize"
+    assert await _event_of(db_session, run.id, "execution.publish_failed") is not None
+
+
+def test_evaluate_publish_gate_no_longer_takes_executor() -> None:
+    """T-SHADOW-01 PR-B：门禁函数的僵尸 `executor` 参数已删（T-PUBLISH-01 记收拢）。"""
+    import inspect
+
+    from etl_agent.execution.publish import evaluate_publish_gate
+
+    assert "executor" not in inspect.signature(evaluate_publish_gate).parameters
+    assert set(inspect.signature(evaluate_publish_gate).parameters) >= {
+        "session",
+        "run",
+        "report",
+        "targets",
+    }
+
+
+async def test_data_plane_ready_message_no_longer_claims_no_swap(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """T-SHADOW-01 PR-B：`shadow_ready` 消息不得再声称「S7 不 Swap」（swap 已真发生）。"""
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+
+    await _scan(db_session, seeded_execution, engine)
+
+    event = await _event_of(db_session, seeded_execution.run_id, "execution.shadow_ready")
+    assert event is not None
+    assert "S7 不 Swap" not in (event.message or "")
+    assert "orders_wide_shadow" in (event.message or "")
+    assert "orders_wide_error" in (event.message or "")
