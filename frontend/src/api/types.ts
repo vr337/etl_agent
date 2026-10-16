@@ -119,6 +119,8 @@ export interface AgentRunView {
   id: string
   thread_id: string
   pipeline_id: string
+  /** AMEND-010：本次运行绑定的版本 id（列表出参直给，Studio 免去「按 pipeline 猜版本」） */
+  pipeline_version_id: string
   status: string
   stage: string | null
   repair_count: number

@@ -16,7 +16,9 @@ import { getActorId, getProjectId, setActorId, setProjectId } from '@/api/client
 export const useActorStore = defineStore('actor', () => {
   const actorId = ref<string | null>(getActorId())
   const projectId = ref<string | null>(getProjectId())
-  const actorName = ref<string>('未登录')
+  // 刷新后从 localStorage 恢复显示名（actor_id 即 subject，与 bind() 传入的 name 同源）；
+  // 此前仅 id/projectId 持久化、actorName 恒回初值「未登录」，导致 F5 后顶部栏身份丢失。
+  const actorName = ref<string>(getActorId() ?? '未登录')
   const actorRole = ref<string>('')
 
   function bind(actor: { actorId: string; projectId: string; name?: string; role?: string }) {

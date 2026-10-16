@@ -30,6 +30,7 @@
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
 | S10 | 4 | 影子表执行通道为 Logging，不建真实 Doris 表 | 独立排期 | **T-SHADOW-01** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
+| S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
 
 ## 三、独立运维事项
 
@@ -148,6 +149,20 @@
   目标宽表派生规则一致）或消费端按计划重算对齐，二选一排期
 - **关联**：T-SHADOW-01；S5 生成引擎质量契约口径
 
+### T-CONSOLE-01：控制台刷新后显示态未持久化
+
+- **状态**：Open（本 PR 已修 `actorName`；`actorRole` 待补）
+- **发现**：S10 场景 A 截图取证（2026-10-16，F5 刷新后顶部栏恒显「未登录」）
+- **现象**：`frontend/src/stores/actor.ts` 的 `actorName` 初值硬编码 `'未登录'`
+  且不从 localStorage 恢复（只有 `actorId` / `projectId` 恢复）→ 刷新后身份显示
+  丢失（`AppShell.vue` 顶部栏）；`actorRole` 同样未持久化（刷新后角色徽标为空）
+- **影响**：显示态不完整；鉴权**不受影响**（`X-Actor-ID` 由 `client.ts` 拦截器
+  每次经 `getActorId()` 现读 localStorage）。截图/演示需手动 bind 才能显示身份
+- **处置**：本 PR（`fix/S10-console-refresh-defects`）修 `actorName`——刷新时从
+  `getActorId()` 恢复（1 行）；`actorRole` 需持久化方案（localStorage 增列或缓存
+  bootstrap 响应），另行排期
+- **关联**：`fix/S10-console-refresh-defects`；`docs/demo/演示回放.md` §8.9
+
 ## 四、AMEND 追加件登记
 
 | 编号 | 标题 | 状态 | 关联基线 |
@@ -161,3 +176,4 @@
 | AMEND-007 | 质量发布与监督回滚域错误码补充 | Accepted | SPEC v1.0.3-Baseline 6.4 |
 | AMEND-008 | 审计证据与评测安全进化域错误码补充 | Accepted | SPEC v1.0.3-Baseline 6.4 |
 | AMEND-009 | 生成运行响应追加 pipeline_version_id（API-05/06 出参） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05/06） |
+| AMEND-010 | 生成运行**列表**出参追加 pipeline_version_id（API-05 列表） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05 列表） |

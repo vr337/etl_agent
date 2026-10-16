@@ -126,6 +126,10 @@ async def test_router_list_agent_runs_with_data(
     assert item["id"] == created.json()["id"]
     assert item["status"] == "WAITING_APPROVAL"
     assert uuid.UUID(item["pipeline_id"])  # pipeline_id 为合法 UUID（经版本链派生）
+    # AMEND-010：列表出参含本次运行绑定的版本 id，且与创建响应一致（前端 Studio 直取，
+    # 免去「拿 pipeline_id 猜版本」导致的 404 回退演示态）
+    assert item["pipeline_version_id"] == created.json()["pipeline_version_id"]
+    assert uuid.UUID(item["pipeline_version_id"])
     assert item["repair_count"] == 0
     assert "clarify_question" in item
     for absent in ("etl_plan", "hocon", "requirement", "candidate"):
