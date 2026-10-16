@@ -23,9 +23,9 @@
 
 | 阶段 | 遗留 # | 摘要 | 分类 | 处理 |
 |------|-------|------|------|------|
-| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-ENGINE-03） |
+| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-SHADOW-01） |
 | S10 | 7 | 生成模板硬编码 PG 驱动 + worker 容器内寻址不可达 + worker 镜像漏插件索引 | **已修（真引擎通到执行阶段）** | ✅ **T-ENGINE-02 Closed** |
-| S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | 独立排期 | **T-ENGINE-03** |
+| S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | **已修（run20 落数 1000 行）** | ✅ **T-ENGINE-03 Closed** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
@@ -34,6 +34,7 @@
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
 | S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
 | — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
+| S10 | 9 | 引擎 metrics 跨 task 重试累加，失败作业行数虚高（4008=4×1002） | 独立排期 | **T-METRICS-01** |
 
 ## 三、独立运维事项
 
@@ -59,11 +60,13 @@
   - ✅ `infra/Dockerfile.worker`（worker 专用镜像：JDK8 同源 + SeaTunnel 引擎客户端层裁剪
     + connector 白名单 + cluster-members=seatunnel:5801），镜像 2.71GB，启动日志/容器 env 双证据
   - ✅ 14 个新测试 + 904 passed 全量绿
-- **仍未闭环**：**AC-16「Doris 有真实数据」未达成**——真引擎首次执行暴露**生成模板缺陷**
-  （T-ENGINE-02 已修，链路通到执行阶段），落库最后一公里由 **T-ENGINE-03**（sink SQL 形态）
-  阻断；T-SHADOW-01（影子表通道）在真实链路下同样仍未实现（当前 HOCON 为裸
-  `insert into order_wide` 直插目标表，非原子 Swap 语义）
-- **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（已 Closed）；T-ENGINE-03（阻塞 AC-16 闭环）
+- **仍未闭环**：**AC-16「Doris 有真实数据」未完全达成**——T-ENGINE-02（生成模板）与
+  T-ENGINE-03（sink SQL 形态）已修，run20 实证 Doris `order_wide` 落 **1000 行真实数据**；
+  剩余一环是**脏行分流**（T-SHADOW-01）——脏行导致批次整批回滚、作业终态 FAILED。
+  T-SHADOW-01（影子表通道）在真实链路下同样仍未实现（当前为裸 INSERT 直插目标表，
+  非原子 Swap 语义）
+- **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（Closed）；T-ENGINE-03（Closed）；
+  T-SHADOW-01（AC-16 最后一环）
 - **当前镜像**：`flowpilot/seatunnel:2.3.13`（compose e2e/exec）
 
 ### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达 + worker 镜像漏插件索引 —— **Closed**
@@ -104,9 +107,11 @@
 - **关联**：T-ENGINE-01（上游已就绪）；T-ENGINE-03（sink SQL，下游唯一阻断）；
   T-SHADOW-01（影子表通道）；T-SHADOW-02（valid_sink 契约漂移）
 
-### T-ENGINE-03：生成的 sink `query` 非完整 INSERT，SeaTunnel 原样下发致 Doris 解析失败（新，Open）
+### T-ENGINE-03：生成的 sink `query` 非完整 INSERT，SeaTunnel 原样下发致 Doris 解析失败 —— **Closed**
 
-- **状态**：Open（2026-10-16，T-ENGINE-02 步骤 4 真引擎 run19 暴露；独立 PR 立项）
+- **状态**：**Closed**（2026-10-16，fix/T-ENGINE-03）——sink 改 `table` 形态后 run20 实证
+  Doris `order_wide` 落 **1000 行真实数据**；作业 FAILED 纯因脏行（T-SHADOW-01 范畴），
+  链路真通。
 - **现象**：run19 作业提交成功、源端读到数据，但 sink 首行即败。引擎日志
   `[FieldNamedPreparedStatement] PrepareStatement sql is:` → **`insert into order_wide`**
   （无列清单、无 `VALUES` 占位符）；Doris FE 解析器报
@@ -118,24 +123,70 @@
   也无占位符 → 任何一行都会失败（**非脏行型**，是 SQL 形态缺陷）。
 - **来源**：本项此前已在 T-ENGINE-02 记为「附带（次要）：裸 INSERT 无列清单，列序依赖 JDBC
   默认排序」——**实测该"次要项"是硬阻断**（不是列序问题，是语句不完整）。
-- **影响**：AC-16 仍不闭环——真引擎链路最后一公里（落库）被挡；Doris `order_wide` 恒 0 行。
-- **修复方向**（待裁决）：生成模板 sink 段改输出 `table = "order_wide"`（由 JdbcSink 按目标表
-  生成 INSERT），或渲染成带列清单 + `values (?,...)` 的完整 `query`。涉及契约面，可能需 AMEND。
-- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01/02（影子表与 valid_sink 契约）
+- **手工 HOCON 实验现场记录**（2026-10-16，引擎容器 `seatunnel.sh --config` 逐级试，
+  四选项缺一不可）：
+
+  | 变体 | 结果 |
+  | --- | --- |
+  | `table` 单独 | ❌ 客户端校验失败 `options('query') are required because ['generate_sink_sql' == false]` |
+  | `+ generate_sink_sql = true` | ❌ 校验失败 `options('database') are required because ['generate_sink_sql' == true]` |
+  | `+ database = "doris_dw"` | ❌ SQL 已生成但追加 `ON DUPLICATE KEY UPDATE`（2.3.13 默认 `enable_upsert=true`）→ Doris `mismatched input 'ON' expecting {<EOF>, ';'} (line 1, pos 74280)` |
+  | `+ enable_upsert = false` | ✅ **FINISHED** · Read 1001 / Write 1001 / Failed 0 → Doris 落 1001 行 |
+
+  成功时连接器生成的 SQL 形态（**列清单由目标表元数据自动生成、按列名映射**，免疫列序变化）：
+  ```sql
+  INSERT INTO `doris_dw`.`order_wide` (`order_id`,`customer_id`,`amount`,`status`,`address`,`updated_at`) VALUES (?,?,?,?,?,?)
+  UPDATE  `doris_dw`.`order_wide` SET ... WHERE `order_id` = ?
+  ```
+  `enable_upsert` 语义：2.3.13 默认 `true` → 生成 MySQL 风格 upsert 语句
+  （`INSERT ... ON DUPLICATE KEY UPDATE`），**Doris 解析器不支持该语法**；置 `false` 后走
+  「INSERT + PK 冲突时 UPDATE」，Doris 接受。
+- **修复**：`llm/mock_provider.py::compliant_hocon` sink 段改 `table` 形态，四选项缺一不可
+  （`table` / `database` / `generate_sink_sql = true` / `enable_upsert = false`）；
+  `table`←`sink_profile.table_name`、`database`←`sink_profile.schema_name`（不硬编码）；
+  url/driver 仍走 `_jdbc_block`（T-ENGINE-02 的连接器感知渲染）；旧 `query` 形态保留为注释。
+- **run20 实证**（真引擎 real-cli，13 步）：执行终态 `FAILED / failure_stage=run`，
+  job `1163447565283229697`；**Doris `order_wide` = 1000 行真实数据**（order_id 1..1000，
+  含中文地址）；引擎日志 SQL 为上述 `table` 形态（**无 `ON DUPLICATE KEY`**）。
+  FAILED 原因是**脏行**：Doris 拒收日志
+  `Reason: column_name[amount], null value for not null column, type=DECIMAL64(18, 2)`
+  （源行 9001 amount NULL）→ 该行所在批次（`batch_size`=1000 的第二批，含 9001/9002）
+  整批回滚，故 1002−1000=2（1 脏行 + 1 同批连带）。**错误分流缺失属 T-SHADOW-01**。
+- **影响**：AC-16 **部分闭环**——真引擎链路已落数；「脏行不毒化整批」的分流仍待 T-SHADOW-01。
+- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01（脏行分流，AC-16 最后一环）；
+  T-SHADOW-02（valid_sink 契约漂移）；T-DEMO-01（源端脏行口径）
 
 ### T-LLM-01：HOCON 的 sink/URL/driver 形态不应由 LLM 决定（新，Open，不阻塞）
 
 - **状态**：Open（2026-10-16 记账，不阻塞当前排期）
-- **背景**：T-ENGINE-02（驱动/URL 按 connector_type 渲染）与 T-ENGINE-03（sink `query`→`table`）
-  修改的是 `llm/mock_provider.py` 里的 HOCON 渲染。当前 mock provider 是**确定性模板**，
-  这些修复直接落在模板上；但若将来接入**真 LLM** 生成 HOCON，同样的坑会重演——
-  LLM 可能再次输出硬编码 PG 驱动、错误寻址、或非完整 sink SQL。
+- **背景**：T-ENGINE-02（驱动/URL 按 connector_type 渲染）与 T-ENGINE-03（sink `query`→`table`
+  四选项形态）修改的是 `llm/mock_provider.py` 里的 HOCON 渲染。当前 mock provider 是
+  **确定性模板**，这些修复直接落在模板上；但若将来接入**真 LLM** 生成 HOCON，同样的坑会重演。
 - **结论/建议**：真 LLM 接入时，HOCON 的 **sink 形态 / JDBC URL / driver** 必须由后端
-  **确定性模板**渲染（按连接的 `connector_type` + 执行视角 host 解析 + 目标表列清单），
-  LLM 只负责**语义层**（选表、选字段、转换规则），不决定协议与 SQL 形态。
-- **动作**：真 LLM 接入前，把 mock_provider 的确定性渲染抽为可复用的「HOCON 渲染器」，
-  LLM 输出经该渲染器落地。
-- **关联**：T-ENGINE-02（Closed）；T-ENGINE-03（sink SQL 形态）；`llm/mock_provider.py`
+  **确定性模板**渲染，LLM 只负责**语义层**（选表、选字段、转换规则），不决定协议与 SQL 形态。
+- **动作（prompt 约束须同步的键）**：真 LLM 接入前，把 mock_provider 的确定性渲染抽为可复用的
+  「HOCON 渲染器」，并在 prompt 里明确禁止 LLM 自定以下键：
+  `url`（按 `connector_type` 选 `jdbc:mysql://` / `jdbc:postgresql://`）、
+  `driver`（`com.mysql.cj.jdbc.Driver` / `org.postgresql.Driver`）、
+  sink 段 `table`（← 目标 profile 的 `table_name`）、`database`（← 目标 profile 的 `schema_name`）、
+  `generate_sink_sql = true`、`enable_upsert = false`；
+  且**禁止**在 sink 段回退到 `query = "insert into <表>"` 形态（T-ENGINE-03 已证必败）。
+- **关联**：T-ENGINE-02（Closed）；T-ENGINE-03（Closed）；`llm/mock_provider.py`
+
+### T-METRICS-01：引擎 metrics 跨 task 重试累加，失败作业的行数虚高（新，Open）
+
+- **状态**：Open（2026-10-16，T-ENGINE-03 run20 实证）
+- **现象**：run20 作业终态 FAILED，`execution_runs.source_rows = sink_rows = **4008**`，
+  而源表实际只有 **1002** 行（Doris 实收 1000 行）。4008 = **4 × 1002** ——
+  引擎（SeaTunnel Zeta）的 `SourceReceivedCount` / `SinkWriteCount` 是**跨 task 重试累加**的
+  计数器：作业每次 task 尝试都重新读源，计数持续累加而非重置。
+- **影响**：失败/重试作业下 `source_rows` / `sink_rows` **不可当行数用**（会按尝试次数倍增）；
+  成功作业（单次尝试）不受影响。AC-16 的权威行数应取 **Doris `count(*)`**，
+  不能只信 API 的 `source_rows/sink_rows`。
+- **修复方向**（待裁决）：metrics 只取**最终一次 task 尝试**的计数（取最新快照而非累计和），
+  或按 task 维度去重/标记 attempt；亦可改为在作业成功时以 `SinkCommittedCount` 为准。
+- **关联**：T-ENGINE-02（缺陷 3 真实引擎 metrics 键映射，本项是其语义边界）；
+  `execution/metrics.py`；AC-16（行数取证口径）
 
 ### T-DEMO-01：demo seed 脏行 3 不可落库（address 超列宽）
 
