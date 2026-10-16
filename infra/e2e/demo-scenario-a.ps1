@@ -268,13 +268,17 @@ foreach ($conn in @($sourceConn, $sinkConn)) {
 # ---------------------------------------------------------------------------
 Write-Step '发起生成（POST /projects/{id}/agent-runs）'
 $requirement = '把 MySQL orders 增量同步到 Doris 宽表 order_wide，金额分转元，地址字段做归一化，脏数据走错误分流。'
+# AC-03：第一轮**故意缺参**——只传需求、不传 source/sink profile 列表，
+# 期望生成图以 WAITING_INPUT 中断并给出澄清问题（MISSING_QUESTIONS 文案）；
+# 缺参补齐走下方 STEP 05（同 thread_id 恢复，不新起线程）。
 $run = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/agent-runs" -Body @{
-    requirement       = $requirement
-    source_profile_ids = @($sourceProfile.id)
-    sink_profile_ids   = @($sinkProfile.id)
+    requirement = $requirement
 }
 if ($run) {
     Write-Ok ("AgentRun {0} · status={1} · thread_id={2}" -f $run.id, $run.status, $run.thread_id)
+    if ($run.status -eq 'WAITING_INPUT') {
+        Write-Ok ("[AC-03] 缺参中断生效：pending_question = {0}" -f $run.pending_question)
+    }
     if ($run.pending_question) {
         Write-Info ("澄清问题：{0}" -f $run.pending_question)
     }
@@ -284,13 +288,30 @@ if ($run) {
 # STEP 05 — 澄清恢复（**同 thread_id**；AC-03）
 # ---------------------------------------------------------------------------
 if ($run -and $run.status -eq 'WAITING_INPUT') {
-    Write-Step '澄清恢复（POST /agent-runs/{id}/messages，同 thread_id）'
-    $resumed = Invoke-Api -Method POST -Path "/api/v1/agent-runs/$($run.id)/messages" -Body @{
-        answer = '可以，时区 Asia/Shanghai，滞后 300 秒。'
+    Write-Step '澄清恢复（POST /agent-runs/{id}/messages ×2，同 thread_id）'
+    # 生成图按缺失项逐个提问（MISSING_QUESTIONS 顺序：requirement → source → sink），
+    # 每次 messages 只落位一个字段——故恢复需两轮：先补来源端，再补目标端。
+    # 全轮断言 thread_id 复用（AC-03：同线程恢复，不新起线程）。
+    $originThread = $run.thread_id
+    $first = Invoke-Api -Method POST -Path "/api/v1/agent-runs/$($run.id)/messages" -Body @{
+        answer = "$($sourceProfile.id)"
     }
-    if ($resumed) {
-        Write-Ok ("恢复成功：status={0} · thread_id 复用 = {1}" -f $resumed.status, ($resumed.thread_id -eq $run.thread_id))
-        $run = $resumed
+    if ($first) {
+        Write-Ok ("第 1 轮（补来源端）：status={0} · thread_id 复用 = {1}" -f $first.status, ($first.thread_id -eq $originThread))
+        if ($first.pending_question) { Write-Info ("下一个澄清问题：{0}" -f $first.pending_question) }
+        $run = $first
+    }
+    if ($run -and $run.status -eq 'WAITING_INPUT') {
+        $second = Invoke-Api -Method POST -Path "/api/v1/agent-runs/$($run.id)/messages" -Body @{
+            answer = "$($sinkProfile.id)"
+        }
+        if ($second) {
+            Write-Ok ("第 2 轮（补目标端）：status={0} · thread_id 复用 = {1}" -f $second.status, ($second.thread_id -eq $originThread))
+            $run = $second
+        }
+    }
+    if ($run) {
+        Write-Ok ("[AC-03] 恢复收敛：status={0} · thread_id 全程复用 = {1}" -f $run.status, ($run.thread_id -eq $originThread))
     }
 } else {
     Write-Info '无澄清中断（生成已直接收敛），跳过恢复步骤'
@@ -344,35 +365,44 @@ if ($version) {
         pipeline_version_id = $version.id
         idempotency_key     = [guid]::NewGuid().ToString()
         environment         = 'dev'
+        # AC-01/AC-05：声明预算 2000 万条，超过冻结硬上限（1000 万，SPEC 8 不可扩权）
+        # → 命中 HARNESS-P1-BUDGET-EXCEED → 风险 P1 / REQUIRE_APPROVAL
+        # → 审批槽位 [SECURITY_APPROVER] × 1 票（RISK_APPROVALS 映射，策略判决非脚本决定）。
+        # 不改 PDP 规则：本字段是 API 既有入参（PrepareInput.budget），由策略引擎判定。
+        budget              = @{ max_records = 20000000 }
     }
 }
 if ($prep) {
-    Write-Ok ("准备单 {0} · risk={1} · required_approvals={2}" -f $prep.id, $prep.risk_level, $prep.required_approvals)
+    Write-Ok ("准备单 {0} · risk={1} · required_approvals={2} · required_roles={3}" -f $prep.id, $prep.risk_level, $prep.required_approvals, ($prep.required_roles -join ','))
     Write-Info ("影响报告：{0}" -f ($prep.impact_report | ConvertTo-Json -Compress -Depth 4))
 }
 
 # ---------------------------------------------------------------------------
 # STEP 09 — 四眼审批（双唯一 + 不可自批；AC-01 / AC-05）
 # ---------------------------------------------------------------------------
-Write-Step '四眼审批 approve（POST /preparations/{id}/decisions ×2）'
+Write-Step '四眼审批 approve（POST /preparations/{id}/decisions，按 required_roles）'
 if ($prep) {
     if (-not $prep.required_roles -or $prep.required_roles.Count -eq 0) {
         # PDP 评级 P3（required_approvals=0）：无审批槽位，准备单直接 READY；
         # 四眼机制在 P0/P1/P2 才激活——策略判决如此，非流程跳过（不放宽门禁）
         Write-Info ("PDP 评级 {0} · required_approvals={1}：无审批槽位，四眼审批本回合不激活" -f $prep.risk_level, $prep.required_approvals)
     } else {
-    # 申请人 = 当前 actor；DB 双唯一约束禁自批 → 换身份模拟第二名审批人。具名审批人为 bootstrap 后预登记的两名项目成员（见上方「审批环境预备」：成员登记 + Harness 职责授予两步，缺一不可）；原硬编码 UUID 既非 subject 也非项目成员，后端按 subject 解析必然失败（FR-65 / FR-03）。
+    # 申请人 = 当前 actor（admin@demo.local）；审批人必须换身份（DB 双唯一 + 自批检查
+    # 由后端强制，PRD 2.3-1 职责分离红线）。具名审批人为 bootstrap 后预登记的两名
+    # 项目成员（见上方「审批环境预备」：成员登记 + Harness 职责授予两步，缺一不可）。
+    # 槽位按准备单 required_roles 逐槽委派：P1=SECURITY_APPROVER×1 / P0=双槽×2。
     $approverA = $approverSubjects[0]
     $approverB = $approverSubjects[1]
+    Write-Info ("[AC-01] 申请人 = admin@demo.local（当前 actor）· 审批人 = {0} —— 身份不同，禁自批" -f $approverA)
     $decisionA = Invoke-Api -Method POST -Path "/api/v1/preparations/$($prep.id)/decisions" -ActorId $approverA -Body @{
         role = $prep.required_roles[0]; decision = 'APPROVE'; reason = '数据口径已核对'
     }
-    if ($decisionA) { Write-Ok ("{0} 已批准" -f $prep.required_roles[0]) }
+    if ($decisionA) { Write-Ok ("{0} 已批准（{1}）" -f $prep.required_roles[0], $decisionA.status) }
     if ($prep.required_roles.Count -gt 1) {
         $decisionB = Invoke-Api -Method POST -Path "/api/v1/preparations/$($prep.id)/decisions" -ActorId $approverB -Body @{
             role = $prep.required_roles[1]; decision = 'APPROVE'; reason = '安全边界已确认'
         }
-        if ($decisionB) { Write-Ok ("{0} 已批准" -f $prep.required_roles[1]) }
+        if ($decisionB) { Write-Ok ("{0} 已批准（{1}）" -f $prep.required_roles[1], $decisionB.status) }
     }
     }
 }
