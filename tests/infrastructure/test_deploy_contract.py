@@ -39,6 +39,17 @@ WORKER_ENGINE_COPIES = (
 # 漏拷对应 jar 时 CLI 提交会在插件解析阶段失败（plugin not found）
 WORKER_CONNECTOR_WHITELIST = ("connector-jdbc-", "connector-doris-")
 
+# worker 镜像 connectors 目录的**允许清单**（防"调试污染"泄入镜像：曾有人为排查
+# 插件发现问题把引擎全部 84 个 jar 拷进运行容器；镜像必须只含演示所需最小集）
+WORKER_CONNECTOR_ALLOWED_JARS = (
+    "connector-jdbc-2.3.13.jar",
+    "connector-doris-2.3.13.jar",
+    "connector-console-2.3.13.jar",
+    "connector-fake-2.3.13.jar",
+)
+# 插件发现索引（T-ENGINE-02）：插件名 → jar 工件名的翻译表，缺失则插件解析必败
+WORKER_CONNECTOR_INDEX = "plugin-mapping.properties"
+
 
 def _copy_sources(dockerfile: Path = DOCKERFILE, *, include_from: bool = False) -> list[str]:
     """解析 Dockerfile 的 COPY 行，回传源路径列表。
@@ -164,6 +175,40 @@ def test_worker_dockerfile_connector_whitelist_covers_demo() -> None:
     assert not missing, (
         f"Dockerfile.worker 的 connector 白名单漏拷：{missing}"
         f"（当前白名单：{connectors}；漏 jar 时 CLI 提交在插件解析阶段失败）"
+    )
+
+
+def test_worker_dockerfile_copies_plugin_mapping_index() -> None:
+    """T-ENGINE-02：worker 镜像必须有插件发现索引 plugin-mapping.properties。
+
+    该文件把用户配置里的插件名（如 `Jdbc`）翻译成 jar 工件名（`connector-jdbc`），
+    SeaTunnel 据此在本目录找 jar。仅 COPY jar 而不 COPY 它 → 插件解析必败
+    （`PluginIdentifier{pluginName='Jdbc'} not found`），与 jar 是否齐全无关。
+    """
+    sources = _copy_sources(WORKER_DOCKERFILE, include_from=True)
+    index_path = f"/opt/seatunnel/connectors/{WORKER_CONNECTOR_INDEX}"
+    assert index_path in sources, (
+        f"Dockerfile.worker 漏 COPY {WORKER_CONNECTOR_INDEX}"
+        "（漏则真引擎 CLI 提交在插件解析阶段失败，T-ENGINE-02 失效）"
+    )
+
+
+def test_worker_dockerfile_connector_dir_is_minimal() -> None:
+    """T-ENGINE-02：worker 镜像 connectors 目录只含白名单 jar + 插件索引。
+
+    防"调试污染"回归：曾为排查问题把引擎全部 84 个 jar 拷进运行容器，
+    镜像必须只含演示所需最小集（jar 集合精确等于白名单，非 jar 文件仅索引）。
+    """
+    sources = _copy_sources(WORKER_DOCKERFILE, include_from=True)
+    names = [Path(item).name for item in sources if item.startswith("/opt/seatunnel/connectors/")]
+    jars = sorted(n for n in names if n.endswith(".jar"))
+    others = sorted(n for n in names if not n.endswith(".jar"))
+    assert jars == sorted(WORKER_CONNECTOR_ALLOWED_JARS), (
+        f"worker 镜像 connectors 目录 jar 集合不符白名单：{jars}"
+        f"（期望：{sorted(WORKER_CONNECTOR_ALLOWED_JARS)}；多拷=污染，少拷=功能缺失）"
+    )
+    assert others == [WORKER_CONNECTOR_INDEX], (
+        f"worker 镜像 connectors 目录的非 jar 文件应仅 {WORKER_CONNECTOR_INDEX}，实际：{others}"
     )
 
 

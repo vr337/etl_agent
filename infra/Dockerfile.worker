@@ -51,6 +51,12 @@ COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-jdbc-2.3.13.jar
 COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-doris-2.3.13.jar /opt/seatunnel/connectors/
 COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-console-2.3.13.jar /opt/seatunnel/connectors/
 COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-fake-2.3.13.jar /opt/seatunnel/connectors/
+# 插件发现索引（T-ENGINE-02）：SeaTunnel 提交时先读此文件把插件名（如 Jdbc）翻译为
+# jar 工件名（connector-jdbc），再回本目录找对应 jar。**漏拷它 = 插件解析必败**
+# （PluginIdentifier{pluginName='Jdbc'} not found），与 jar 是否齐全无关。
+# 全量 COPY 不裁剪：该文件是惰性索引（仅作业引用的插件才查表），多余映射指向
+# worker 里不存在的 jar 无害；且与 jar 同源于同一 seatunnel-client stage，版本零漂移。
+COPY --from=seatunnel-client /opt/seatunnel/connectors/plugin-mapping.properties /opt/seatunnel/connectors/
 # worker 专用集群客户端配置：集群成员指向 compose 服务名（覆盖镜像内置 localhost:5801）
 COPY infra/seatunnel/hazelcast-client.worker.yaml /opt/seatunnel/config/hazelcast-client.yaml
 
