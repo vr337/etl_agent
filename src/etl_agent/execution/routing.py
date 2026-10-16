@@ -200,16 +200,21 @@ async def generate_quality_report(
 
 
 def _contract_rules(contract: dict[str, Any]) -> list[dict[str, Any]]:
-    """契约规则引用（只引名称与表达式，不回传业务数据；FR-22 质量契约要素）。"""
+    """契约规则引用（只引名称 / 表达式 / 错误码，不回传业务数据；FR-22 质量契约要素）。
+
+    `code` 参与输出是因为**错误码分布按 `rules[].code` 聚合**（PRD 第 10 章）——
+    缺它则报告只有规则名、无法给出错误码分布（T-SHADOW-01 起生成侧已带该标签）。
+    """
     rules: list[dict[str, Any]] = []
     for predicate in contract.get("predicates") or []:
         if isinstance(predicate, dict):
-            rules.append(
-                {
-                    "name": str(predicate.get("name", "")),
-                    "expression": str(predicate.get("expression", "")),
-                }
-            )
+            rule = {
+                "name": str(predicate.get("name", "")),
+                "expression": str(predicate.get("expression", "")),
+            }
+            if predicate.get("code"):
+                rule["code"] = str(predicate["code"])
+            rules.append(rule)
     return rules
 
 

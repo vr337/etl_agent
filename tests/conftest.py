@@ -301,15 +301,19 @@ S6_TEST_PLAN: dict[str, object] = {
         "target_schema": {"columns": [{"name": "id", "type": "bigint"}]},
     },
     "quality_contract": {
-        "valid_sink": "orders_wide_valid",
+        # T-SHADOW-02 命名统一：有效 sink 必须是 `<目标表>_shadow`（与 execution.shadow
+        # 的派生名同源），否则发布链路会把 swap 指向不存在的表
+        "valid_sink": "orders_wide_shadow",
         "error_sink": "orders_wide_error",
-        "routing": [{"rule": "not_null_id", "sink": "orders_wide_valid"}],
+        "routing": [{"rule": "not_null_id", "sink": "orders_wide_shadow"}],
         "traceability": {
             "source_row_id_column": "id",
             "error_code_column": "error_code",
             "reason_column": "error_reason",
         },
-        "predicates": [{"name": "not_null_id", "expression": "id IS NOT NULL"}],
+        "predicates": [
+            {"name": "not_null_id", "expression": "id IS NOT NULL", "code": "QUALITY_NOT_NULL_ID"}
+        ],
     },
 }
 
@@ -524,6 +528,9 @@ async def seeded_execution(
             "connector_type": "POSTGRESQL",
             "connection_id": str(connection.id),
             "table": "orders_wide",
+            # T-SHADOW-01：错误表 DDL 需要目标列清单（生成侧恒声明，见
+            # mock_provider.compliant_plan 的 sink.target_schema）
+            "target_schema": {"columns": [{"name": "id", "type": "bigint"}]},
         },
         "quality_contract": {
             "valid_sink": "orders_wide_shadow",

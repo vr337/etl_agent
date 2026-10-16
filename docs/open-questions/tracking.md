@@ -23,18 +23,22 @@
 
 | 阶段 | 遗留 # | 摘要 | 分类 | 处理 |
 |------|-------|------|------|------|
-| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-SHADOW-01） |
+| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 部分闭环：PR-A 已落，Swap 待 PR-B） |
 | S10 | 7 | 生成模板硬编码 PG 驱动 + worker 容器内寻址不可达 + worker 镜像漏插件索引 | **已修（真引擎通到执行阶段）** | ✅ **T-ENGINE-02 Closed** |
 | S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | **已修（run20 落数 1000 行）** | ✅ **T-ENGINE-03 Closed** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
-| S10 | 4 | 影子表执行通道为 Logging，不建真实 Doris 表 | 独立排期 | **T-SHADOW-01** |
-| S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
+| S10 | 4 | 影子表/错误表执行通道为 Logging + 无质量分流（双路） | **PR-A 落盘中（fix/T-SHADOW-01a）** | **T-SHADOW-01** |
+| S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | **已修（命名统一到 `_shadow`）** | ✅ **T-SHADOW-02 Closed** |
 | S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
 | — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
 | S10 | 9 | 引擎 metrics 跨 task 重试累加，失败作业行数虚高（4008=4×1002） | 独立排期 | **T-METRICS-01** |
+| S10 | 12 | 未覆盖脏行类型（类型不匹配/超长）仍可能毒化 batch | 独立排期 | **T-SHADOW-03** |
+| S10 | 10 | doris-init 注释与 PRD 10.5 #4 矛盾（本 PR 不动） | 独立排期 | **T-DOCS-01** |
+| S10 | 11 | etl_quality_summary 在 src/ 下零写入点（死表） | 独立排期 | **T-SHADOW-04** |
+| S10 | 12 | 数据面 DDL 失败未映射到 ENGINE 族（run21 暴露，本 PR 不动） | 独立排期 | **T-CLASSIFY-01** |
 
 ## 三、独立运维事项
 
@@ -60,13 +64,12 @@
   - ✅ `infra/Dockerfile.worker`（worker 专用镜像：JDK8 同源 + SeaTunnel 引擎客户端层裁剪
     + connector 白名单 + cluster-members=seatunnel:5801），镜像 2.71GB，启动日志/容器 env 双证据
   - ✅ 14 个新测试 + 904 passed 全量绿
-- **仍未闭环**：**AC-16「Doris 有真实数据」未完全达成**——T-ENGINE-02（生成模板）与
-  T-ENGINE-03（sink SQL 形态）已修，run20 实证 Doris `order_wide` 落 **1000 行真实数据**；
-  剩余一环是**脏行分流**（T-SHADOW-01）——脏行导致批次整批回滚、作业终态 FAILED。
-  T-SHADOW-01（影子表通道）在真实链路下同样仍未实现（当前为裸 INSERT 直插目标表，
-  非原子 Swap 语义）
+- **AC-16 部分闭环（Swap 待 PR-B）**：SPEC AC-16 含「→Swap」两段，T-SHADOW-01 PR-A
+  已落**第一段**——双路分流 / 影子表 / 错误表真实生效，run24 实证
+  `order_wide_shadow`=1000、`order_wide_error`=2、质量报告 PASSED、作业 SUCCEEDED；
+  **第二段「原子 Swap」属 PR-B（T-SHADOW-01 后续），尚未接线**，故 AC-16 **不标 Closed**
 - **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（Closed）；T-ENGINE-03（Closed）；
-  T-SHADOW-01（AC-16 最后一环）
+  T-SHADOW-01 PR-A（已闭环）；T-SHADOW-01 PR-B（Swap，AC-16 第二段）
 - **当前镜像**：`flowpilot/seatunnel:2.3.13`（compose e2e/exec）
 
 ### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达 + worker 镜像漏插件索引 —— **Closed**
@@ -152,9 +155,10 @@
   `Reason: column_name[amount], null value for not null column, type=DECIMAL64(18, 2)`
   （源行 9001 amount NULL）→ 该行所在批次（`batch_size`=1000 的第二批，含 9001/9002）
   整批回滚，故 1002−1000=2（1 脏行 + 1 同批连带）。**错误分流缺失属 T-SHADOW-01**。
-- **影响**：AC-16 **部分闭环**——真引擎链路已落数；「脏行不毒化整批」的分流仍待 T-SHADOW-01。
-- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01（脏行分流，AC-16 最后一环）；
-  T-SHADOW-02（valid_sink 契约漂移）；T-DEMO-01（源端脏行口径）
+- **影响**：AC-16 **部分闭环**——真引擎链路已落数；「脏行不毒化整批」的分流已由
+  T-SHADOW-01 **PR-A** 完成（run24 实证 1000 + 2）；AC-16 第二段「原子 Swap」待 PR-B。
+- **关联**：T-ENGINE-02（上游已通到执行阶段）；T-SHADOW-01 PR-A（已闭环）；
+  T-SHADOW-02（valid_sink 契约漂移，已 Closed）；T-DEMO-01（源端脏行口径）
 
 ### T-LLM-01：HOCON 的 sink/URL/driver 形态不应由 LLM 决定（新，Open，不阻塞）
 
@@ -253,7 +257,10 @@
 
 ### T-SHADOW-01：影子表执行通道为 Logging，不建真实 Doris 表
 
-- **状态**：Open（独立排期）
+- **状态**：**In Progress（PR-A 已闭环 · run24 全绿，fix/T-SHADOW-01a）**——分两 PR：
+  PR-A = 质量分流 + 影子表/错误表真实通道 + 命名统一（**本 PR 完成**：run24 实证
+  `order_wide_shadow`=1000 / `order_wide_error`=2 / 质量报告 PASSED / 作业 SUCCEEDED）；
+  PR-B = 原子 Swap 接线 + 发布门禁（AC-16 第二段，等 PR-A 合后启动）
 - **发现**：S10 场景 A 修复后重跑（2026-10-16，execution.shadow_ready 事件只有日志、
   Doris 侧 `order_wide_shadow` 无任何 worker 侧 DDL 痕迹）
 - **现象**：`consume_outbox.scan_outbox_once` 的 `shadow_executor` 参数缺省为
@@ -264,20 +271,136 @@
   未闭环。当前不影响 AC-10 主链路其余证据（mock 口径下 Doris 表保持空表）
 - **修复建议**（未实施，待排期）：实现 Doris 影子表执行器（`CREATE TABLE ... LIKE`
   已由 init SQL 提供示例），`_run()` 按环境注入；补 spy 测试断言 shadow DDL 真实下发
-- **关联**：T-ENGINE-01；F5 mock 引擎接线（fix/S10-demo-script e0632da）
+- **PR-A 落盘内容（2026-10-16）**：范围比原描述大——不止「换通道」，而是把
+  **影子表 DDL + 质量分流 + 命名统一**三件事接线：
+  - **生成侧双路分流**（`llm/mock_provider.py`）：source 打 `plugin_output = "src"`，
+    两个 `Sql` transform 按质量契约谓词切 valid / error，两个 `Jdbc` sink 用
+    `plugin_input` 分别消费 → `<目标表>_shadow` / `<目标表>_error`
+    （SeaTunnel 2.3.13 实测：同类型 plugin 可重复声明、`plugin_input/output` 路由生效；
+    ⚠️ `LIMIT/OFFSET` 不支持，时间函数须 `CURRENT_TIMESTAMP`，`TIMESTAMP` 字面量须 ISO 格式）
+  - **质量规则三条**（对齐 seed 脏行设计，FR-22 既有范围，**不需 AMEND**）：
+    `order_id IS NOT NULL`（防御性）/ `amount IS NOT NULL` / `updated_at <= CURRENT_TIMESTAMP`；
+    `code` 标签 `QUALITY_NOT_NULL_PK` / `QUALITY_NOT_NULL_AMOUNT` / `QUALITY_FUTURE_WATERMARK`
+  - **error_code 用 CASE 取首命中**（单 error 分支，一行恰好一条错误记录 →
+    `rejected_rows` 不被重复计数污染；code 单值可聚合，合 PRD 第 10 章 `rules[].code`）
+  - **错误表运行期幂等建表**（`execution/shadow.py`）：`CREATE TABLE IF NOT EXISTS
+    <目标表>_error`，业务列**全可空**（不能用 `LIKE`——目标表 `amount NOT NULL`，
+    照抄会把脏行再拒一次）+ `error_code` / `error_reason` 两列
+  - **接线**（`worker/tasks/consume_outbox.py`）：抽 `_connection_values`（与物化同源，
+    含 host_map 执行视角重写）→ `_build_shadow_executor` 工厂按每次运行的 sink 坐标
+    构造真实 `DorisShadowTableExecutor`；`_run()` 注入该工厂
+  - **双 sink metrics 分键**（`execution/metrics.py`）：`sink_rows` 取 `_shadow` 后缀
+    sink 键、`rejected_rows` 取 `_error` 后缀键，**不用扁平合计**（合计会让 rejected 恒 0）
+- **命名统一**（T-SHADOW-02 修法）：契约 `valid_sink` 改为 `<目标表>_shadow`，
+  与 `execution.shadow` 派生名同源
+- **run21 暴露并已修：影子表 DDL 非幂等**（既有缺陷，PR-A 接线后首次真实执行 DDL 才暴露）
+  - 现象：作业在**提交前**失败（`stage=dispatch`），
+    `OperationalError: errCode=2, Table 'order_wide_shadow' already exists`
+  - 根因：`create_shadow_table_sql` 生成 `CREATE TABLE <t>_shadow LIKE <t>` **缺
+    `IF NOT EXISTS`**，而影子表已被 `doris-init/01-init.sql:43-44` 预建；
+    此前不可见是因为 `shadow_executor` 一直回落 Logging 通道、DDL 从未真正执行
+  - 修复：加 `IF NOT EXISTS`（Doris 实证 `CREATE TABLE IF NOT EXISTS <新> LIKE <已有>`
+    首建 OK、二次幂等 OK、结构与原表一致）；补两条断言（影子表幂等 / 两处建表同族一致）
+- **batch 毒化已由双路设计在路由层消除**（不再需要方案 A/B/C）：valid 分支的
+  `where r1 and r2 and r3` 已把两条脏行排除在影子表之外，影子表只收干净行，
+  NOT NULL 不会再被打；run20 的 1002→1000 损失是因为当时**所有行都直插主表**。
+  若 run22 仍出现毒化，再逐行方案（见 PR-B 记录）
+- **run22 暴露并已修：SeaTunnel Sql transform 不支持 `NOT (...)` 包裹 `IS NOT NULL`**
+  - 现象：error 分支的 `where not (order_id IS NOT NULL) or ...` 在**运行期**抛
+    `TransformException: COMMON-05 Unsupported SQL Expression: NOT (id IS NOT NULL)`；
+    校验期（`--check` 与门禁 14 项）**不报**，只在真跑时炸——静态门禁抓不到此类
+  - 修复：error 分支改用**直接否定态**（`order_id IS NULL` / `amount IS NULL` /
+    `updated_at > CURRENT_TIMESTAMP`），CASE 同样用否定态；`_QUALITY_RULES` 每条规则
+    改为携带 `pass`（通过态，写契约与 valid 分支）/ `fail`（否定态，写 error 分支）两个表达式
+  - 实证：`where (id IS NULL) or (amt IS NULL) or (ts > CURRENT_TIMESTAMP)` → FINISHED 4/1
+  - 教训：**WHERE 谓词形态必须真跑验证**，`--check`/门禁只校验结构与占位符，不校验
+    Calcite 表达式支持面
+- **关联**：T-ENGINE-01（AC-16 最后一环）；T-SHADOW-02（命名统一已在 PR-A 内）；
+  T-SHADOW-04（etl_quality_summary 死表）；T-METRICS-01（重试累加，独立仍 Open）；
+  T-CLASSIFY-01（run21 失败分类未映射）
+
+### T-CLASSIFY-01：数据面 DDL 失败未映射到 ENGINE 族（新，Open）
+
+- **状态**：Open（**本 PR 不动**——X3 范围控制；T-SHADOW-01 run21 暴露）
+- **现象**：run21 作业在建表阶段失败，`execution_runs.failure_category = **UNKNOWN**`、
+  `failure_stage = dispatch`、`diagnosis` 是 aiomysql 原样的
+  `OperationalError: (1105, "errCode = 2, ...")` —— 未被 `classify_failure` 归入
+  既有 9 类（ENGINE / ARTIFACT_DRIFT / …）
+- **影响**：诊断与重试决策读不出失败族别（`retryable=True` 是兜底值，非判决）；
+  演示与排障时运维看到的是原始堆栈摘要而非分类结论
+- **根因**：`execution/shadow.py` 的 `DorisShadowTableExecutor` 直接抛 aiomysql 的
+  `OperationalError`（未包成本域异常），`classify_failure` 只认本域异常与已知引擎异常
+- **修复建议**（待裁决，二选一）：① 在 `execution/errors.py` 新增数据面 DDL 失败码
+  （如 `BIZ_503_DATA_PLANE_UNAVAILABLE`）并把 `OperationalError` 包成该族异常
+  （需 AMEND，参照 AMEND-006/007 格式）；② 在 `classify_failure` 里对
+  `OperationalError` 文本做关键字映射（不改错误码表，**不需 AMEND**）
+- **关联**：T-SHADOW-01（run21 暴露）；`execution/metrics.py`；SPEC 6.4 错误码体系
 
 ### T-SHADOW-02：质量契约 valid_sink 与派生影子表名漂移
 
-- **状态**：Open（独立排期）
+- **状态**：**已修（随 T-SHADOW-01 PR-A，fix/T-SHADOW-01a）**——契约命名统一到
+  `<目标表>_shadow`，与 `execution.shadow.shadow_table_name()` 同源
 - **发现**：S10 场景 A 修复后重跑（2026-10-16，事件流 `execution.shadow_contract_drift`）
-- **现象**：生成计划 `quality_contract.valid_sink` 与按计划推得的影子表名
-  （`shadow_table_name(valid_sink)`）不一致，worker 以 WARN 事件记录后按计划继续
-  （漂移不阻断，见 consume_outbox.py 注释）
-- **影响**：质量分流表指向与影子表指向可能不是同一张表（若真实链路搬数据会写错
-  目标）；mock 引擎下不影响演示结论，但属生成计划的一致性问题
-- **修复建议**（未实施，待排期）：生成域出参校验（计划内 valid_sink 必须与
-  目标宽表派生规则一致）或消费端按计划重算对齐，二选一排期
-- **关联**：T-SHADOW-01；S5 生成引擎质量契约口径
+- **现象**：生成计划 `quality_contract.valid_sink`（旧值 `<目标表>_valid`）与按计划推得的
+  影子表名（`shadow_table_name(valid_sink)` = `<目标表>_shadow`）不一致，worker 以 WARN
+  事件记录后按计划继续（漂移不阻断，见 consume_outbox.py 注释）
+- **影响**：质量分流表指向与影子表指向可能不是同一张表——**且 `publish.resolve_targets`
+  会把 `valid_sink` 当影子表名**，若原子发布接线（PR-B）就会 swap 到不存在的
+  `<目标表>_valid`；mock 引擎下不影响演示结论，但属生成计划的一致性问题
+- **修复**：`llm/mock_provider.py` 的 `_data_plane_tables()` 直接复用
+  `execution.shadow` 的 `SHADOW_SUFFIX` / `ERROR_SUFFIX` 常量（单一事实源，不再各写一份）；
+  测试夹具 `tests/conftest.py` 两处命名不一致（`:305` 用 `_valid` / `:530` 用 `_shadow`）
+  一并统一，并补契约命名一致性断言防复发
+- **关联**：T-SHADOW-01（PR-A 内一并修）；S5 生成引擎质量契约口径
+
+### T-DOCS-01：doris-init 注释与 PRD 10.5 #4 矛盾（新，Open）
+
+- **状态**：Open（**本 PR 不动**，另开 docs PR 修）
+- **发现**：T-SHADOW-01 步骤 1 探查（2026-10-16）
+- **现象**：`infra/e2e/doris-init/01-init.sql:9-13` 注释写「质量分流：被拒行只在
+  quarantine 表留**聚集计数 + 错误码**，**不落原始敏感值**（与 M-K 边界一致）」——
+  与 **PRD 10.5 第 4 条「错误表例外条款」**（数据面未命中质量规则的数据分流写入错误表并
+  **记录原始值与违规原因**，仅报告/证据/快照不回传明文）**直接矛盾**；
+  PRD AC-02 亦确认「错误表按 10.5 例外条款保留原始值」
+- **影响**：注释误导后续实现者以为错误表不该存原始值（PR-A 的错误表 DDL 正是按
+  「保留原始值」实现）。**仅是注释错误**，init SQL 实际未建错误表，无行为影响
+- **修复建议**：改注释为「错误表保留原始值与违规原因（PRD 10.5 #4 例外条款）；
+  报告 / 证据 / 快照只回聚合，不回传错误表明文」，另开 docs PR
+- **关联**：T-SHADOW-01（PR-A 的错误表实现依据）；PRD FR-44 / 10.5 #4 / AC-02
+
+### T-SHADOW-03：未覆盖脏行类型 → batch 毒化风险（新，Open）
+
+- **状态**：Open（独立排期）
+- **发现**：T-SHADOW-01 PR-A 收口（2026-10-16，人类裁决补充）
+- **现状**：PR-A 的双路分流在**路由层**消除了当前已知的 batch 毒化——valid 分支的
+  `where <全部规则通过>` 已把演示的两条脏行（amount NULL / 未来水位）排除在影子表之外，
+  影子表只收干净行，NOT NULL 不会再打（run24 实证 1000 + 2，**无需** `batch_size=1`
+  或逐行 try/catch）
+- **残余风险**：毒化只是**被谓词挡住**，不是被消灭。将来若出现**质量规则未覆盖**的脏行
+  类型（类型不匹配 / 超长 / 精度溢出 / 字符集不合规等），它仍会通过 valid 分支进入
+  影子表 → 整批回滚，症状与 run20 相同
+- **影响**：规则覆盖面之外的数据问题会以「整批失败」而非「单行分流」的形式出现，
+  且**没有错误码**（不命中任何规则）→ 排障只能靠 Doris 侧错误日志
+- **修复方向**（待裁决）：① 扩大规则覆盖面（枚举目标表各列的约束类型）；② 目标表列
+  放宽为可空 + 由报告兜底；③ 引入 SeaTunnel 的 `Assert` / save-mode 能力做行级拒收
+- **关联**：T-SHADOW-01（PR-A 已消除已知毒化）；T-DEMO-01（源端脏行口径）；
+  T-METRICS-01；run20 的 1002→1000 教训
+
+### T-SHADOW-04：etl_quality_summary 在 src/ 下零写入点（新，Open）
+
+- **状态**：Open（独立排期）
+- **发现**：T-SHADOW-01 步骤 1 探查（2026-10-16）
+- **现象**：`etl_quality_summary` 只在 `infra/e2e/doris-init/01-init.sql:50-65` 建表，
+  全仓 `src/` **零写入点**（`grep -rn etl_quality_summary src/` 无命中）→ 演示库里恒空表
+- **影响**：无功能阻断——质量分流的**聚合事实**实际落在控制面 `quality_reports`
+  （含 `rules` / `diagnostics` / 错误码统计），Doris 侧这张表目前无消费者。
+  但它与 PRD 10.5 的口径（聚合可回传、明文不可回传）互为印证，留空会误导读者以为
+  分流聚合走 Doris
+- **修复建议**（待裁决，二选一）：① 若要保留「Doris 侧聚合落表」能力，由执行通道在
+  终态写入聚合行（`run_id` / `error_code` / 计数）；② 若确认聚合只走控制面，则
+  从 init SQL 移除该表并更新注释（属 docs/init 改动，另开 PR）
+- **关联**：T-SHADOW-01（分流聚合口径）；T-DOCS-01（同属 init SQL 口径问题）；
+  PRD FR-44 / 10.5；`execution/routing.py`（聚合事实实际落点）
 
 ### T-CONSOLE-01：控制台刷新后显示态未持久化
 

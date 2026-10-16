@@ -73,6 +73,56 @@ async def test_consume_outbox_happy_path(
 
     # 影子表预复制（S7 只创建不 Swap，FR-43）
     assert shadow.created == [shadow_table_name("orders_wide")]
+    # 错误表幂等创建（T-SHADOW-01：脏数据分流目标）
+    assert shadow.errors_created == ["orders_wide_error"]
+
+
+def test_shadow_contract_mismatch_uses_direct_comparison() -> None:
+    """T-SHADOW-02：valid_sink 统一后**直接比较**（不再二次拼 `_shadow` 后缀）。
+
+    run23 实证的误报：旧实现对 `valid_sink` 二次拼后缀，把 `order_wide_shadow`
+    拼成 `order_wide_shadow_shadow` → 恒判漂移，事件流出现无意义 WARN。
+    """
+    from etl_agent.worker.tasks.consume_outbox import _shadow_contract_mismatch
+
+    # 统一命名后：契约声明的 valid_sink 就是影子表名本身 → 不漂移
+    assert not _shadow_contract_mismatch({"valid_sink": "order_wide_shadow"}, "order_wide_shadow")
+    # 真的漂移仍要报（旧值 `_valid`、或指向别的表）
+    assert _shadow_contract_mismatch({"valid_sink": "order_wide_valid"}, "order_wide_shadow")
+    assert _shadow_contract_mismatch({"valid_sink": "other_shadow"}, "order_wide_shadow")
+    # 契约未声明 valid_sink：无从判定，不报漂移
+    assert not _shadow_contract_mismatch({}, "order_wide_shadow")
+
+
+async def test_shadow_executor_factory_is_used_for_data_plane(
+    db_session: AsyncSession, seeded_execution: SeededExecution
+) -> None:
+    """T-SHADOW-01：生产路径经**工厂**按执行视角坐标构造真实 Doris 数据面通道。
+
+    接线前 `scan_outbox_once` 从不传 shadow_executor → 永远回落 Logging 通道，
+    影子表只在内存里「记录」，Doris 里根本没有表（T-SHADOW-01 的原始症状）。
+    """
+    engine = FakeSeaTunnelClient(statuses=["FINISHED"])
+    built: list[LoggingShadowTableExecutor] = []
+
+    def _factory(values: dict[str, str]) -> LoggingShadowTableExecutor:
+        executor = LoggingShadowTableExecutor()
+        built.append(executor)
+        return executor
+
+    await scan_outbox_once(
+        db_session,
+        handoff=seeded_execution.handoff,
+        engine=engine,
+        settings=make_settings(),
+        candidate_loader=_loader(seeded_execution),
+        shadow_executor_factory=_factory,
+        worker_id="worker-test",
+    )
+
+    assert len(built) == 1, "工厂必须被调用（否则数据面通道仍是 Logging 空转）"
+    assert built[0].created == ["orders_wide_shadow"]
+    assert built[0].errors_created == ["orders_wide_error"]
 
     run = await db_session.get(ExecutionRun, seeded_execution.run_id)
     assert run is not None

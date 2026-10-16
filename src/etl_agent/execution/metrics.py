@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.execution.shadow import ERROR_SUFFIX, SHADOW_SUFFIX
 from etl_agent.infrastructure.models import ExecutionRun
 
 
@@ -31,10 +32,16 @@ class TableMetric:
 
 @dataclass(frozen=True)
 class ExecutionMetrics:
-    """一次回传的聚合指标（None 表示该维度未观测到，不臆造 0）。"""
+    """一次回传的聚合指标（None 表示该维度未观测到，不臆造 0）。
+
+    `sink_rows` 语义（T-SHADOW-01 双路分流后）：**有效数据落库行数**，即影子表那一路
+    sink 的写入计数（不是各路 sink 之和）。`rejected_rows` 为错误表那一路的写入计数
+    （不落 `execution_runs`，仅供质量报告构造，见 `_quality_outcome`）。
+    """
 
     source_rows: int | None = None
     sink_rows: int | None = None
+    rejected_rows: int | None = None
     source_bytes: int | None = None
     sink_bytes: int | None = None
     tables: list[TableMetric] = field(default_factory=list)
@@ -98,18 +105,46 @@ def metrics_from_engine_payload(payload: dict[str, Any]) -> ExecutionMetrics:
         # 真实引擎：TableSourceReceivedCount 为 {顶点: "计数"} 嵌套，取合计
         source_rows = _as_nested_sum(payload.get("TableSourceReceivedCount"))
     sink_rows = _as_int(payload.get("sink_rows"))
+    rejected_rows = _as_int(payload.get("rejected_rows"))
     if sink_rows is None:
-        # 优先按写入计数，退化用提交计数（真实引擎两者都有时写入更贴近落库）
-        sink_rows = _as_nested_sum(payload.get("TableSinkWriteCount"))
+        # T-SHADOW-01：双路分流作业的 `TableSinkWriteCount` 是 {sink 键: "计数"} 嵌套
+        # （键形如 `Sink[0].doris_dw.order_wide_shadow`）。必须**按表名后缀分键**取：
+        # 有效行 = 影子表那一路，脏行 = 错误表那一路；**不能用扁平合计**——合计等于
+        # 两路之和，会让 `rejected = source - sink` 恒为 0，质量报告读不出分流事实。
+        # 注意：这与 T-METRICS-01（引擎计数跨 task 重试累加）是**两个独立问题**，后者仍 Open。
+        by_sink = payload.get("TableSinkWriteCount")
+        sink_rows = _as_sink_rows(by_sink, SHADOW_SUFFIX)
+        if rejected_rows is None:
+            rejected_rows = _as_sink_rows(by_sink, ERROR_SUFFIX)
+        if sink_rows is None:
+            # 单 sink 作业（未分流）：退回嵌套合计；再退化用提交计数
+            sink_rows = _as_nested_sum(by_sink)
     if sink_rows is None:
         sink_rows = _as_nested_sum(payload.get("SinkCommittedCount"))
     return ExecutionMetrics(
         source_rows=source_rows,
         sink_rows=sink_rows,
+        rejected_rows=rejected_rows,
         source_bytes=_as_int(payload.get("source_bytes")),
         sink_bytes=_as_int(payload.get("sink_bytes")),
         tables=tables,
     )
+
+
+def _as_sink_rows(value: object, suffix: str) -> int | None:
+    """按表名后缀从「sink 键 → 计数」嵌套里取该路 sink 的行数（null-safe）。
+
+    键形如 `Sink[0].doris_dw.order_wide_shadow` / `Sink[0].doris_dw.order_wide_error`
+    （T-ENGINE-03 实测形态）。无匹配键返回 None（由调用方降级，不抛异常）。
+    """
+    if not isinstance(value, dict):
+        return None
+    for key, item in value.items():
+        if str(key).endswith(suffix):
+            number = _coerce_int(item)
+            if number is not None:
+                return number
+    return None
 
 
 def _as_nested_sum(value: object) -> int | None:

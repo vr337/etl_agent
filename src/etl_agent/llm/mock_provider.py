@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from etl_agent.config import Settings
+from etl_agent.execution.shadow import ERROR_SUFFIX, SHADOW_SUFFIX
 from etl_agent.llm.errors import MockProviderForbidden
 from etl_agent.llm.provider import GeneratedCandidate
 
@@ -27,12 +28,76 @@ PlanFactory = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
 DEFAULT_BACKEND = "mock"
 DEFAULT_MODEL = "mock-etl-plan-v1"
 
+# 质量规则（T-SHADOW-01）：字段级清洗规则 + 错误码标签（FR-22 / SPEC 3.2 M-K）。
+# 三条规则对齐演示 seed 的脏行设计（infra/e2e/mysql-init/01-seed.sql:69-80）：
+# ① PK 非空——**防御性检查**（PK 理论非 NULL，非当前脏行覆盖目标）；
+# ② 金额非空——覆盖脏行 9001（amount NULL）；
+# ③ 水位不越界——覆盖脏行 9002（updated_at 为未来时间）。
+# **顺序即 CASE 优先级（首命中）**：error 分支按此顺序取 error_code。
+# `code` 是 PRD 既有字段（错误码分布按 `rules[].code` 聚合，PRD 第 10 章）。
+#
+# 每条规则带**两个表达式**：
+# - `pass`（规则本体，写进契约 predicates / valid 分支）——`X IS NOT NULL`、`X <= Y`；
+# - `fail`（直接否定，写进 error 分支）——`X IS NULL`、`X > Y`。
+# 不能写成 `not (pass)`：SeaTunnel 的 Sql transform **不支持 `NOT (x IS NOT NULL)`**
+# （`COMMON-05 Unsupported SQL Expression`，run22 实证）；直接否定形式可用。
+_QUALITY_RULES: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "not_null_primary_key",
+        "{pk} IS NOT NULL",
+        "{pk} IS NULL",
+        "QUALITY_NOT_NULL_PK",
+        "{pk} 为空",
+    ),
+    (
+        "not_null_amount",
+        "amount IS NOT NULL",
+        "amount IS NULL",
+        "QUALITY_NOT_NULL_AMOUNT",
+        "amount 为空",
+    ),
+    (
+        "watermark_not_future",
+        "updated_at <= CURRENT_TIMESTAMP",
+        "updated_at > CURRENT_TIMESTAMP",
+        "QUALITY_FUTURE_WATERMARK",
+        "updated_at 超出水位上界（未来时间）",
+    ),
+)
+
+
+def _quality_rules(source_columns: list[str]) -> list[dict[str, str]]:
+    """质量规则列表（name / pass / fail / code / reason）；PK 列取来源画像首列。"""
+    pk = source_columns[0] if source_columns else "id"
+    return [
+        {
+            "name": name,
+            "pass": pass_expression.format(pk=pk),
+            "fail": fail_expression.format(pk=pk),
+            "code": code,
+            "reason": reason.format(pk=pk),
+        }
+        for name, pass_expression, fail_expression, code, reason in _QUALITY_RULES
+    ]
+
+
+def _data_plane_tables(target_table: str) -> tuple[str, str]:
+    """数据面两表名（有效 → 影子表；脏数据 → 错误表）。
+
+    与 `execution.shadow` 的派生名**同源**（直接复用其后缀常量）——这是 T-SHADOW-02
+    的修法：契约 `valid_sink` 与计划推得的影子表名不再各说各话。
+    """
+    return f"{target_table}{SHADOW_SUFFIX}", f"{target_table}{ERROR_SUFFIX}"
+
 
 def compliant_plan(
     requirement: str, source_profile: dict[str, Any], sink_profile: dict[str, Any]
 ) -> dict[str, Any]:
     """构造与画像自洽的合规 EtlPlan（质量契约四要素齐备，无明文凭据）。"""
     source_columns = [column["name"] for column in source_profile.get("columns", [])]
+    rules = _quality_rules(source_columns)
+    table = str(sink_profile.get("table_name"))
+    shadow, error = _data_plane_tables(table)
     return {
         "pipeline_name": "mock_pipeline",
         "backend": "direct",
@@ -59,19 +124,24 @@ def compliant_plan(
             }
         ],
         "quality_contract": {
-            "valid_sink": f"{sink_profile.get('table_name')}_valid",
-            "error_sink": f"{sink_profile.get('table_name')}_error",
+            # T-SHADOW-01/T-SHADOW-02：命名统一到 `<目标表>_shadow` / `<目标表>_error`
+            # （与 execution.shadow 的派生名同源，消除契约与计划的漂移）
+            "valid_sink": shadow,
+            "error_sink": error,
             "routing": [
-                {"rule": "not_null_primary_key", "sink": f"{sink_profile.get('table_name')}_valid"},
-                {"rule": "default", "sink": f"{sink_profile.get('table_name')}_error"},
+                *({"rule": rule["name"], "sink": shadow} for rule in rules),
+                {"rule": "default", "sink": error},
             ],
             "traceability": {
                 "source_row_id_column": source_columns[0] if source_columns else "id",
                 "error_code_column": "error_code",
                 "reason_column": "error_reason",
             },
+            # 每条规则带 `code` 标签——错误码分布按 `rules[].code` 聚合（PRD 第 10 章）。
+            # `expression` 取**通过态**（规则本体）；否定态只在 HOCON 的 error 分支用。
             "predicates": [
-                {"name": "not_null_primary_key", "expression": "id IS NOT NULL"},
+                {"name": rule["name"], "expression": rule["pass"], "code": rule["code"]}
+                for rule in rules
             ],
         },
     }
@@ -129,6 +199,37 @@ def _jdbc_block(profile: dict[str, Any], prefix: str, tail: str) -> str:
     )
 
 
+def _sql_transform(plugin_input: str, plugin_output: str, query: str) -> str:
+    """渲染一个 `Sql` transform 块（T-SHADOW-01 双路分流的路由节点）。
+
+    `plugin_input` / `plugin_output` 是 SeaTunnel 的流标签（实测 2.3.13 生效）：
+    上游的 `plugin_output` 即下游 SQL 里的表名，下游用 `plugin_input` 声明消费哪一路。
+    """
+    return (
+        "  Sql {\n"
+        '    plugin_input = "' + plugin_input + '"\n'
+        '    plugin_output = "' + plugin_output + '"\n'
+        '    query = "' + query + '"\n'
+        "  }\n"
+    )
+
+
+def _sink_tail(plugin_input: str, table: str, database: str) -> str:
+    """渲染 sink 的特有配置行（T-ENGINE-03 四选项 + T-SHADOW-01 分流标签）。
+
+    T-ENGINE-03 四选项缺一不可（真引擎逐级实测）——缺 `generate_sink_sql` →
+    SeaTunnel 仍要求 `query`；缺 `database` → 校验失败；`enable_upsert` 默认 true →
+    追加 `ON DUPLICATE KEY UPDATE`，Doris 不支持该语法。
+    """
+    return (
+        '    plugin_input = "' + plugin_input + '"\n'
+        '    table = "' + table + '"\n'
+        '    database = "' + database + '"\n'
+        "    generate_sink_sql = true\n"
+        "    enable_upsert = false\n"
+    )
+
+
 def compliant_hocon(source_profile: dict[str, Any], sink_profile: dict[str, Any]) -> str:
     """构造合规 HOCON：凭据一律 `${ENV}` 占位符（FR-68：图内只传占位符）。
 
@@ -140,19 +241,30 @@ def compliant_hocon(source_profile: dict[str, Any], sink_profile: dict[str, Any]
     **原样**作为 PreparedStatement 下发、不补 VALUES 子句，`insert into <表>` 因此
     被 Doris 解析器拒绝（`mismatched input ';' ...`）；`table` 形态由连接器按目标表
     元数据生成完整 INSERT（列清单按列名映射，免疫列序变化）。
+    旧 `query` 形态已在 v1.0.3 起弃用（见下方 sink 注释），勿回退。
+
+    T-SHADOW-01：**双路分流**（FR-44）——source 打 `plugin_output = "src"` 标签，
+    两个 `Sql` transform 按质量契约谓词把数据切成 valid / error 两路，两个 `Jdbc` sink
+    用 `plugin_input` 分别消费：有效数据 → `<目标表>_shadow`，脏数据 → `<目标表>_error`
+    （错误表带 `error_code` / `error_reason`，PRD 10.5 #4 例外条款允许保留原始值）。
+    error 路的 `error_code` 用 **CASE 按规则声明顺序取首命中**（一行恰好一条错误记录，
+    拒绝率不被重复计数污染），而非每条规则各写一次。
     """
     sink_table = str(sink_profile.get("table_name"))
-    # T-ENGINE-03 sink 尾部：四选项缺一不可（真引擎逐级实测）——
-    #   缺 generate_sink_sql → SeaTunnel 仍要求 query；缺 database → 校验失败；
-    #   enable_upsert 默认 true → 追加 `ON DUPLICATE KEY UPDATE`，Doris 不支持该语法。
-    # 旧 `query` 形态保留为注释备查（生产 LLM prompt 需同步，见 T-LLM-01）。
-    sink_tail = (
-        '    table = "' + sink_table + '"\n'
-        '    database = "' + str(sink_profile.get("schema_name")) + '"\n'
-        "    generate_sink_sql = true\n"
-        "    enable_upsert = false\n"
-        '    # query = "insert into ' + sink_table + '"\n'
-    )
+    shadow_table, error_table = _data_plane_tables(sink_table)
+    sink_database = str(sink_profile.get("schema_name"))
+    source_columns = [str(column.get("name")) for column in source_profile.get("columns", [])]
+    projection = ", ".join(source_columns) or "*"
+    rules = _quality_rules(source_columns)
+    valid_condition = " and ".join(f"({rule['pass']})" for rule in rules)
+    # error 分支用**直接否定态**（`X IS NULL` / `X > Y`），不用 `not (pass)`——
+    # SeaTunnel Sql transform 不支持 `NOT (x IS NOT NULL)`（run22 实证
+    # `COMMON-05 Unsupported SQL Expression`）。
+    error_condition = " or ".join(f"({rule['fail']})" for rule in rules)
+    code_case = " ".join(f"when ({rule['fail']}) then '{rule['code']}'" for rule in rules)
+    reason_case = " ".join(f"when ({rule['fail']}) then '{rule['reason']}'" for rule in rules)
+    error_code_expr = f"case {code_case} else 'QUALITY_UNKNOWN' end"
+    error_reason_expr = f"case {reason_case} else '命中质量规则（未归类）' end"
     return (
         "env {\n"
         '  job.mode = "BATCH"\n'
@@ -162,12 +274,25 @@ def compliant_hocon(source_profile: dict[str, Any], sink_profile: dict[str, Any]
         + _jdbc_block(
             source_profile,
             "SRC",
-            '    query = "select * from ' + str(source_profile.get("table_name")) + '"\n',
+            '    query = "select * from ' + str(source_profile.get("table_name")) + '"\n'
+            '    plugin_output = "src"\n',
+        )
+        + "}\n"
+        "\n"
+        "transform {\n"
+        + _sql_transform("src", "valid", f"select {projection} from src where {valid_condition}")
+        + _sql_transform(
+            "src",
+            "error",
+            f"select {projection}, {error_code_expr} as error_code, "
+            f"{error_reason_expr} as error_reason from src where {error_condition}",
         )
         + "}\n"
         "\n"
         "sink {\n"
-        + _jdbc_block(sink_profile, "SINK", sink_tail)
+        # T-ENGINE-03：旧 `query` 形态（SeaTunnel query 模式原样下发不补 VALUES，Doris 解析必败）
+        + _jdbc_block(sink_profile, "SINK", _sink_tail("valid", shadow_table, sink_database))
+        + _jdbc_block(sink_profile, "SINK", _sink_tail("error", error_table, sink_database))
         + "}\n"
     )
 
