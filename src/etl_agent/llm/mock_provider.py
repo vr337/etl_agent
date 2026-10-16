@@ -108,11 +108,14 @@ def _jdbc_target(profile: dict[str, Any]) -> tuple[str, str]:
     return target
 
 
-def _jdbc_block(profile: dict[str, Any], prefix: str, query: str) -> str:
+def _jdbc_block(profile: dict[str, Any], prefix: str, tail: str) -> str:
     """渲染一个 Jdbc 块（driver/URL 按连接器类型，凭据仍走占位符，FR-68）。
 
     用字符串拼接而非 f-string：`${VAR}` 字面量在 f-string 里需双花括号转义，
     易错（本次首版即踩坑）；拼接形态与占位符契约一一对应，直读。
+
+    `tail` 是连接器特有配置行：source 传 `query`（读表），sink 传 `table` 组
+    （T-ENGINE-03：由连接器按目标表元数据生成 INSERT）。
     """
     url_prefix, driver = _jdbc_target(profile)
     return (
@@ -121,8 +124,8 @@ def _jdbc_block(profile: dict[str, Any], prefix: str, query: str) -> str:
         '    driver = "' + driver + '"\n'
         '    user = "${' + prefix + '_USER}"\n'
         '    password = "${' + prefix + '_PASSWORD}"\n'
-        '    query = "' + query + '"\n'
-        "  }\n"
+        + tail
+        + "  }\n"
     )
 
 
@@ -132,18 +135,39 @@ def compliant_hocon(source_profile: dict[str, Any], sink_profile: dict[str, Any]
     T-ENGINE-02：driver / URL 按 profile 的 `connector_type` 渲染
     （MYSQL / DORIS → `jdbc:mysql://` + `com.mysql.cj.jdbc.Driver`；
     POSTGRESQL 保持原形态），真实引擎才连得上源与目标。
+
+    T-ENGINE-03：sink 由 `query` 改 `table` 形态。SeaTunnel 的 `query` 模式把 SQL
+    **原样**作为 PreparedStatement 下发、不补 VALUES 子句，`insert into <表>` 因此
+    被 Doris 解析器拒绝（`mismatched input ';' ...`）；`table` 形态由连接器按目标表
+    元数据生成完整 INSERT（列清单按列名映射，免疫列序变化）。
     """
+    sink_table = str(sink_profile.get("table_name"))
+    # T-ENGINE-03 sink 尾部：四选项缺一不可（真引擎逐级实测）——
+    #   缺 generate_sink_sql → SeaTunnel 仍要求 query；缺 database → 校验失败；
+    #   enable_upsert 默认 true → 追加 `ON DUPLICATE KEY UPDATE`，Doris 不支持该语法。
+    # 旧 `query` 形态保留为注释备查（生产 LLM prompt 需同步，见 T-LLM-01）。
+    sink_tail = (
+        '    table = "' + sink_table + '"\n'
+        '    database = "' + str(sink_profile.get("schema_name")) + '"\n'
+        "    generate_sink_sql = true\n"
+        "    enable_upsert = false\n"
+        '    # query = "insert into ' + sink_table + '"\n'
+    )
     return (
         "env {\n"
         '  job.mode = "BATCH"\n'
         "}\n"
         "\n"
         "source {\n"
-        + _jdbc_block(source_profile, "SRC", f"select * from {source_profile.get('table_name')}")
+        + _jdbc_block(
+            source_profile,
+            "SRC",
+            '    query = "select * from ' + str(source_profile.get("table_name")) + '"\n',
+        )
         + "}\n"
         "\n"
         "sink {\n"
-        + _jdbc_block(sink_profile, "SINK", f"insert into {sink_profile.get('table_name')}")
+        + _jdbc_block(sink_profile, "SINK", sink_tail)
         + "}\n"
     )
 
