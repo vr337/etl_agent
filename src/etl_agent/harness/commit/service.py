@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.audit.hooks import on_commit_issued
 from etl_agent.auth.actor_resolver import ActorContext
 from etl_agent.auth.errors import RoleRequired
 from etl_agent.harness.broker.tool_broker import enqueue_command
@@ -177,6 +178,18 @@ class CommitService:
         preparation.committed_by = operator.user_id
         preparation.committed_at = now
         await session.flush()
+
+        # 钩子 4（F3）：Commit 签发双写证据账本。只记 token_id（令牌本体是凭据，
+        # 入账本即违反 AC-02——token 本体仅经 Redis 交接通道给 Worker，FR-33）。
+        # 随调用方路由既有事务提交，钩子只 flush 不自行 commit。
+        await on_commit_issued(
+            session,
+            project_id=project_id,
+            preparation_id=preparation.id,
+            run_id=run.id,
+            token_id=capability.token_id,
+            actor_id=operator.user_id,
+        )
 
         result = CommitResult(
             token_id=capability.token_id,

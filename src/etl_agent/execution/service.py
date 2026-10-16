@@ -15,12 +15,14 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 5.2 章 execution_runs / 第 3.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.audit.hooks import on_execution_transition
 from etl_agent.execution.errors import ExecutionNotFound, ExecutionStateConflict
 from etl_agent.infrastructure.models import (
     ExecutionEvent,
@@ -28,6 +30,8 @@ from etl_agent.infrastructure.models import (
     Pipeline,
     PipelineVersion,
 )
+
+logger = logging.getLogger("etl_agent.execution.service")
 
 STATUS_QUEUED = "QUEUED"
 STATUS_SUBMITTED = "SUBMITTED"
@@ -272,7 +276,46 @@ async def transition(
         message=reason or f"执行迁移 {current} → {target}",
         stage=stage_of(target),
     )
+    # 钩子 5（F3）：执行状态迁移双写证据账本（worker/API 共用本咽喉，一次接入
+    # 全覆盖）。project_id 按派生链单查询取得（execution_runs 无 project_id 列，
+    # S8 经验：ExecutionRun → PipelineVersion.pipeline_id → Pipeline.project_id）。
+    # 孤儿运行（版本链断裂）只告警不抛——钩子失败绝不阻断业务状态机
+    # （人类裁决补充 2）。
+    project_id = await run_project_id(session, run)
+    if project_id is None:
+        logger.warning(
+            "证据账本跳过：运行 %s 的版本链断裂（pipeline_version_id=%s），迁移留痕降级",
+            run.id,
+            run.pipeline_version_id,
+        )
+    else:
+        await on_execution_transition(
+            session,
+            project_id=project_id,
+            run_id=run.id,
+            from_status=current,
+            to_status=target,
+            actor_id=None,
+            reason=reason,
+        )
     return run
+
+
+async def run_project_id(session: AsyncSession, run: ExecutionRun) -> uuid.UUID | None:
+    """运行的项目归属（派生链单查询，禁止 N+1；孤儿返回 None 由调用方降级）。
+
+    `execution_runs` 无 `project_id` 列（SPEC 5.2）：归属经
+    `ExecutionRun.pipeline_version_id → PipelineVersion.pipeline_id → Pipeline.project_id`
+    两级派生。单条 JOIN 查询完成，不在循环里逐跳加载。
+    """
+    row = (
+        await session.execute(
+            select(Pipeline.project_id)
+            .join(PipelineVersion, PipelineVersion.pipeline_id == Pipeline.id)
+            .where(PipelineVersion.id == run.pipeline_version_id)
+        )
+    ).first()
+    return row[0] if row is not None else None
 
 
 def stage_of(status: str) -> str:

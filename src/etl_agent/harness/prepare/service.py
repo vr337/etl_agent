@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.audit.hooks import on_pdp_decision, on_prepare_created
 from etl_agent.harness.errors import IdempotencyConflict
 from etl_agent.harness.pdp.engine import PdpEngine, PdpRequest, PolicyDecisionResult
 from etl_agent.infrastructure.models import (
@@ -189,7 +190,24 @@ class PrepareService:
         session.add(decision_row)
         await session.flush()
 
+        # 钩子 1（F3）：PDP 决策双写证据账本——无论 ALLOW / DENY 都必须留痕，
+        # 「为什么被拒 / 被放行」是事后复现的唯一依据（FR-29）。DENY 是终局裁决，
+        # 路由层会把它转 403 并回滚请求会话，故 DENY 分支在 raise 前单独提交
+        # （人类裁决补充 1）；ALLOW 路径的决策行与证据随调用方（路由）同一
+        # 事务提交，与 T-COMMIT-01 同族的「flush 不 commit 即丢失」风险由此闭环。
+        await on_pdp_decision(
+            session,
+            project_id=project_id,
+            decision_id=decision_row.id,
+            outcome=decision.outcome,
+            risk_level=decision.risk_level,
+            actor_id=requested_by,
+        )
+
         if decision.denied:
+            # DENY 特判：决策行 + 证据在本分支显式提交——403 响应路径上请求会话
+            # 即将回滚，若不落地则 DENY 留痕随之丢失（留痕是 FR-29 硬要求）。
+            await session.commit()
             raise PolicyDeny(
                 f"PDP 裁决 DENY（{decision.risk_level}）：{' '.join(
                     item['rule_id'] for item in decision.rule_evidence if item['outcome'] == 'DENY'
@@ -239,6 +257,15 @@ class PrepareService:
         )
         session.add(preparation)
         await session.flush()
+        # 钩子 2（F3）：Prepare 创建双写证据账本（随调用方路由既有事务提交）
+        await on_prepare_created(
+            session,
+            project_id=project_id,
+            preparation_id=preparation.id,
+            actor_id=requested_by,
+            status=preparation.status,
+            risk_level=preparation.risk_level,
+        )
         return preparation, decision
 
     async def _find_by_idempotency_key(

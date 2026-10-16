@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.audit.hooks import on_approval_decision
 from etl_agent.auth.actor_resolver import ActorContext
 from etl_agent.auth.errors import RoleRequired
 from etl_agent.harness.errors import (
@@ -136,6 +137,18 @@ class ApproveService:
             if "uq_harness_approvals_prep_role" in message:
                 raise RoleTaken("职责槽已被占用（DB 唯一约束）") from exc
             raise
+
+        # 钩子 3（F3）：审批决策双写证据账本（APPROVE / REJECT 均留痕；
+        # 随调用方路由既有事务提交，钩子只 flush 不自行 commit）
+        await on_approval_decision(
+            session,
+            project_id=project_id,
+            preparation_id=preparation.id,
+            role=role,
+            decision=decision,
+            decided_by=actor.user_id,
+            reason=reason,
+        )
 
         if decision == DECISION_REJECT:
             preparation.status = STATUS_REJECTED

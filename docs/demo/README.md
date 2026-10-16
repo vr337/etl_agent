@@ -11,14 +11,24 @@
 
 ## 一条重要口径：引擎为 mock 模式
 
-S10 的人类裁决为 **C：mock engine 模式**。含义是：
+S10 的人类裁决为 **C：mock engine 模式**。该模式**通过 `ETL_AGENT_ENGINE_MODE=mock`
+环境变量显式开启**（`config.py` 白名单 real/mock，缺省 `real`；`ENV=prod` 禁止 mock，
+启动 fail-fast）。含义是：
 
-- **被 mock 的只有一件事**：`SeaTunnel REST 提交作业`（真实提交需要引擎集群，且不可复现）；
+- **被 mock 的范围**：引擎侧两个交互——`--check` 配置校验与作业提交
+  （`MockSeaTunnelClient`：`check` 直接通过、`submit` 返回稳定 job_id、`job_status`
+  恒 `FINISHED` 并回传演示态聚合指标；指标与真实 seed 的 1002 行 / 2 脏行同形态，
+  **mock 不搬数据**，Doris 表不会被写入）；
 - **其余全部真实执行**：后端 API、身份与授权、HOCON 生成、14 项确定性门禁、四眼审批、
-  单次 Capability 签发、质量报告、影子表写入、原子 Swap、证据账本哈希链、Ed25519 检查点。
+  单次 Capability 签发、质量契约判定、证据账本哈希链（七类审计钩子均接线）。
 
 因此本演示**不是**「点几下看看界面」的演示——每条链路都留下可验证的证据（哈希链 + 门禁结果 + 质量报告）。
-脚本中对 mock 步骤一律打印 `[MOCK]` 标注，不隐匿。
+脚本 STEP 10 的 `[MOCK]` 标注与会话环境变量 `ETL_AGENT_ENGINE_MODE` **绑定**（不是硬编码字符串）：
+置 `mock` 才打 `[MOCK]`，置 `real` 改打 `[OK] engine_mode=real`。worker 启动日志同样打印
+实际模式（可审、可关）。
+
+> 历史口径修正（2026-10-16）：S10 交付时「mock 引擎」只写在脚本注释里、生产 worker 并无
+> mock 接线（硬编码 REST 客户端），本次 fix 补齐——详见 `演示回放.md`「场景 A 完整演示」节。
 
 ---
 
@@ -37,52 +47,28 @@ docker compose -f infra/docker-compose.yml --profile exec up -d
 docker compose -f infra/docker-compose.yml --profile e2e up -d
 ```
 
-> **注意**：本仓库的 compose 未内置 MySQL / Doris 服务定义（它们是演示依赖，不是平台依赖）。
-> 若需完整跑通两条脚本，请按下列「补充服务」小节自行加入服务定义，或使用你已有的 MySQL/Doris 实例
-> 并调整脚本中的 `host` / `port`。
+> **注意**：`infra/docker-compose.yml` 已内置 `e2e` profile（MySQL + Doris FE/BE，
+> 见 `chore/S10-e2e-deps`）；宿主机端口为 MySQL `13306`（3306 被 WSL relay 占用）、
+> Doris `9030`。脚本默认按 `127.0.0.1` + 发布端口寻址，无需改脚本。
 
-### 2. 补充服务（MySQL 源 / Doris 目标）
+### 2. 演示数据面（MySQL 源 / Doris 目标）
 
-在 `infra/docker-compose.yml` 中追加（示意，按你的环境调整卷路径）：
+已由 compose `e2e` profile 内置（`chore/S10-e2e-deps`），无需手工补服务定义：
 
-```yaml
-  mysql:
-    image: mysql:8.4
-    container_name: etl_agent_mysql
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: dev_root_2026
-      TZ: Asia/Shanghai
-    volumes:
-      - ./e2e/mysql-init:/docker-entrypoint-initdb.d:ro
-    ports: ["3306:3306"]
-    profiles: ["e2e"]
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pdev_root_2026"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
-  doris:
-    image: apache/doris:2.1.7-all-in-one
-    container_name: etl_agent_doris
-    restart: unless-stopped
-    environment:
-      FE_SERVERS: "fe1:127.0.0.1:9010"
-      BE_ADDR: "127.0.0.1:9050"
-    ports: ["9030:9030", "8030:8030"]
-    profiles: ["e2e"]
-```
+| 服务 | 镜像 | 宿主机端口 | 说明 |
+| --- | --- | --- | --- |
+| `mysql` | `mysql:8.4` | `13306→3306` | 3306 被本机 WSL relay 占用，故改发 13306 |
+| `doris-fe` / `doris-be` | `apache/doris:{fe,be}-3.0.8` | `9030`（query）/ `8030`（HTTP） | FE 讲 MySQL 协议，source 探查与 sink 写入同端口 |
 
 初始化 SQL 已就绪，容器首次启动自动执行：
 
 | 文件 | 作用 |
 | --- | --- |
-| `infra/e2e/mysql-init/01-seed.sql` | 建 `source_db.orders`，灌 1,000 行干净数据 + **3 行故意脏数据** |
-| `infra/e2e/doris-init/01-init.sql` | 建 `doris_dw.order_wide`（唯一键）+ `order_wide_shadow` + `etl_quality_summary` |
+| `infra/e2e/mysql-init/01-seed.sql` | 建 `source_db.orders`，灌 1,000 行干净数据 + 2 行故意脏数据（NULL 金额、未来水位；第 3 行脏数据因源列宽报错不可落库，见 T-DEMO-01，实际落库 1,002 行） |
+| `infra/e2e/doris-init/01-init.sql` | 建 `doris_dw.order_wide`（唯一键）+ `order_wide_shadow` + `etl_quality_summary`（幂等：DROP IF EXISTS + CREATE，可重复执行） |
 
 > 为什么种子数据里要有脏数据？因为演示的价值一半在「错误分流」——
-> 拒绝率非零但可控（3 / 1003），质量报告才会呈现真实的四态而非永远 PASSED。
+> 拒绝率非零但可控（2 / 1002），质量报告才会呈现真实的四态而非永远 PASSED。
 
 ### 3. 后端环境
 
