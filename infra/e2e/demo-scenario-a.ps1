@@ -406,7 +406,15 @@ if ($engineMode -eq 'mock') {
 # ---------------------------------------------------------------------------
 Write-Step '执行监控与质量报告（GET /executions/{id} + /quality-report）'
 if ($executionRunId) {
-    $execution = Invoke-Api -Method GET -Path "/api/v1/executions/$executionRunId"
+    # 有界轮询等终态（不改判定标准：终态才打印、FAILED 进摘要的语义不变）。
+    # 单次 GET 必 race——run14 实证：commit 后约 1.8s Worker 才 claimed、
+    # 2.2s 到终态，脚本若不等待只会看到 QUEUED 与质量报告 404。
+    $execution = $null
+    for ($i = 0; $i -lt 10; $i++) {
+        $execution = Invoke-Api -Method GET -Path "/api/v1/executions/$executionRunId"
+        if ($execution -and $execution.status -in @('SUCCEEDED', 'FAILED', 'CANCELLED')) { break }
+        Start-Sleep -Seconds 2
+    }
     if ($execution) {
         # ExecutionDetailResponse 契约字段（execution/schemas.py）：sink_rows / failure_*；
         # supervision_snapshot 当前恒 None（S7 遗留硬编码，S8 落表后未回填，已记异常清单）
