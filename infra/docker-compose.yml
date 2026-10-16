@@ -106,6 +106,11 @@ services:
       # 生产部署删掉此行使 config.py 默认 real 生效，validate_worker 白名单兜底
       # （ENV=prod + mock 拒绝启动）。worker 启动日志打印实际模式。
       ETL_AGENT_ENGINE_MODE: real-cli
+      # fix/infra-tz：容器默认 UTC，而 MySQL / Postgres 显式 TZ=Asia/Shanghai。
+      # 质量契约的水位谓词 `updated_at <= CURRENT_TIMESTAMP` 由 SeaTunnel JVM 求值，
+      # 源数据是 CST 墙钟、比较基准是 UTC 墙钟 → 差 8h 会把全部源行判成「未来时间」
+      # 而全量拒收（run27 实证：1002/1002 进错误表）。对齐时区。
+      TZ: Asia/Shanghai
     depends_on:
       postgres:
         condition: service_healthy
@@ -155,6 +160,11 @@ services:
     container_name: etl_agent_seatunnel
     restart: unless-stopped
     command: ["bin/seatunnel-cluster.sh"]
+    # fix/infra-tz：作业**实际在本容器执行**（run27 实证：JobMaster 跑在
+    # seatunnel-coordinator-service），容器默认 UTC → 与源库 CST 差 8h，
+    # 水位谓词 `updated_at <= CURRENT_TIMESTAMP` 全判「未来」→ 全量拒收。对齐时区。
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "8080:8080"
     volumes:
@@ -210,6 +220,8 @@ services:
     environment:
       FE_SERVERS: "fe1:172.20.80.2:9010"
       FE_ID: "1"
+      # fix/infra-tz：与 mysql / postgres / worker / seatunnel 统一时区口径。
+      TZ: Asia/Shanghai
     volumes:
       - D:/Documents/Docker/volume/app/etl_agent/doris_fe_meta:/opt/apache-doris/fe/doris-meta
       - D:/Documents/Docker/volume/app/etl_agent/doris_fe_log:/opt/apache-doris/fe/log
@@ -233,6 +245,8 @@ services:
     environment:
       FE_SERVERS: "fe1:172.20.80.2:9010"
       BE_ADDR: "172.20.80.3:9050"
+      # fix/infra-tz：与 mysql / postgres / worker / seatunnel 统一时区口径。
+      TZ: Asia/Shanghai
     volumes:
       - D:/Documents/Docker/volume/app/etl_agent/doris_be_storage:/opt/apache-doris/be/storage
       - D:/Documents/Docker/volume/app/etl_agent/doris_be_log:/opt/apache-doris/be/log

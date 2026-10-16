@@ -101,3 +101,4 @@ docker run -d --name etl_agent_beat --restart unless-stopped \
 | **Doris FE 卡 `wait catalog to be ready`** | BE 重启后心跳/注册失效时会出现，`docker restart etl_agent_doris_fe etl_agent_doris_be` 即恢复（本次环境：`apache/doris:fe-3.0.8` / `be-3.0.8`） |
 | **工作区换行** | 本仓 `core.autocrlf` 生效，工作区文件**全 CRLF**；手工编辑时新行必须同为 CRLF，否则 `git diff` 会出现整文件重写 |
 | **`tracking.md` 会被 IDE 重排** | 改完务必 `git diff --stat` 看行数是否是「内容级」，表格 padding 被 IDE 补空格会污染 diff |
+| **容器时区必须显式设** | `mysql` / `postgres` 设了 `TZ=Asia/Shanghai`，而 `worker` / `seatunnel` / `doris` **默认 UTC**。质量契约的水位谓词 `updated_at <= CURRENT_TIMESTAMP` 由 **SeaTunnel JVM 求值** → 与源库恒差 8h，会把全部源行判成「未来时间」而全量拒收（run27 实证）。**已修（fix/infra-tz）**；判断环境是否踩到：`docker exec <c> date` 看时区是否一致 |

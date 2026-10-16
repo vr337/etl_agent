@@ -42,6 +42,8 @@
 | S10 | 13 | 发布四门禁散在三处 + 门禁函数曾有僵尸 `executor` 参数 | 独立排期 | **T-PUBLISH-01** |
 | S10 | 14 | Swap 失败的回退状态未区分（swap 已执行 / 未执行） | 独立排期 | **T-SWAP-01** |
 | S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | 独立排期 | **T-OBS-01** |
+| S10 | 16 | 引擎容器（worker/seatunnel/doris）未设 TZ，与源库 CST 差 8h → 水位谓词全量拒收 | **已修（fix/infra-tz；run28 复验 1000/2）** | ✅ **T-TZ-01 Closed** |
+| S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | 独立排期 | **T-QUALITY-01** |
 
 ## 三、独立运维事项
 
@@ -469,6 +471,72 @@
   `getActorId()` 恢复（1 行）；`actorRole` 需持久化方案（localStorage 增列或缓存
   bootstrap 响应），另行排期
 - **关联**：`fix/S10-console-refresh-defects`；`docs/demo/演示回放.md` §8.9
+
+### T-TZ-01：引擎容器未设 TZ，与源库时区差 8h 导致水位谓词全量拒收
+
+- **状态**：**已修（fix/infra-tz）**——`infra/docker-compose.yml` 给 `worker` /
+  `seatunnel` / `doris-fe` / `doris-be` 补 `TZ: Asia/Shanghai`，与 `mysql` / `postgres` 对齐
+- **发现**：S10 补 Studio 截图取证复跑（2026-10-17，run27）
+- **根因**：质量契约的水位谓词 `updated_at <= CURRENT_TIMESTAMP`
+  （`llm/mock_provider.py::_QUALITY_RULES`）由 **SeaTunnel JVM 运行时求值**，而
+  `worker` / `seatunnel` / `doris` 容器未设 `TZ`（= UTC）、`mysql` / `postgres` 设了
+  `TZ=Asia/Shanghai` → 源数据是 **CST 墙钟**、比较基准是 **UTC 墙钟**，恒差 8h
+- **现象（run27）**：源 1002 行全被判「未来时间」→ `order_wide_error` 收 1002 行
+  （`QUALITY_FUTURE_WATERMARK` 1001 + `QUALITY_NOT_NULL_AMOUNT` 1），`order_wide` /
+  `order_wide_shadow` 全 0；运行仍报 `SUCCEEDED`（swap 照发，只是搬了 0 行）
+- **为什么此前没暴露**：MySQL 数据卷持久化，种子数据是容器**首次 init** 时灌的，
+  远早于 run26（CST 墙钟值恰好 < UTC-now）→ 侥幸通过。**只要重 init MySQL 让数据
+  变新鲜（须比 CST-now 早 ≥8h 才过），任何 real-cli 跑都会全拒**
+- **判定依据（逻辑闭环）**：最新数据行 `07:12:24 CST` 被拒 → 上界必 < `07:12:24`；
+  而 CST-now `07:15` > `07:12:24`（本该放行）→ 上界不是 CST-now；UTC-now
+  `23:15（前一天）` < `07:12:24` ✓
+- **复验（run28）**：补 TZ 后重跑 → `SUCCEEDED` / 源 1002 / 目标 1000 /
+  质量 `PASSED · 1002-1000-2 · 0.20%` / `order_wide=1000`、`shadow=0`、`error=2`
+- **遗留**：Doris FE 的 `TZ` 已生效（`@@system_time_zone=Asia/Shanghai`），但 Doris
+  **会话变量** `time_zone` 仍是 FE 内置默认 `Etc/UTC`（`fe.conf` 无该项），
+  `SELECT NOW()` 仍回 UTC；本演示链路不消费 Doris 侧 `NOW()`，无功能影响；
+  彻底对齐需 `SET GLOBAL time_zone`（运行态设置，未纳入本 PR）
+- **关联**：`fix/infra-tz`；`infra/docker-compose.yml`；`llm/mock_provider.py:56-66`；
+  run27 / run28 日志（`docs/stages/assets/S10-e2e/`）
+
+### T-QUALITY-01：质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open）
+
+- **状态**：Open（涉及质量判定口径，待裁决；本 PR 只登记，不改判定）
+- **发现**：S10 补 Studio 截图取证复跑（2026-10-17，run27 暴露）
+- **现象**：run27 拒绝率 **100%**（1002/1002），质量报告仍 `status=PASSED`，
+  第 2 道发布门禁据此放行 → `execution.published` 事件照发、swap 真执行
+  （Doris FE `fe.audit.log` 有 `ALTER TABLE order_wide REPLACE WITH TABLE
+  order_wide_shadow PROPERTIES('swap'='true')`，`State=OK`）
+- **根因（读码确认）**：`execution/routing.py::classify_quality`
+  - `max_rows = contract.get("max_rejected_rows")` → `None`
+  - `max_rate = contract.get("max_reject_rate")` → `None`
+  - `over_rows` / `over_rate` 用 `isinstance(..., (int, float))` 判类型 → `None`
+    直接短路为 `False` → 既不入 FAILED 也不入 WARNING → **落 `STATUS_PASSED`（第 126 行）**
+  即：**阈值缺失 = 放行**（fail-open），且不区分「未声明」与「声明为 0」
+- **契约侧确认**：演示契约由 `llm/mock_provider.py:126-145` 生成，只声明
+  `valid_sink` / `error_sink` / `routing` / `traceability` / `predicates`，
+  **不含任何阈值字段**；而 14 项门禁的「质量契约四要素」
+  （`gate/rules/quality_contract.py` GATE-004~007 = sink / routing / traceability /
+  predicates，FR-19）**本就不含阈值** → 无阈值仍 14/14 合规。
+  **故这不是生成侧或门禁越界，而是判定侧的默认值口径问题**
+- **系统里其实有阈值，但长在别处**：监督域 `DEFAULT_SUPERVISION_CONTRACT`
+  （`harness/prepare/service.py:37-45`，`max_reject_rate: 0.5`）与
+  `supervision/contracts.py:35/84` 定义了 `max_reject_rate`，但
+  ① `worker/tasks/consume_outbox.py:735` 调 `generate_quality_report(...)`
+  **不传 `quarantined=`**（恒 `False`）；② `supervision_snapshot` 恒 `None`
+  （S7 遗留）→ 监督阈值**从未参与质量判定**，两套契约互不接线
+- **影响**：数据面全量失败（下游一行没进）时系统仍判「质量通过」并发布空表，
+  运行终态是 `SUCCEEDED` —— 对运维是**静默的成功**；生产后果比 run27 更重
+- **修复方向（待裁决，三选一）**：
+  1. `classify_quality` 对**未声明**阈值取保守默认（沿用 SPEC 冻结预算
+     `max_reject_rate=0.5` / `min_quality_rows=100`），「声明为 0」才表示零容忍
+  2. 生成侧把监督契约阈值**写进 `quality_contract`**（并同步 FR-19 四要素口径 → 涉 AMEND）
+  3. 把监督域的隔离判决**接线**到质量判定（把 `quarantined` 传入）
+  —— 三项都动契约 / 门禁语义，属**必须停**范围，故本 PR 只登记
+- **关联**：`execution/routing.py:113-126`、`execution/publish.py:163-169`、
+  `worker/tasks/consume_outbox.py:735`、`llm/mock_provider.py:126-145`、
+  `harness/prepare/service.py:37-45`、`supervision/contracts.py:35`；
+  `docs/stages/assets/S10-e2e/demo-a-run27-20261017.log`
 
 ## 四、AMEND 追加件登记
 
