@@ -16,7 +16,5 @@
 （不搬数据）；质量指标为与 seed 形态一致的演示态合成值（1002/1000/2）；
 证据 7 事件 = PDP + PREPARE + **APPROVAL_DECISION** + COMMIT + EXECUTION_TRANSITION×3。
 
-**Pipeline Studio（`/studio`）不在清单内**：该页 version_id 取用曾存在契约缺口
-（列表出参无 `pipeline_version_id`，前端误用 `pipeline_id` → 404 后回退演示态门禁），
-已由 `fix/S10-console-refresh-defects`（AMEND-010）修复，截图待下次取证补齐；
-详见 `演示回放.md` §8.9 注。
+Pipeline Studio（`/studio`）在 run17 取证时暂未截图（version_id 缺陷，**PR #15 已修**）；
+下次演示取证可补，届时 6 张齐全。缺陷详情与修法见 `演示回放.md` §8.9 备查注。
