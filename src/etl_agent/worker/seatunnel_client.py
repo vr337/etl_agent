@@ -27,9 +27,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
@@ -320,18 +323,181 @@ class MockSeaTunnelClient:
         }
 
 
+# ---------------------------------------------------------------------------
+# CliSeaTunnelClient（T-ENGINE-01：真实引擎链路，CLI 提交通道）
+#
+# 背景：ENGINE 侧 REST `POST /submit-job` 在 flowpilot / apache 2.3.8~2.3.13
+# **全版本** `ConfigShadeUtils.processConfig` NPE（T-ENGINE-01，request body /
+# 镜像 / 版本均已排除）——只走 REST 提交无法闭环 AC-16。
+#
+# 引擎实测（2026-10-16，flowpilot/seatunnel:2.3.13）：
+# - CLI `seatunnel.sh --config <f> --async`：提交到本机 Hazelcast 集群（默认 -m cluster），
+#   约 2s 返回，stdout 含 `job id: <id>`；`--check` 校验（exit 0 静默）；
+#   `--cancel-job <id>` 取消；
+# - REST `GET /job-info/{jobId}` 对 **CLI 提交的作业同样有效**（返回 jobStatus/jobDag）。
+#
+# 故本类的通道分工：check / submit / stop 走 CLI（本地子进程），job_status 复用
+# RestSeaTunnelClient 的既有解析（组合，不复制逻辑）。
+#
+# 依赖（worker 镜像，infra/Dockerfile.worker）：/opt/seatunnel（CLI + 引擎客户端，
+# connectors 白名单 jdbc/doris/console/fake）+ JDK8；集群成员配置指向 compose
+# 服务名（hazelcast-client.worker.yaml → seatunnel:5801）。
+# ---------------------------------------------------------------------------
+_CLI_JOB_ID_PATTERN = re.compile(r"job id:\s*(\d+)")
+
+# CLI 子进程替身（测试注入）：(args, timeout) → (exit_code, stdout)
+CliRunner = Callable[[list[str], int], Awaitable[tuple[int, str]]]
+
+
+def _hocon_tempfile(hocon: str) -> str:
+    """物化 HOCON 落 0600 临时文件，返回路径（调用方负责用后即删，AC-02）。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".conf", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(hocon)
+        temp_path = handle.name
+    os.chmod(temp_path, 0o600)  # 物化正文含真实凭据：仅属主可读（AC-02）
+    return temp_path
+
+
+class CliSeaTunnelClient:
+    """真实引擎客户端：CLI 提交 + REST 状态（T-ENGINE-01）。
+
+    runner 为测试注入点（默认 None = 真实子进程）：签名
+    `async runner(args: list[str], timeout: int) -> tuple[int, str]`，
+    回传 (exit_code, stdout)。测试用伪 runner 即可覆盖全部路径，无需真引擎。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        cli_path: str = "/opt/seatunnel/bin/seatunnel.sh",
+        java_home: str = "/usr/local/openjdk-8",
+        submit_timeout_seconds: int = 180,
+        check_timeout_seconds: int = 180,
+        runner: CliRunner | None = None,
+    ) -> None:
+        # 状态查询复用 REST 客户端（对 CLI 提交的作业实测有效；仅 submit 是 NPE）
+        self._status_client = RestSeaTunnelClient(
+            base_url,
+            submit_timeout_seconds=submit_timeout_seconds,
+            check_timeout_seconds=check_timeout_seconds,
+        )
+        self._cli_path = cli_path
+        self._java_home = java_home
+        self._submit_timeout = submit_timeout_seconds
+        self._check_timeout = check_timeout_seconds
+        self._runner = runner
+
+    async def _run_cli(self, args: list[str], timeout: int) -> tuple[int, str]:
+        """执行 CLI（子进程 env 注入 Java PATH；runner 注入时走测试替身）。"""
+        if self._runner is not None:
+            return await self._runner(args, timeout)
+        if not os.path.exists(self._cli_path):
+            raise SeatunnelUnavailable(
+                f"SeaTunnel CLI 不可用：{self._cli_path} 不存在"
+                "（worker 镜像应含引擎客户端层，见 infra/Dockerfile.worker）"
+            )
+        env = os.environ.copy()
+        java_bin = Path(self._java_home, "bin")
+        if java_bin.is_dir():
+            env["PATH"] = str(java_bin) + os.pathsep + env.get("PATH", "")
+            env["JAVA_HOME"] = self._java_home
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self._cli_path,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except TimeoutError:
+                process.kill()
+                raise SeatunnelUnavailable(f"SeaTunnel CLI 超时（{timeout}s）") from None
+        except OSError as exc:
+            raise SeatunnelUnavailable(f"SeaTunnel CLI 启动失败：{type(exc).__name__}") from exc
+        return process.returncode or 0, stdout.decode("utf-8", errors="replace")
+
+    async def check(self, hocon: str) -> dict[str, Any]:
+        """引擎侧配置校验：CLI `--check`（exit 0 = 通过；失败回脱敏摘要，AC-02）。"""
+        temp_path = _hocon_tempfile(hocon)
+        try:
+            returncode, output = await self._run_cli(
+                ["--config", temp_path, "--check"], self._check_timeout
+            )
+        finally:
+            _remove_tempfile(temp_path)
+        if returncode == 0:
+            return {"ok": True, "summary": "engine check passed"}
+        return {"ok": False, "summary": _brief(output)}
+
+    async def submit_job(self, hocon: str, *, job_name: str = "") -> str:
+        """提交作业：CLI `--async`（提交后客户端即退出），从 stdout 解析 job id。
+
+        job_name 仅用于错误信息定位——CLI 无命名参数（引擎侧作业名固定
+        SeaTunnel_Job），本地幂等由 Replay Guard 与稳定 JobId 记录承担（FR-34）。
+        """
+        temp_path = _hocon_tempfile(hocon)
+        try:
+            returncode, output = await self._run_cli(
+                ["--config", temp_path, "--async"], self._submit_timeout
+            )
+        finally:
+            _remove_tempfile(temp_path)
+        if returncode != 0:
+            raise SeatunnelSubmitFailed(
+                f"SeaTunnel CLI 提交失败（exit {returncode}）：{_brief(output)}"
+            )
+        match = _CLI_JOB_ID_PATTERN.search(output)
+        if match is None:
+            raise SeatunnelSubmitFailed(
+                f"SeaTunnel CLI 提交输出缺少 job id（job_name={job_name or 'unnamed'}）：{_brief(output)}"
+            )
+        return match.group(1)
+
+    async def job_status(self, job_id: str) -> EngineJobStatus:
+        """查询作业状态：复用 REST `/job-info`（对 CLI 提交的作业实测有效）。"""
+        return await self._status_client.job_status(job_id)
+
+    async def stop_job(self, job_id: str) -> None:
+        """取消作业：CLI `--cancel-job`（与提交通道同源，避免再踩 REST 未验证路径）。"""
+        returncode, output = await self._run_cli(["--cancel-job", job_id], self._submit_timeout)
+        if returncode != 0:
+            raise SeatunnelUnavailable(
+                f"SeaTunnel CLI 取消失败（exit {returncode}）：{_brief(output)}"
+            )
+
+
+def _remove_tempfile(path: str) -> None:
+    """删除临时文件（含明文的 HOCON，用后即删，AC-02）。"""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def build_engine(settings: Any) -> SeaTunnelClient:
-    """按引擎选型装配客户端（F5：engine_mode 白名单在 config 侧 fail-fast）。
+    """按引擎选型装配客户端（engine_mode 白名单在 config 侧 fail-fast）。
 
     Args:
         settings: 应用 Settings（读取 engine_mode / seatunnel_url / 超时）。
 
     Returns:
-        engine_mode=mock → MockSeaTunnelClient；其余（real）→ RestSeaTunnelClient。
+        engine_mode=mock → MockSeaTunnelClient；real-cli → CliSeaTunnelClient
+        （CLI 提交 + REST 状态，T-ENGINE-01）；real → RestSeaTunnelClient。
         非法值已在 `Settings.validate_worker` 启动期拒绝，此处不再重复校验。
     """
     if settings.engine_mode == "mock":
         return MockSeaTunnelClient()
+    if settings.engine_mode == "real-cli":
+        return CliSeaTunnelClient(
+            settings.seatunnel_url,
+            submit_timeout_seconds=settings.seatunnel_submit_timeout_seconds,
+            check_timeout_seconds=settings.seatunnel_check_timeout_seconds,
+        )
     return RestSeaTunnelClient(
         settings.seatunnel_url,
         submit_timeout_seconds=settings.seatunnel_submit_timeout_seconds,

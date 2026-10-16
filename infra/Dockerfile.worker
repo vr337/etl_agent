@@ -1,0 +1,62 @@
+# T-ENGINE-01：Worker 专用镜像 = Python 运行时 + SeaTunnel 引擎客户端（CLI 提交通道）。
+#
+# 为什么单独一份 Dockerfile：引擎客户端层（JRE + SeaTunnel 发行包裁剪后约 960M）
+# **只有 worker 需要**（API / Beat 不应为此背负 ~1G 体积）。除该层外与
+# infra/Dockerfile.api 完全同源（同样的依赖清单、同样的 COPY 覆盖面）。
+#
+# 引擎客户端来源：多阶段 COPY 自 `flowpilot/seatunnel:2.3.13`（即 compose 引擎镜像，
+# 版本严格同源、**离线可构建**）。为控制体积：
+# - 只拷 bin / config / lib / starter（connectors 整目录 2.4G 不拷）；
+# - connectors 只拷白名单 jar（jdbc / doris / console / fake）——白名单断言见
+#   tests/infrastructure/test_deploy_contract.py（防漏拷）；
+# - cluster-members 覆盖为 compose 服务名 seatunnel:5801（镜像内置是 localhost:5801，
+#   worker 容器里会连自己）。
+#
+# worker 容器经此镜像持有「SeaTunnel 客户端」：seatunnel.sh --config <f> --async
+# 提交、--check 校验、--cancel-job 取消；状态查询走引擎 REST /job-info。
+FROM flowpilot/seatunnel:2.3.13 AS seatunnel-client
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 装 uv
+COPY --from=ghcr.io/astral-sh/uv:0.4 /uv /usr/local/bin/uv
+
+# 先拷贝依赖清单（利用缓存）
+COPY pyproject.toml uv.lock ./
+
+# 装依赖
+RUN uv sync --frozen --extra dev
+
+# 拷贝源码（覆盖面与 Dockerfile.api 一致：src / alembic / 契约 configs）
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+COPY configs/ ./configs/
+
+# ---- 引擎客户端层（T-ENGINE-01）----
+# JRE：与引擎镜像同源（SeaTunnel 2.3.x 官方支持 JDK 8/11；若装 Debian 默认 17
+# 有反射兼容风险），离线、零版本漂移
+COPY --from=seatunnel-client /usr/local/openjdk-8 /usr/local/openjdk-8
+# SeaTunnel CLI / 引擎客户端（裁剪；不含 connectors 整目录）
+COPY --from=seatunnel-client /opt/seatunnel/bin /opt/seatunnel/bin
+COPY --from=seatunnel-client /opt/seatunnel/config /opt/seatunnel/config
+COPY --from=seatunnel-client /opt/seatunnel/lib /opt/seatunnel/lib
+COPY --from=seatunnel-client /opt/seatunnel/starter /opt/seatunnel/starter
+COPY --from=seatunnel-client /opt/seatunnel/plugins /opt/seatunnel/plugins
+# connector 白名单（演示所需：MySQL(JDBC 源) → Doris(目标) + Console/Fake 供冒烟）
+COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-jdbc-2.3.13.jar /opt/seatunnel/connectors/
+COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-doris-2.3.13.jar /opt/seatunnel/connectors/
+COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-console-2.3.13.jar /opt/seatunnel/connectors/
+COPY --from=seatunnel-client /opt/seatunnel/connectors/connector-fake-2.3.13.jar /opt/seatunnel/connectors/
+# worker 专用集群客户端配置：集群成员指向 compose 服务名（覆盖镜像内置 localhost:5801）
+COPY infra/seatunnel/hazelcast-client.worker.yaml /opt/seatunnel/config/hazelcast-client.yaml
+
+ENV JAVA_HOME=/usr/local/openjdk-8
+ENV PYTHONPATH=/app/src
+ENV PATH="/app/.venv/bin:/usr/local/openjdk-8/bin:${PATH}"
+
+EXPOSE 8000
+
+CMD ["uv", "run", "celery", "-A", "etl_agent.worker", "worker", "--loglevel=info"]

@@ -80,7 +80,9 @@ services:
   worker:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.api
+      # T-ENGINE-01：worker 专用镜像（含 SeaTunnel 引擎客户端层）；api / beat 继续
+      # 用 Dockerfile.api 保持精简
+      dockerfile: infra/Dockerfile.worker
     container_name: etl_agent_worker
     restart: unless-stopped
     command: uv run celery -A etl_agent.worker worker --loglevel=info
@@ -92,10 +94,13 @@ services:
       ETL_AGENT_REDIS_PORT: "6379"
       ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
       ETL_AGENT_FILE_ASSET_ROOT: /data/file-assets
-      # 引擎通道选型（F5：S10 演示口径 mock，人类裁决 C）——check/submit 为演示态
-      # 合成指标，其余链路全真实执行。生产部署删掉此行使 config.py 默认 real 生效；
-      # validate_worker 双保险（ENV=prod + mock 拒绝启动）。worker 启动日志打印实际模式。
-      ETL_AGENT_ENGINE_MODE: mock
+      # 引擎通道选型（T-ENGINE-01：真实引擎——SeaTunnel CLI 提交 + REST 状态查询）：
+      # check/submit 走 seatunnel.sh（--async/--check/--cancel-job），status 走
+      # /job-info；绕开引擎 REST submit-job 全版本 NPE（T-ENGINE-01）。
+      # 切回演示态把 real-cli 改成 mock（引擎不出数据、质量为合成指标）；
+      # 生产部署删掉此行使 config.py 默认 real 生效，validate_worker 白名单兜底
+      # （ENV=prod + mock 拒绝启动）。worker 启动日志打印实际模式。
+      ETL_AGENT_ENGINE_MODE: real-cli
     depends_on:
       postgres:
         condition: service_healthy
