@@ -116,6 +116,12 @@ pwsh -File infra/e2e/demo-scenario-a.ps1
 | 11 | `GET /executions/{id}` + `/quality-report` | 监督动作、四态质量报告、错误码分布 | **AC-07** |
 | 12 | `GET /evidence-stream/verify` | `valid=true` + `head_hash` | **AC-09** |
 
+> **AC 覆盖口径（run15 验收实测，详见 `演示回放.md` 第 8.4 节）**：本轮 PDP 判 P3、
+> 四眼审批未激活， AC-01/AC-03 **未覆盖**、AC-05 **部分**（commit 已走）；AC-04 全覆盖
+> （门禁 14/14）；AC-06/07/10 为 mock 口径下的部分覆盖（引擎合成指标、Swap 不执行）；
+> AC-09（Benchmark 证据覆盖率）为独立任务。**AC-01/AC-03/AC-05 的完整覆盖见后续
+> fix/S10-demo-coverage PR。**
+
 ---
 
 ## 场景 B：安全拦截、失败诊断与受管回滚
