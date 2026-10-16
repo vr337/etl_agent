@@ -12,8 +12,16 @@
 import client from './client'
 import type { EvidenceEventView, EvidenceStreamView, VerifyResponse } from './types'
 
+/**
+ * 「空工作区无证据流」是预期分支（后端对未建流项目一律 404 且不自动建流）：
+ * 三个读取函数均带 `silent` 容错标记——调用方（Dashboard / SafetyGovernance）
+ * 已显式 catch 并走「未验证 / 空时间线」空态，全局拦截器不再重复弹红色通知。
+ * 任一端点真的异常时，失败仍会 reject 到调用方的空态分支（不静默吞错）。
+ */
 export async function getEvidenceStream(projectId: string): Promise<EvidenceStreamView> {
-  const { data } = await client.get<EvidenceStreamView>(`/projects/${projectId}/evidence-stream`)
+  const { data } = await client.get<EvidenceStreamView>(`/projects/${projectId}/evidence-stream`, {
+    silent: true,
+  })
   return data
 }
 
@@ -28,6 +36,7 @@ export async function listEvidenceEvents(
         after_sequence: params.afterSequence ?? 0,
         limit: params.limit ?? 100,
       },
+      silent: true,
     },
   )
   return data.events
@@ -36,6 +45,7 @@ export async function listEvidenceEvents(
 export async function verifyEvidenceStream(projectId: string): Promise<VerifyResponse> {
   const { data } = await client.get<VerifyResponse>(
     `/projects/${projectId}/evidence-stream/verify`,
+    { silent: true },
   )
   return data
 }

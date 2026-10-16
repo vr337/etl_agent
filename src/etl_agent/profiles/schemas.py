@@ -66,3 +66,26 @@ class ProfileResponse(BaseModel):
     classification_report_sha256: str
     expires_at: datetime
     created_at: datetime
+
+
+class ProfileSummaryView(BaseModel):
+    """Profile 列表项（联调修复新增；前端 `ProfileView` 对齐）。
+
+    与 `ProfileResponse` 的差异：列表**不回列明细与脱敏样本**——样本是逐表探查的重
+    载荷，且前端列表只需要「探查是否完成 + 分级摘要」。样本经已有的
+    `GET /projects/{id}/profiles` 之外的探查入口获取（本端点保持轻量）。
+    """
+
+    id: uuid.UUID
+    connection_id: uuid.UUID
+    schema_name: str
+    table_name: str
+    endpoint_role: str
+    column_count: int
+    primary_key: list[str] | None = None
+    report_sha256: str
+    classifications: dict[str, int] = Field(
+        default_factory=dict, description="分级 → 列数（effective_classification 聚合）"
+    )
+    sample_status: str = Field(description="AVAILABLE / NONE / EXPIRED（依据 expires_at）")
+    created_at: datetime

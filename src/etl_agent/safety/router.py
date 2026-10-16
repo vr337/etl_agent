@@ -31,6 +31,7 @@ from etl_agent.safety.schemas import (
     ProposalDecisionRequest,
     ProposalListView,
     ProposalView,
+    ReleaseListResponse,
     ReleaseView,
     RollbackRequest,
     ShadowStartRequest,
@@ -215,6 +216,32 @@ async def decide_safety_proposal(
     view = await _proposal_view_async(session, updated)
     await session.commit()
     return view
+
+
+@router.get(
+    "/safety-proposals/{proposal_id}/releases",
+    response_model=ReleaseListResponse,
+)
+async def list_safety_releases(
+    proposal_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> ReleaseListResponse:
+    """列出提案的发布记录（联调修复新增；受控发布页消费）。
+
+    项目隔离经提案回溯（跨项目 404）。`safety_releases.proposal_id` 有唯一约束，
+    故每提案最多一条发布记录——本端点是该事实的**集合视图**，未启动发布时返回空集。
+
+    响应体是 `{releases: [...]}` 信封（与前端 `listReleases` 的既有解包方式一致，
+    不同于 execution / harness 列表端点所用的裸数组约定）。
+    """
+    from etl_agent.auth.dependencies import require_actor_for_project
+
+    proposal = await proposal_service.get_proposal(session, proposal_id)
+    await require_actor_for_project(request, session, proposal.project_id)
+    release = await release_service.get_release_by_proposal(session, proposal_id)
+    views = [] if release is None else [await _release_view_async(session, release)]
+    return ReleaseListResponse(releases=views, total=len(views))
 
 
 @router.post(

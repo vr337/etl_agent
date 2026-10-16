@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.execution.routing import QualityOutcome, generate_quality_report
 from etl_agent.infrastructure.models import ExecutionRun
+from tests.execution.conftest import RunFactory
 from tests.helpers import RecordingDispatcher, SeededExecution, SeededWorkspace, make_client
 
 CONTRACT = {"valid_sink": "orders_wide_shadow", "error_sink": "orders_wide_error"}
@@ -212,3 +213,94 @@ async def test_router_quality_report(
     assert body["status"] == "PASSED"
     assert body["total_rows"] == 1000 and body["rejected_rows"] == 1
     assert body["valid_sink"] == "orders_wide_shadow"
+
+
+# ============================================================
+# API-12 列表（联调修复新增）：GET /projects/{id}/executions
+# ============================================================
+
+
+async def test_router_list_executions_empty(
+    app: FastAPI, seeded: SeededWorkspace
+) -> None:
+    """空列表：项目下无运行 → 200 + 空数组 + X-Total-Count=0（不报 404）。"""
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/executions",
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    assert response.headers["X-Total-Count"] == "0"
+
+
+async def test_router_list_executions_with_data(
+    app: FastAPI,
+    seeded: SeededWorkspace,
+    make_run: RunFactory,
+) -> None:
+    """有数据：返回前端展示口径字段（trigger_mode / target_rows / pipeline_name）。"""
+    run = await make_run(status="SUCCEEDED", trigger="MANUAL")
+
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/executions",
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert response.headers["X-Total-Count"] == "1"
+    assert len(body) == 1
+    item = body[0]
+    assert item["id"] == str(run.id)
+    assert item["status"] == "SUCCEEDED"
+    assert item["trigger_mode"] == "MANUAL"
+    assert item["retry_count"] == 0
+    assert item["target_rows"] is None  # sink_rows 未填
+    assert "pipeline_name" in item and "supervision_action" in item
+
+
+async def test_router_list_executions_pagination_and_filter(
+    app: FastAPI,
+    seeded: SeededWorkspace,
+    make_run: RunFactory,
+) -> None:
+    """分页 + 状态过滤：limit/offset 生效，X-Total-Count 反映过滤后总数。"""
+    await make_run(status="SUCCEEDED")
+    await make_run(status="SUCCEEDED")
+    await make_run(status="FAILED")
+
+    async with make_client(app) as client:
+        filtered = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/executions",
+            params={"status": "SUCCEEDED"},
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+        paged = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/executions",
+            params={"limit": 1, "offset": 1},
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.headers["X-Total-Count"] == "2"
+    assert len(filtered.json()) == 2
+
+    assert paged.status_code == 200, paged.text
+    assert paged.headers["X-Total-Count"] == "3"  # 全量总数，不受分页影响
+    assert len(paged.json()) == 1  # limit=1 只回一条
+
+
+async def test_router_list_executions_invalid_status_rejected(
+    app: FastAPI, seeded: SeededWorkspace
+) -> None:
+    """非法 status → BIZ_400_VALIDATION（不做静默全量返回）。"""
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/executions",
+            params={"status": "NOT_A_STATUS"},
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+    assert response.status_code == 400
+    assert response.json()["code"] == "BIZ_400_VALIDATION"

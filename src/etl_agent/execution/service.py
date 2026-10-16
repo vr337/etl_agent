@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.execution.errors import ExecutionNotFound, ExecutionStateConflict
@@ -128,6 +128,60 @@ async def load_run_by_preparation(
         .scalars()
         .first()
     )
+
+
+async def list_runs_for_project(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[tuple[ExecutionRun, str | None]], int]:
+    """按项目列出执行运行（API-12 列表；项目隔离沿外键链派生）。
+
+    执行运行没有 `project_id` 列（SPEC 5.2），项目归属沿
+    `ExecutionRun → PipelineVersion → Pipeline.project_id` 派生——与
+    `load_run_with_project` 同一口径，绝不按调用方声明过滤（FR-66 / AC-12）。
+
+    Args:
+        session: 请求级数据库会话。
+        project_id: 项目隔离边界。
+        status: 可选状态过滤（七态之一；非法值由路由层先行校验）。
+        limit: 单页条数（路由层已 clamp 到 1..200）。
+        offset: 偏移（分页）。
+
+    Returns:
+        (rows, total)：rows 为 (运行, pipeline 名) 列表，按 `submitted_at` 倒序
+        （NULL 排在最后），同刻以 `id` 兜底保证稳定序；total 为同过滤条件下的总数
+        （分页前的全量，供前端显示与翻页）。
+    """
+    base = (
+        select(ExecutionRun, Pipeline.name)
+        .join(PipelineVersion, ExecutionRun.pipeline_version_id == PipelineVersion.id)
+        .join(Pipeline, PipelineVersion.pipeline_id == Pipeline.id)
+        .where(Pipeline.project_id == project_id)
+    )
+    if status is not None:
+        base = base.where(ExecutionRun.status == status)
+
+    total = (
+        await session.execute(
+            select(func.count()).select_from(base.subquery()),
+        )
+    ).scalar_one()
+
+    rows = (
+        await session.execute(
+            base.order_by(
+                ExecutionRun.submitted_at.desc().nullslast(),
+                ExecutionRun.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return [(row[0], row[1]) for row in rows], int(total)
 
 
 async def record_event(

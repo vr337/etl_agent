@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from etl_agent.execution.errors import ExecutionNotFound, ExecutionStateConflict
 from etl_agent.execution.schemas import (
     ExecutionDetailResponse,
     ExecutionEventView,
+    ExecutionRunListView,
     ExecutionRunView,
     ExecutionTriggerRequest,
     ExecutionTriggerResponse,
@@ -82,6 +83,31 @@ def _run_view(run: ExecutionRun) -> ExecutionRunView:
     )
 
 
+def _list_item_view(run: ExecutionRun, pipeline_name: str | None) -> ExecutionRunListView:
+    """运行行 → 列表项视图（展示口径，前端 types.ts 已声明；逐字段显式映射）。"""
+    # bytes_processed：源/目标字节任一缺失即视为未知（不做部分求和，避免误导）
+    bytes_processed: int | None = None
+    if run.source_bytes is not None and run.sink_bytes is not None:
+        bytes_processed = run.source_bytes + run.sink_bytes
+    return ExecutionRunListView(
+        id=run.id,
+        pipeline_version_id=run.pipeline_version_id,
+        pipeline_name=pipeline_name,
+        status=run.status,
+        trigger_mode=run.trigger,
+        retry_count=1 if run.retry_of_run_id is not None else 0,
+        source_rows=run.source_rows,
+        target_rows=run.sink_rows,
+        bytes_processed=bytes_processed,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        supervision_action=run.supervision_action,
+        # S7 无监督风险列（S8 落 runtime_supervision_snapshots）；缺省为 None，前端回退演示态
+        supervision_risk=None,
+        snapshot_sha256=run.supervision_contract_sha256,
+    )
+
+
 def _dispatch_scan(request: Request) -> bool:
     """派发一次即时 Outbox 扫描（失败不抛出：Beat 周期兜底，FR-35）。"""
     dispatcher: Callable[[], None] | None = getattr(request.app.state, "execution_dispatcher", None)
@@ -99,6 +125,44 @@ def _celery_dispatch() -> None:
     from etl_agent.worker.celery_app import app as celery_app
 
     celery_app.send_task(TASK_SCAN_OUTBOX)
+
+
+@router.get(
+    "/projects/{project_id}/executions",
+    response_model=list[ExecutionRunListView],
+)
+async def list_executions(
+    project_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    status: str | None = Query(default=None, description="可选：按七态之一过滤"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> list[ExecutionRunListView]:
+    """API-12 列表：项目下执行运行（项目成员可读，运行中心 / 总览）。
+
+    项目隔离沿 `ExecutionRun → PipelineVersion → Pipeline.project_id` 派生
+    （execution_runs 无 project_id 列，SPEC 5.2），不信任任何调用方声明（FR-66 / AC-12）。
+
+    分页：`limit`（1..200，默认 50）+ `offset`；同过滤条件下的**总数**经
+    `X-Total-Count` 响应头回传——列表体保持裸数组（与前端既有消费方式一致）。
+
+    Raises:
+        UnknownActor:        未携带身份声明（401 AUTH_401_UNKNOWN_ACTOR）。
+        NotProjectMember:    非成员或项目不存在（403，统一码不泄露存在性）。
+        ValidationError:     status 非七态之一（BIZ_400_VALIDATION）。
+    """
+    if status is not None and status not in execution_service.ALL_STATUSES:
+        raise ValidationError(
+            f"status 取值非法：{status!r}，可选 {list(execution_service.ALL_STATUSES)}"
+        )
+    rows, total = await execution_service.list_runs_for_project(
+        session, project_id, status=status, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [_list_item_view(run, pipeline_name) for run, pipeline_name in rows]
 
 
 @router.post(

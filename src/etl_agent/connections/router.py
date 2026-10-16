@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.auth.actor_resolver import ActorContext
@@ -32,6 +32,7 @@ from etl_agent.connections.schemas import (
     MigrationResponse,
     RollbackResponse,
     RotationCreateRequest,
+    RotationListView,
     RotationResponse,
 )
 from etl_agent.infrastructure.database import get_session
@@ -190,6 +191,27 @@ def _rotation_response(rotation: SecretRotationRequest) -> RotationResponse:
     )
 
 
+def _rotation_list_view(rotation: SecretRotationRequest) -> RotationListView:
+    """轮换列表视图（前端契约口径；绝不含凭据，AC-02）。
+
+    后端无逐阶段时间列：`staged_at` 由 `created_at` 派生（申请即暂存），
+    `activated_at` 仅在 SUCCEEDED 时由 `completed_at` 派生，
+    `validated_at` / `rolled_back_at` 如实回 None（不伪造时间轴）。
+    """
+    return RotationListView(
+        id=rotation.id,
+        connection_id=rotation.connection_id,
+        status=rotation.status,
+        reason=rotation.reason,
+        staged_at=rotation.created_at,
+        validated_at=None,
+        activated_at=rotation.completed_at
+        if rotation.status == rotation_service.SUCCEEDED
+        else None,
+        rolled_back_at=None,
+    )
+
+
 @router.post(
     "/projects/{project_id}/connections/{connection_id}/rotations",
     status_code=201,
@@ -215,6 +237,31 @@ async def create_rotation(
         settings=request.app.state.settings,
     )
     return _rotation_response(rotation)
+
+
+@router.get(
+    "/projects/{project_id}/connections/{connection_id}/rotations",
+    response_model=list[RotationListView],
+)
+async def list_rotations(
+    project_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> list[RotationListView]:
+    """列出连接的轮换申请（联调修复新增；只含状态与引用，绝不含凭据，AC-02）。
+
+    连接不存在或不属于路径项目 → 404（与该路径下其余路由一致，AC-12）。
+    分页 + `X-Total-Count` 响应头；列表体为裸数组（与前端消费方式一致）。
+    """
+    rows, total = await rotation_service.list_rotations_for_connection(
+        session, project_id, connection_id, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [_rotation_list_view(rotation) for rotation in rows]
 
 
 @router.post(

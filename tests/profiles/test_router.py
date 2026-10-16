@@ -90,6 +90,86 @@ async def test_router_cross_project_connection_404(
     assert response.json()["code"] == "BIZ_404_CONNECTION_NOT_FOUND"
 
 
+async def test_router_list_profiles_empty(
+    app: FastAPI, seeded: SeededWorkspace
+) -> None:
+    """空列表：项目无 Profile → 200 + 空数组 + X-Total-Count=0（联调修复新增）。"""
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/profiles",
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    assert response.headers["X-Total-Count"] == "0"
+
+
+async def test_router_list_profiles_with_data(
+    app: FastAPI,
+    seeded: SeededWorkspace,
+    seeded_connection: tuple,
+    profile_source_table: str,
+) -> None:
+    """有数据：返回前端展示口径（列数 / 主键 / 分级摘要 / 样本状态），不回列明细与样本。"""
+    connection, _ = seeded_connection
+    async with make_client(app) as client:
+        created = await client.post(
+            f"/api/v1/projects/{seeded.project_a_id}/profiles",
+            json=_profile_payload(connection.id, profile_source_table),
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+        assert created.status_code == 201, created.text
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/profiles",
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Total-Count"] == "1"
+    body = response.json()
+    assert len(body) == 1
+    item = body[0]
+    assert item["id"] == created.json()["id"]
+    assert item["table_name"] == profile_source_table
+    assert item["column_count"] == len(created.json()["columns"])
+    assert item["primary_key"] == ["id"]
+    assert len(item["report_sha256"]) == 64
+    assert item["classifications"].get("CONFIDENTIAL", 0) >= 1
+    assert item["sample_status"] == "AVAILABLE"
+    # 列表保持轻量：不含列明细与脱敏样本（重载荷走单条探查入口）
+    assert "columns" not in item
+    assert "masked_samples" not in item
+
+
+async def test_router_list_profiles_pagination(
+    app: FastAPI,
+    seeded: SeededWorkspace,
+    seeded_connection: tuple,
+    profile_source_table: str,
+) -> None:
+    """分页：limit/offset 生效，X-Total-Count 反映全量总数（联调修复新增）。"""
+    connection, _ = seeded_connection
+    async with make_client(app) as client:
+        created = await client.post(
+            f"/api/v1/projects/{seeded.project_a_id}/profiles",
+            json=_profile_payload(connection.id, profile_source_table),
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+        assert created.status_code == 201, created.text
+        path = f"/api/v1/projects/{seeded.project_a_id}/profiles"
+        first_page = await client.get(
+            path, params={"limit": 1}, headers={"X-Actor-ID": SeededWorkspace.ADMIN_A}
+        )
+        beyond = await client.get(
+            path, params={"limit": 1, "offset": 1}, headers={"X-Actor-ID": SeededWorkspace.ADMIN_A}
+        )
+    assert first_page.status_code == 200, first_page.text
+    assert first_page.headers["X-Total-Count"] == "1"
+    assert len(first_page.json()) == 1
+    assert beyond.status_code == 200, beyond.text
+    assert beyond.headers["X-Total-Count"] == "1"
+    assert beyond.json() == []
+
+
 async def test_sample_limit_range(
     app: FastAPI,
     seeded: SeededWorkspace,

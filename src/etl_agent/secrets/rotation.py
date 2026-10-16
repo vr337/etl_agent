@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from etl_agent.config import Settings
 from etl_agent.connections.service import load_connection
 from etl_agent.infrastructure.models import DataConnection, SecretRotationRequest
+from etl_agent.infrastructure.pagination import paginate
 from etl_agent.secrets.errors import SecretNotFound, SecretStateConflict
 from etl_agent.secrets.factory import create_provider
 
@@ -52,6 +53,30 @@ async def _load_rotation(
     if rotation is None:
         raise SecretNotFound("轮换申请不存在")
     return rotation
+
+
+async def list_rotations_for_connection(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[SecretRotationRequest], int]:
+    """按连接列出轮换申请（联调修复新增的列表读取；项目隔离经 load_connection，AC-12）。
+
+    连接不存在或不属于路径项目时 `load_connection` 先抛 404（与该路径下其余路由一致），
+    再按 `created_at` 倒序 + `id` 兜底做稳定分页；总数由调用方经 `X-Total-Count` 回传。
+    """
+    await load_connection(session, project_id, connection_id)
+    rows, total = await paginate(
+        session,
+        select(SecretRotationRequest).where(SecretRotationRequest.connection_id == connection_id),
+        order_by=(SecretRotationRequest.created_at.desc(), SecretRotationRequest.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
+    return [row[0] for row in rows], total
 
 
 async def create_rotation(

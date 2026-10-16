@@ -15,6 +15,14 @@ import axios, { AxiosError, type AxiosInstance } from 'axios'
 
 import { useNotificationStore } from '@/stores/notification'
 
+declare module 'axios' {
+  // 容错标记：调用方已显式 catch 的预期失败（如「空工作区无证据流 → 未验证/空态」），
+  // 全局错误拦截器据此跳过红色通知——错误仍 reject，由调用方分支处理（不静默吞错）。
+  export interface AxiosRequestConfig {
+    silent?: boolean
+  }
+}
+
 /** 后端统一错误体（SPEC 6.4：`{code, message, trace_id}`）。 */
 export interface ApiErrorBody {
   code: string
@@ -73,6 +81,11 @@ client.interceptors.request.use((config) => {
 client.interceptors.response.use(
   (response) => response,
   (error: AxiosError<ApiErrorBody>) => {
+    if (error.config?.silent) {
+      // 调用方已显式容错（如「空工作区无证据流 → 显示未验证/空态」）：
+      // 错误即业务分支，弹全局红色通知反而制造噪声。仍 reject，交由调用方分支处理。
+      return Promise.reject(error)
+    }
     const body = error.response?.data
     const notifications = useNotificationStore()
     if (body?.code) {

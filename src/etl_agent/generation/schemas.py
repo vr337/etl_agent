@@ -13,6 +13,7 @@ S6 变更：API-07 冻结响应模型随端点迁至 `versions/schemas.py`（版
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -50,3 +51,20 @@ class AgentRunResponse(BaseModel):
     generation_candidate_count: int | None = None
     generation_repair_count: int | None = None
     generation_duration_ms: int | None = None
+
+
+class AgentRunListView(BaseModel):
+    """运行列表项（联调修复新增；前端 `AgentRunView` 对齐）。
+
+    `pipeline_id` 经 `pipeline_version_id → PipelineVersion.pipeline_id` 派生（agent_runs
+    无 pipeline_id 列）。遥测字段与 `AgentRunResponse` 同源，**不含 Prompt / 候选正文**
+    （FR-67 红线：业务库禁存这两类字段）。
+    """
+
+    id: uuid.UUID
+    thread_id: str
+    pipeline_id: uuid.UUID
+    status: str
+    repair_count: int = 0
+    clarify_question: str | None = None
+    created_at: datetime | None = None

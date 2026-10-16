@@ -12,28 +12,82 @@ from __future__ import annotations
 import uuid
 from typing import cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.auth.actor_resolver import ActorContext
 from etl_agent.auth.dependencies import require_actor_for_project, require_project_member
+from etl_agent.auth.errors import ValidationError
 from etl_agent.config import Settings
 from etl_agent.harness import service as harness_service
 from etl_agent.harness.approve.service import ApproveService
 from etl_agent.harness.commit.service import CommitService
 from etl_agent.harness.prepare.service import PrepareInput, PrepareService
 from etl_agent.harness.schemas import (
+    ApprovalSlotView,
     CommitRequest,
     CommitResponse,
     DecisionRequest,
     DecisionResponse,
     PreparationCreateRequest,
+    PreparationListView,
     PreparationResponse,
 )
 from etl_agent.infrastructure.database import get_session
+from etl_agent.infrastructure.models import ExecutionPreparation, HarnessApprovalDecision
 from etl_agent.worker.capability_handoff import CapabilityHandoff, RedisCapabilityHandoff
 
 router = APIRouter(prefix="/api/v1", tags=["harness"])
+
+# 准备单合法状态（与 execution_preparations.status 状态机一致）
+ALLOWED_PREPARATION_STATUSES: frozenset[str] = frozenset(
+    {"DENIED", "WAITING_APPROVAL", "READY", "REJECTED", "EXPIRED", "COMMITTED"}
+)
+
+
+def _preparation_list_view(
+    preparation: ExecutionPreparation,
+    outcome: str,
+    approvals: list[HarnessApprovalDecision],
+) -> PreparationListView:
+    """准备单行 → 列表项视图（展示口径；审批槽位按 role 稳定序输出）。"""
+    return PreparationListView(
+        id=preparation.id,
+        pipeline_version_id=preparation.pipeline_version_id,
+        decision=outcome,
+        risk_level=preparation.risk_level,
+        status=preparation.status,
+        required_roles=list(preparation.required_roles or []),
+        required_approvals=preparation.required_approvals or 0,
+        approvals=[
+            ApprovalSlotView(
+                role=decision.role,
+                decided_by=decision.decided_by,
+                decision=decision.decision,
+                reason=decision.reason,
+                evidence_sha256=decision.evidence_sha256,
+                decided_at=decision.created_at,
+            )
+            for decision in approvals
+        ],
+        impact_report=preparation.impact_report,
+        rollback_plan=_rollback_plan_text(preparation.rollback_plan),
+        expires_at=preparation.expires_at,
+        created_at=preparation.created_at,
+    )
+
+
+def _rollback_plan_text(rollback_plan: dict[str, object] | None) -> str | None:
+    """回滚计划是 JSON 事实；前端只需摘要文本——取 `summary` 或首个字符串值。"""
+    if not rollback_plan:
+        return None
+    summary = rollback_plan.get("summary")
+    if isinstance(summary, str):
+        return summary
+    for value in rollback_plan.values():
+        if isinstance(value, str):
+            return value
+    return None
 
 
 def _prepare_service(request: Request) -> PrepareService:
@@ -64,6 +118,46 @@ def _handoff(request: Request) -> CapabilityHandoff:
     return RedisCapabilityHandoff(
         request.app.state.redis, key_prefix=settings.capability_handoff_key_prefix
     )
+
+
+@router.get(
+    "/projects/{project_id}/preparations",
+    response_model=list[PreparationListView],
+)
+async def list_preparations(
+    project_id: uuid.UUID,
+    response: Response,
+    status: str | None = Query(default=None, description="可选：按准备单状态过滤"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> list[PreparationListView]:
+    """API-08 列表：项目下准备单（项目成员可读，审批台/运行中心）。
+
+    准备单自带 `project_id`（`execution_preparations.project_id`），直接按项目隔离
+    （FR-66 / AC-12）。每项带 PDP 判决与审批槽位事实，供前端渲染「待四眼审批」卡。
+
+    分页：`limit`（1..200，默认 50）+ `offset`；同过滤条件下的**总数**经
+    `X-Total-Count` 响应头回传——列表体保持裸数组（与前端既有消费方式一致）。
+
+    Raises:
+        UnknownActor:        未携带身份声明（401 AUTH_401_UNKNOWN_ACTOR）。
+        NotProjectMember:    非成员或项目不存在（403，统一码不泄露存在性）。
+        ValidationError:     status 非法（BIZ_400_VALIDATION）。
+    """
+    if status is not None and status not in ALLOWED_PREPARATION_STATUSES:
+        raise ValidationError(
+            f"status 取值非法：{status!r}，可选 {list(ALLOWED_PREPARATION_STATUSES)}"
+        )
+    rows, total = await harness_service.list_preparations_for_project(
+        session, project_id, status=status, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return [
+        _preparation_list_view(preparation, outcome, approvals)
+        for preparation, outcome, approvals in rows
+    ]
 
 
 @router.post(

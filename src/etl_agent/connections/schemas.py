@@ -101,6 +101,25 @@ class RotationResponse(BaseModel):
     created_at: datetime
 
 
+class RotationListView(BaseModel):
+    """轮换列表视图（联调修复新增；前端契约口径，只含状态与引用，绝不含凭据，AC-02）。
+
+    与 `RotationResponse` 的差异：不回显 requested_by / approved_by / new_secret_ref
+    等治理标识，改回前端时间轴口径。后端只记录 `created_at`（申请即暂存）与
+    `completed_at`（终态），无逐阶段时间列——`activated_at` 仅在 SUCCEEDED 时由
+    completed_at 派生，`validated_at` / `rolled_back_at` 如实回 None（不伪造时间轴）。
+    """
+
+    id: uuid.UUID
+    connection_id: uuid.UUID
+    status: str
+    reason: str | None = None
+    staged_at: datetime | None = None
+    validated_at: datetime | None = None
+    activated_at: datetime | None = None
+    rolled_back_at: datetime | None = None
+
+
 class RollbackResponse(BaseModel):
     """轮换回滚视图（FR-07）。"""
 

@@ -86,6 +86,35 @@ class ExecutionTriggerResponse(BaseModel):
     )
 
 
+class ExecutionRunListView(BaseModel):
+    """API-12 列表出参：项目下执行运行（前端控制台运行中心 / 总览消费）。
+
+    **为什么不复用 `ExecutionRunView`**：单条视图面向 API-12 详情，字段名取自
+    `execution_runs` 列名（`trigger` / `sink_rows`）；而前端 `types.ts` 的运行行
+    使用展示口径（`trigger_mode` / `target_rows` / `bytes_processed`）。两者是
+    **同一事实的两种命名**，此处按前端既有类型输出，避免前端改动（本次修复约束）。
+
+    字段全部为 `execution_runs` 既有列 + 沿管线回溯的 `pipeline_name`，无新增事实。
+    """
+
+    id: uuid.UUID
+    pipeline_version_id: uuid.UUID
+    pipeline_name: str | None = None
+    status: str
+    trigger_mode: str = Field(description="execution_runs.trigger（MANUAL / SCHEDULED）")
+    retry_count: int = Field(default=0, description="由 retry_of_run_id 派生：0 表示首跑")
+    source_rows: int | None = None
+    target_rows: int | None = Field(default=None, description="execution_runs.sink_rows")
+    bytes_processed: int | None = Field(
+        default=None, description="source_bytes + sink_bytes 聚合（缺一即 None）"
+    )
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    supervision_action: str | None = None
+    supervision_risk: str | None = None
+    snapshot_sha256: str | None = None
+
+
 class QualityReportView(BaseModel):
     """API-14 出参：质量契约与分流报告（只回聚合，原始值留在错误表，PRD 10.5）。"""
 
@@ -105,6 +134,7 @@ class QualityReportView(BaseModel):
 __all__ = [
     "ExecutionDetailResponse",
     "ExecutionEventView",
+    "ExecutionRunListView",
     "ExecutionRunView",
     "ExecutionTriggerRequest",
     "ExecutionTriggerResponse",

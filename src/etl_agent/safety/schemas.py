@@ -109,6 +109,17 @@ class ReleaseView(BaseModel):
     updated_at: datetime
 
 
+class ReleaseListResponse(BaseModel):
+    """发布列表信封（联调修复新增；前端 `listReleases` 按 `releases` 键解包）。
+
+    注意与 execution / harness 列表端点的差异：这里返回**信封**而非裸数组——
+    前端 `listReleases` 既有解包契约是 `{releases: [...]}`，不能擅自改变。
+    """
+
+    releases: list[ReleaseView] = Field(default_factory=list)
+    total: int = 0
+
+
 __all__ = [
     "CanaryRequest",
     "ObservationView",
@@ -117,6 +128,7 @@ __all__ = [
     "ProposalDecisionRequest",
     "ProposalListView",
     "ProposalView",
+    "ReleaseListResponse",
     "ReleaseView",
     "RollbackRequest",
     "ShadowStartRequest",
