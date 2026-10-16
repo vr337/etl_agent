@@ -114,9 +114,7 @@ async def test_atomic_swap_quarantined(db_session: AsyncSession, make_run) -> No
 
     assert is_quarantined(run) is True
     executor = LoggingSwapExecutor()
-    decision = await evaluate_publish_gate(
-        db_session, run, report=report, targets=TARGETS, executor=executor
-    )
+    decision = await evaluate_publish_gate(db_session, run, report=report, targets=TARGETS)
     assert decision.allowed is False
     assert decision.code == SwapQuarantined.code
 

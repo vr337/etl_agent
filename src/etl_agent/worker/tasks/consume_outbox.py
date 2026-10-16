@@ -34,11 +34,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from etl_agent.config import Settings
 from etl_agent.config import settings as default_settings
 from etl_agent.execution import metrics as metrics_module
+from etl_agent.execution.atomic_swap import (
+    DorisSwapExecutor,
+    LoggingSwapExecutor,
+    SwapExecutor,
+)
 from etl_agent.execution.errors import (
     SeatunnelCheckFailed,
     SeatunnelUnavailable,
 )
 from etl_agent.execution.metrics import ExecutionMetrics
+from etl_agent.execution.publish import PublishOutcome, publish_run, resolve_targets
 from etl_agent.execution.retry import stable_job_id
 from etl_agent.execution.routing import (
     QualityOutcome,
@@ -83,6 +89,7 @@ from etl_agent.infrastructure.models import (
     HarnessCapabilityGrant,
     HarnessCommandOutbox,
     PipelineVersion,
+    QualityReport,
 )
 from etl_agent.secrets.factory import create_provider
 from etl_agent.worker.capability_handoff import CapabilityHandoff
@@ -113,6 +120,11 @@ CandidateLoader = Callable[[uuid.UUID], Awaitable[dict[str, object] | None]]
 # 才可确定的 sink 连接坐标（连接行 + host_map 重写），无法在任务启动时预先构造。
 ShadowExecutorFactory = Callable[[dict[str, str]], ShadowTableExecutor]
 
+# Swap 执行通道工厂（T-SHADOW-01 PR-B）：与 ShadowExecutorFactory 同构同因。
+# `SwapExecutor` 与 `ShadowTableExecutor` 是**两个独立协议**（方法集不同），
+# 故不能复用同一工厂，必须并存注入。
+SwapExecutorFactory = Callable[[dict[str, str]], SwapExecutor]
+
 
 @dataclass
 class ScanSummary:
@@ -136,6 +148,8 @@ async def scan_outbox_once(
     candidate_loader: CandidateLoader | None = None,
     shadow_executor: ShadowTableExecutor | None = None,
     shadow_executor_factory: ShadowExecutorFactory | None = None,
+    swap_executor: SwapExecutor | None = None,
+    swap_executor_factory: SwapExecutorFactory | None = None,
     worker_id: str | None = None,
     now: datetime | None = None,
 ) -> ScanSummary:
@@ -151,6 +165,10 @@ async def scan_outbox_once(
         shadow_executor_factory: 数据面建表通道**工厂**（生产用，T-SHADOW-01）——
             按每次运行的执行视角 sink 坐标构造真实 `DorisShadowTableExecutor`；
             两者都缺省时回落 `LoggingShadowTableExecutor`（无 Doris 的开发/测试环境）。
+        swap_executor: 原子 Swap 通道**实例**（测试注入用，优先于 factory）。
+        swap_executor_factory: 原子 Swap 通道**工厂**（生产用，T-SHADOW-01 PR-B）——
+            按每次运行的执行视角 sink 坐标构造真实 `DorisSwapExecutor`；
+            两者都缺省时回落 `LoggingSwapExecutor`（不连目标端）。
         worker_id: 执行租约持有者标识；缺省主机-PID。
         now: 时钟注入（测试）。
 
@@ -196,12 +214,14 @@ async def scan_outbox_once(
             summary.failed += 1
             summary.details.append(f"{command.command_type}: {outcome}")
 
-    # 4. 推进 RUNNING 运行（回传指标 / 终态落 QualityReport）
+    # 4. 推进 RUNNING 运行（回传指标 / 终态落 QualityReport + 原子发布）
     finalized = await advance_running_executions(
         session,
         engine,
         settings=effective,
         candidate_loader=candidate_loader,
+        swap_executor=swap_executor,
+        swap_executor_factory=swap_executor_factory,
         worker_id=worker_id,
     )
     summary.advanced = finalized.advanced
@@ -362,7 +382,7 @@ async def _consume_command(
                 run.id,
                 level="INFO",
                 event_type="execution.shadow_ready",
-                message=f"数据面就绪：影子表 {shadow} / 错误表 {error_table}（S7 不 Swap，FR-43）",
+                message=f"数据面就绪：影子表 {shadow} / 错误表 {error_table}（FR-43/44）",
                 stage="submit",
             )
             await refresh_lock(session, command.id, lock_seconds=settings.outbox_lock_seconds * 4)
@@ -499,6 +519,22 @@ async def _connection_values(
     return values
 
 
+def _build_swap_executor(
+    values: dict[str, str],
+    *,
+    factory: SwapExecutorFactory | None = None,
+) -> SwapExecutor:
+    """按执行视角坐标构造 Swap 执行通道（T-SHADOW-01 PR-B）。
+
+    `SINK_*` 来自 `_connection_values`（**已过 host_map 重写**）——worker 容器内的
+    容器网络名，与引擎提交 / 数据面建表用的寻址同源。未注入 factory（开发/测试）时
+    回落 Logging 通道。
+    """
+    if factory is None:
+        return LoggingSwapExecutor()
+    return factory(values)
+
+
 def _build_shadow_executor(
     values: dict[str, str],
     *,
@@ -611,10 +647,12 @@ async def advance_running_executions(
     *,
     settings: Settings,
     candidate_loader: CandidateLoader | None = None,
+    swap_executor: SwapExecutor | None = None,
+    swap_executor_factory: SwapExecutorFactory | None = None,
     worker_id: str | None = None,
     now: datetime | None = None,
 ) -> _AdvanceResult:
-    """推进 RUNNING / CANCELLING 运行（FR-39：指标回传 + 终态落质量报告）。
+    """推进 RUNNING / CANCELLING 运行（FR-39：指标回传 + 终态落质量报告 + 原子发布）。
 
     单遍对每个非终态运行查询一次引擎状态——**跨遍推进而非单遍长轮询**：Beat 节奏
     2s 天然构成轮询间隔，任务保持短小（长轮询会把一个 2s 任务拖成分钟级，
@@ -657,6 +695,8 @@ async def advance_running_executions(
                 aggregated,
                 settings=settings,
                 candidate_loader=candidate_loader,
+                swap_executor=swap_executor,
+                swap_executor_factory=swap_executor_factory,
             )
             result.finalized += 1
             continue
@@ -677,14 +717,22 @@ async def _finalize_run(
     *,
     settings: Settings,
     candidate_loader: CandidateLoader | None,
+    swap_executor: SwapExecutor | None = None,
+    swap_executor_factory: SwapExecutorFactory | None = None,
 ) -> None:
-    """终态落账：指标 + QualityReport + 状态迁移（FR-39/44）。"""
+    """终态落账：指标 + QualityReport + 原子发布 + 状态迁移（FR-39/44/43）。
+
+    T-SHADOW-01 PR-B：FINISHED 分支在质量报告之后、`transition(SUCCEEDED)` **之前**
+    调原子发布——顺序即优先级，swap 失败才能把运行改成 FAILED 而不是先宣布成功。
+    """
     await metrics_module.apply_metrics(session, run, aggregated)
     run.seatunnel_job_id = run.seatunnel_job_id or stable_job_id(run.pipeline_version_id)
     if engine_status == "FINISHED":
-        contract = await _quality_contract(session, run, settings, candidate_loader)
-        outcome = route_outcome(contract, _quality_outcome(metrics_payload, aggregated))
-        report = await generate_quality_report(session, run.id, contract, outcome)
+        plan = await _load_plan(session, run, settings, candidate_loader)
+        contract = plan.get("quality_contract")
+        contract_dict = contract if isinstance(contract, dict) else {}
+        outcome = route_outcome(contract_dict, _quality_outcome(metrics_payload, aggregated))
+        report = await generate_quality_report(session, run.id, contract_dict, outcome)
         await record_event(
             session,
             run.id,
@@ -692,15 +740,37 @@ async def _finalize_run(
             event_type="execution.quality_report",
             message=(
                 f"质量报告 {report.status}：总 {report.total_rows} / 通过 {report.passed_rows}"
-                f" / 拒绝 {report.rejected_rows}（S7 不 Swap，FR-43）"
+                f" / 拒绝 {report.rejected_rows}（FR-44）"
             ),
             stage="finalize",
         )
+        try:
+            publish_outcome = await _publish_finalized_run(
+                session, run, report, plan, settings, swap_executor, swap_executor_factory
+            )
+        except Exception as exc:  # noqa: BLE001 -- 原子发布失败按运行失败落账
+            # publish_run 内部已留 execution.publish_failed 事件（ERROR 级）
+            await transition(
+                session,
+                run,
+                STATUS_FAILED,
+                reason=f"原子发布失败：{_brief(str(exc))}",
+                failure_category="ENGINE",
+                failure_stage="finalize",
+                retryable=True,
+                diagnosis=_brief(str(exc)),
+            )
+            return
+        succeeded_reason = f"引擎作业完成：{engine_status}"
+        if publish_outcome.blocked:
+            # 「不发布」是合法结果（publish.py 既有契约：blocked 不抛异常）→ 不阻塞 SUCCEEDED，
+            # 但要把「未发布」写进终态原因，运维才不必翻事件流才知道（见 T-OBS-01）。
+            succeeded_reason = f"{succeeded_reason}；发布被阻断（{publish_outcome.reason}）"
         await transition(
             session,
             run,
             STATUS_SUCCEEDED,
-            reason=f"引擎作业完成：{engine_status}",
+            reason=succeeded_reason,
         )
         return
     if engine_status == "CANCELED":
@@ -721,25 +791,67 @@ async def _finalize_run(
     )
 
 
-async def _quality_contract(
+async def _load_plan(
     session: AsyncSession,
     run: ExecutionRun,
     settings: Settings,
     candidate_loader: CandidateLoader | None,
 ) -> dict[str, object]:
-    """取本次运行的质量契约（来自冻结计划的 `quality_contract`，缺省空契约）。
+    """取本次运行的**冻结计划**（来自 Checkpoint 候选正文；取不到返回空 dict）。
+
+    计划是质量契约与发布目标的共同事实源——T-SHADOW-01 PR-B 起终态落账同时需要
+    `quality_contract`（质量判定）与 `sink.table`（发布目标），故一次取出复用，
+    不再分两个函数各读一遍。
 
     契约只在 Checkpoint 候选正文里——S7 不做契约副本落库（避免业务库出现第二份事实源）。
-    取不到时返回空契约：报告仍生成，按引擎回传事实判定（`classify_quality` 对空契约
-    的语义是「无阈值约束」，不臆造阈值）。
+    取不到时按空契约 / 无发布目标处理：报告仍生成（`classify_quality` 对空契约的语义是
+    「无阈值约束」，不臆造阈值），发布跳过。
     """
     candidate = await _load_candidate(candidate_loader, session, run.pipeline_version_id, settings)
     plan = candidate.get("etl_plan") if candidate else None
-    if isinstance(plan, dict):
-        contract = plan.get("quality_contract")
-        if isinstance(contract, dict):
-            return contract
-    return {}
+    return plan if isinstance(plan, dict) else {}
+
+
+async def _publish_finalized_run(
+    session: AsyncSession,
+    run: ExecutionRun,
+    report: QualityReport,
+    plan: dict[str, object],
+    settings: Settings,
+    swap_executor: SwapExecutor | None,
+    swap_executor_factory: SwapExecutorFactory | None,
+) -> PublishOutcome:
+    """S8 原子发布（T-SHADOW-01 PR-B）：四门禁 → 原子 Swap → 正式表发布（FR-43/AC-07）。
+
+    三种结果的处置由调用方（`_finalize_run`）决定：
+    - `published=True`  → 照常置 SUCCEEDED（正式表已发布）
+    - `blocked=True`    → 「不发布」是**合法结果**（`publish.py` 既有契约：被阻断不抛异常），
+      不阻塞 SUCCEEDED；仅留 `execution.publish_blocked` 事件，运维经 API-12 `events[]`
+      可见（可视化渠道缺口见 tracking 的 **T-OBS-01**）
+    - 抛异常           → 原样抛出，由调用方置 FAILED（ENGINE / finalize）
+
+    `publish_run` 的幂等由其内部事件流状态机保证——同一运行重复触发不重复 swap。
+    """
+    targets = resolve_targets(plan)
+    if targets is None:
+        # 计划未声明 sink.table（无落库动作）→ 无发布动作，跳过
+        return PublishOutcome(
+            published=False,
+            blocked=False,
+            state="SKIPPED",
+            reason="计划无 sink.table，无原子发布动作",
+        )
+    # Swap 执行器需要执行视角 sink 坐标（连接行 + host_map 重写），与物化 / 建表同源
+    values = await _connection_values(session, plan, settings)
+    effective = swap_executor or _build_swap_executor(
+        values, factory=swap_executor_factory
+    )
+    try:
+        return await publish_run(
+            session, run, report=report, targets=targets, executor=effective
+        )
+    finally:
+        clear_values(values)
 
 
 async def _warn_if_stalled(
@@ -814,6 +926,8 @@ async def _run() -> dict[str, object]:
                 settings=settings,
                 # T-SHADOW-01：数据面建表走真实 Doris 通道（按每次运行的执行视角坐标）
                 shadow_executor_factory=_doris_shadow_executor_factory,
+                # T-SHADOW-01 PR-B：原子发布走真实 Doris Swap 通道（按执行视角坐标）
+                swap_executor_factory=_doris_swap_executor_factory,
             )
     finally:
         await redis.aclose()
@@ -838,6 +952,24 @@ def _doris_shadow_executor_factory(values: dict[str, str]) -> ShadowTableExecuto
     if not all(values.get(key) for key in required):
         return LoggingShadowTableExecutor()
     return DorisShadowTableExecutor(
+        host=values["SINK_HOST"],
+        port=int(values["SINK_PORT"]),
+        user=values["SINK_USER"],
+        password=values["SINK_PASSWORD"],
+        database=values["SINK_DB"],
+    )
+
+
+def _doris_swap_executor_factory(values: dict[str, str]) -> SwapExecutor:
+    """生产通道：按执行视角 sink 坐标构造 Doris Swap 执行器（T-SHADOW-01 PR-B）。
+
+    与 `_doris_shadow_executor_factory` 同源坐标（连接行 + host_map 重写）；
+    无完整 sink 坐标时回落 LoggingSwapExecutor（此时 `resolve_targets` 亦无发布目标）。
+    """
+    required = ("SINK_HOST", "SINK_PORT", "SINK_USER", "SINK_PASSWORD", "SINK_DB")
+    if not all(values.get(key) for key in required):
+        return LoggingSwapExecutor()
+    return DorisSwapExecutor(
         host=values["SINK_HOST"],
         port=int(values["SINK_PORT"]),
         user=values["SINK_USER"],
