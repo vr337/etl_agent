@@ -79,6 +79,10 @@ async def register_connection(
     connection = await register_service.register_connection(
         session, project_id=project_id, payload=payload, settings=request.app.state.settings
     )
+    # 提交语义（联调回归）：register_connection 只 flush，必须在本路由 commit——
+    # `get_session` 退出即回滚，漏 commit 会「返回 201 但连接不存在」，随后
+    # /test 报 BIZ_404_CONNECTION_NOT_FOUND（fix/S10-demo-script）。
+    await session.commit()
     # username 直接回显请求值（无需解密）；password 已加密入库，绝不回显（AC-02）
     return _to_response(connection, username=payload.username)
 
@@ -147,6 +151,10 @@ async def test_connection(
     probe_service.assert_probe_supported(connection)
     connection.status = "TESTING"
     await session.flush()
+    # 提交语义（联调回归，fix/S10-demo-script）：TESTING 必须立即落库（事务 1），
+    # 否则受理返回后连接仍是旧状态；后台 run_probe 随后的终态回写处于同一 session
+    # 的新隐式事务，由 run_probe 自行 commit（两段式提交，见 probe.py）。
+    await session.commit()
     started_at = probe_service.testing_started_at()
     # BackgroundTasks 在 FastAPI 依赖 ExitStack 内执行：请求会话仍然打开（fastapi 0.143 实测）
     background_tasks.add_task(

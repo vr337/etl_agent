@@ -26,7 +26,10 @@ from etl_agent.infrastructure.models import DataConnection
 # 探针实装的连接器类型（与 connections.probes 的实装范围一致）：
 # 其余类型（Oracle/SQLServer/Doris/Hive/HDFS/LOCAL_FILE）无元数据探查通道，
 # 统一返回 AMEND-002 的 BIZ_422_CONNECTOR_UNSUPPORTED，不做静默降级。
-INTROSPECTABLE_TYPES = frozenset({"POSTGRESQL", "MYSQL"})
+# Doris FE（3.x）对外讲 MySQL 协议（含 information_schema 查询），元数据探查走
+# MySQL 通道；**最小实现**（fix/S10-demo-script）：正式版需补 Doris 特有 catalog
+# （comment / 分区 / 视图）测试，另行排期。
+INTROSPECTABLE_TYPES = frozenset({"POSTGRESQL", "MYSQL", "DORIS"})
 
 # 标识符白名单：库名 / 表名来自请求体，必须以白名单校验后双引号包裹，
 # 杜绝通过 schema_name 注入 SQL（参数占位符无法覆盖标识符位置）。
@@ -58,7 +61,7 @@ ORDER BY a.attnum
 """
 
 MYSQL_COLUMNS_SQL = """
-SELECT column_name, column_type AS data_type, is_nullable
+SELECT column_name, column_type AS data_type, is_nullable AS nullable
 FROM information_schema.columns
 WHERE table_schema = %s AND table_name = %s
 ORDER BY ordinal_position
@@ -162,7 +165,8 @@ async def open_source(
         async with _open_postgres(connection, credentials) as session:
             yield session
         return
-    if connection.connector_type == "MYSQL":
+    # Doris FE 讲 MySQL 协议（3.0.8 实测 information_schema 全兼容），走同一通道
+    if connection.connector_type in ("MYSQL", "DORIS"):
         async with _open_mysql(connection, credentials) as session:
             yield session
         return
@@ -243,7 +247,10 @@ class _MySQLSession:
     async def fetch(self, sql: str, *params: object) -> list[dict[str, Any]]:
         await self._cursor.execute(sql, params or None)
         rows = await self._cursor.fetchall()
-        return [dict(row) for row in rows]
+        # MySQL 系标识符不区分大小写，但 information_schema 的未别名列名
+        # 在 MySQL 8.4 返回大写（COLUMN_NAME）、Doris 返回小写（column_name）——
+        # 统一小写键名，消费方无需关心服务端方言差异（fix/S10-demo-script）。
+        return [{str(key).lower(): value for key, value in row.items()} for row in rows]
 
     async def close(self) -> None:
         await self._cursor.close()

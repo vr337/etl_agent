@@ -140,10 +140,55 @@ if ($null -eq $bootstrap) {
     $script:ActorId = Read-Host '  请输入 actor（admin user_id 或 subject）'
 } else {
     $projectId = $bootstrap.project_id
-    $script:ActorId = $bootstrap.admin_user_id
+    # 身份声明必须用 subject（FR-65：X-Actor-ID 即 users.subject）；
+    # admin_user_id 是 UUID 主键，actor_resolver 按 subject 查表，传 UUID 会 401。
+    $script:ActorId = $AdminSubject
     Write-Ok ("project_id = {0}" -f $projectId)
-    Write-Ok ("admin_user_id = {0}（后续以 X-Actor-ID 注入）" -f $script:ActorId)
+    Write-Ok ("actor_subject = {0}（后续以 X-Actor-ID 注入；admin_user_id = {1}）" -f $script:ActorId, $bootstrap.admin_user_id)
 }
+
+# ---------------------------------------------------------------------------
+# 审批环境预备（AC-01 前置，非演示步骤）：四眼审批的 decisions 端点要求审批人
+#   ① 是项目成员（require_actor_for_project：member_role 非空），且
+#   ② 持有对应 Harness 职责（decide()：role 必须 ∈ actor.harness_roles，
+#      仅来自 ProjectRoleGrant 显式授予，ADMIN 不隐式升级——FR-03）。
+#   项目是本回合 bootstrap 新建、初始仅 admin 一人，故先以 admin（项目 ADMIN）
+#   登记两名审批成员（role=APPROVER）并授予 Harness 职责（两步，缺一不可）。
+#   两名审批人各授两项职责：准备单风险等级（P0/P1/P2）运行时才由 PDP 判定，
+#   槽位组合不定，预授两项保证 required_roles[0]/[1] 都能落到人；
+#   四眼判定逻辑（禁自批 / 槽位唯一 / 一人一槽）不受影响。
+# ---------------------------------------------------------------------------
+$approverSubjects = @('reviewer.data@demo.local', 'reviewer.security@demo.local')
+$approverHarnessRoles = @('DATA_APPROVER', 'SECURITY_APPROVER')
+foreach ($approver in $approverSubjects) {
+    $member = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/members" -Body @{
+        subject = $approver
+        role    = 'APPROVER'
+    }
+    if ($member) { Write-Ok ("审批成员 {0} 已登记（role=APPROVER）" -f $approver) }
+    foreach ($harnessRole in $approverHarnessRoles) {
+        $grant = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/role-grants" -Body @{
+            subject = $approver
+            role    = $harnessRole
+        }
+        if ($grant) { Write-Ok ("审批成员 {0} 已授予 Harness 职责 {1}" -f $approver, $harnessRole) }
+    }
+}
+
+# 操作员预备（AC-05 前置，非演示步骤）：API-10 commit 仅 OPERATOR 可提交
+#（require_actor_for_project + OPERATOR Harness 职责，ADMIN 不隐式升级）。
+#操作员须同时是项目成员（member_role 非空）——成员 + 职责两步。
+$operatorSubject = 'operator@demo.local'
+$operatorMember = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/members" -Body @{
+    subject = $operatorSubject
+    role    = 'DATA_ENGINEER'
+}
+if ($operatorMember) { Write-Ok ("操作员 {0} 已登记（role=DATA_ENGINEER）" -f $operatorSubject) }
+$operatorGrant = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/role-grants" -Body @{
+    subject = $operatorSubject
+    role    = 'OPERATOR'
+}
+if ($operatorGrant) { Write-Ok ("操作员 {0} 已授予 Harness 职责 OPERATOR" -f $operatorSubject) }
 
 # ---------------------------------------------------------------------------
 # STEP 02 — 登记数据连接（源 MySQL / 目标 Doris）
@@ -161,18 +206,18 @@ Write-Step '登记数据连接（POST /projects/{id}/connections ×2）'
 $sourceConn = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/connections" -Body @{
     name           = 'mysql_orders'
     connector_type = 'MYSQL'
-    host           = 'mysql'
-    port           = 3306
-    database       = 'source_db'
+    host           = '127.0.0.1'   # 宿主机 uv run 后端按发布端口直连；原 'mysql' 是容器网络名（仅容器内可解析），非脚本逻辑 bug
+    port           = 13306         # 容器 3306 改发 13306：宿主机 127.0.0.1:3306 被 WSL relay 占用，直连会被劫走
+    database_name  = 'source_db'
     username       = 'demo_reader'
     password       = 'demo_reader_pwd_2026'
 }
 $sinkConn = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/connections" -Body @{
     name           = 'doris_dw'
     connector_type = 'DORIS'
-    host           = 'doris'
+    host           = '127.0.0.1'   # 同上：宿主机后端直连 Doris FE 发布端口 9030；原 'doris' 是容器网络名（compose 服务名 doris-fe 亦仅容器内可解析）
     port           = 9030
-    database       = 'doris_dw'
+    database_name  = 'doris_dw'
     username       = 'demo_writer'
     password       = 'demo_writer_pwd_2026'
 }
@@ -180,14 +225,41 @@ if ($sourceConn) { Write-Ok ("SOURCE 连接 {0}（凭据已加密托管，响应
 if ($sinkConn) { Write-Ok ("SINK 连接 {0}" -f $sinkConn.id) }
 
 # ---------------------------------------------------------------------------
+# Profile 探查预备（AC-03 前置，非演示步骤）：生成运行（API-05）接收的是
+#   source_profile_ids / sink_profile_ids（Profile ID 列表），不是连接 ID；
+#   且生成图要求双 Profile 齐备才会收敛（缺一即 WAITING_INPUT 挂起澄清）。
+#   故先对两条连接各做一次表级只读探查（API-04）；表名与 seed / doris-init
+#   实际一致：source=source_db.orders，sink=doris_dw.order_wide。
+# ---------------------------------------------------------------------------
+$sourceProfile = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/profiles" -Body @{
+    connection_id = $sourceConn.id
+    endpoint_role = 'SOURCE'
+    schema_name   = 'source_db'
+    table_name    = 'orders'
+}
+$sinkProfile = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/profiles" -Body @{
+    connection_id = $sinkConn.id
+    endpoint_role = 'SINK'
+    schema_name   = 'doris_dw'
+    table_name    = 'order_wide'
+}
+if ($sourceProfile) { Write-Ok ("SOURCE Profile {0}（source_db.orders，行数≈{1}）" -f $sourceProfile.id, $sourceProfile.approximate_row_count) }
+if ($sinkProfile) { Write-Ok ("SINK Profile {0}（doris_dw.order_wide，Doris 走 MySQL 协议通道）" -f $sinkProfile.id) }
+
+# ---------------------------------------------------------------------------
 # STEP 03 — 连通性测试
 # ---------------------------------------------------------------------------
 Write-Step '连通性测试（POST /connections/{id}/test）'
+# 旁注（S3 禁止事项 15，预期内失败、非回归）：DORIS 连接器无探针实装，
+# /test 对 doris_dw 返回 422 BIZ_422_CONNECTOR_UNSUPPORTED 是**策略判决**——
+# 探针通道只覆盖 POSTGRESQL/MYSQL（Doris 探针另行排期）。Doris 数据面连通性
+# 已由 SINK Profile 探查（information_schema 走 MySQL 协议，见上方预备步）
+# 与后续真实执行双重证明，此处 [FAIL] 原文保留、不伪装为通过。
 foreach ($conn in @($sourceConn, $sinkConn)) {
     if (-not $conn) { continue }
     $test = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/connections/$($conn.id)/test"
     if ($test) {
-        Write-Ok ("{0} → status={1}（{2} ms）" -f $conn.name, $test.status, $test.latency_ms)
+        Write-Ok ("{0} → status={1}（受理于 {2}）" -f $conn.name, $test.status, $test.started_at)
     }
 }
 
@@ -198,13 +270,13 @@ Write-Step '发起生成（POST /projects/{id}/agent-runs）'
 $requirement = '把 MySQL orders 增量同步到 Doris 宽表 order_wide，金额分转元，地址字段做归一化，脏数据走错误分流。'
 $run = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/agent-runs" -Body @{
     requirement       = $requirement
-    source_profile_id = $sourceConn.id
-    sink_profile_id   = $sinkConn.id
+    source_profile_ids = @($sourceProfile.id)
+    sink_profile_ids   = @($sinkProfile.id)
 }
 if ($run) {
     Write-Ok ("AgentRun {0} · status={1} · thread_id={2}" -f $run.id, $run.status, $run.thread_id)
-    if ($run.clarify_question) {
-        Write-Info ("澄清问题：{0}" -f $run.clarify_question)
+    if ($run.pending_question) {
+        Write-Info ("澄清问题：{0}" -f $run.pending_question)
     }
 }
 
@@ -229,8 +301,8 @@ if ($run -and $run.status -eq 'WAITING_INPUT') {
 # ---------------------------------------------------------------------------
 Write-Step '读取候选产物与确定性门禁（GET /pipeline-versions/{id}）'
 $version = $null
-if ($run -and $run.pipeline_id) {
-    $version = Invoke-Api -Method GET -Path "/api/v1/pipeline-versions/$($run.pipeline_id)"
+if ($run -and $run.pipeline_version_id) {
+    $version = Invoke-Api -Method GET -Path "/api/v1/pipeline-versions/$($run.pipeline_version_id)"
 }
 if ($version) {
     Write-Ok ("版本 V{0} · status={1} · artifact_sha256={2}…" -f $version.version_no, $version.status, $version.artifact_sha256.Substring(0, 12))
@@ -239,7 +311,7 @@ if ($version) {
         ($version.hocon -split "`n" | Select-Object -First 3) | ForEach-Object { Write-Host ("         {0}" -f $_) -ForegroundColor DarkGray }
     }
 } else {
-    Write-Warn '未取到版本（pipeline_id 可能未回填）；后续步骤以演示态继续'
+    Write-Warn '未取到版本（pipeline_version_id 可能未回填）；后续步骤以演示态继续'
 }
 
 # ---------------------------------------------------------------------------
@@ -270,7 +342,8 @@ $prep = $null
 if ($version) {
     $prep = Invoke-Api -Method POST -Path "/api/v1/projects/$projectId/preparations" -Body @{
         pipeline_version_id = $version.id
-        target_environment  = 'doris_dw'
+        idempotency_key     = [guid]::NewGuid().ToString()
+        environment         = 'dev'
     }
 }
 if ($prep) {
@@ -283,9 +356,14 @@ if ($prep) {
 # ---------------------------------------------------------------------------
 Write-Step '四眼审批 approve（POST /preparations/{id}/decisions ×2）'
 if ($prep) {
-    # 申请人 = 当前 actor；DB 双唯一约束禁自批 → 这里显式换身份模拟第二名审批人
-    $approverA = '22222222-2222-2222-2222-222222222222'
-    $approverB = '33333333-3333-3333-3333-333333333333'
+    if (-not $prep.required_roles -or $prep.required_roles.Count -eq 0) {
+        # PDP 评级 P3（required_approvals=0）：无审批槽位，准备单直接 READY；
+        # 四眼机制在 P0/P1/P2 才激活——策略判决如此，非流程跳过（不放宽门禁）
+        Write-Info ("PDP 评级 {0} · required_approvals={1}：无审批槽位，四眼审批本回合不激活" -f $prep.risk_level, $prep.required_approvals)
+    } else {
+    # 申请人 = 当前 actor；DB 双唯一约束禁自批 → 换身份模拟第二名审批人。具名审批人为 bootstrap 后预登记的两名项目成员（见上方「审批环境预备」：成员登记 + Harness 职责授予两步，缺一不可）；原硬编码 UUID 既非 subject 也非项目成员，后端按 subject 解析必然失败（FR-65 / FR-03）。
+    $approverA = $approverSubjects[0]
+    $approverB = $approverSubjects[1]
     $decisionA = Invoke-Api -Method POST -Path "/api/v1/preparations/$($prep.id)/decisions" -ActorId $approverA -Body @{
         role = $prep.required_roles[0]; decision = 'APPROVE'; reason = '数据口径已核对'
     }
@@ -296,6 +374,7 @@ if ($prep) {
         }
         if ($decisionB) { Write-Ok ("{0} 已批准" -f $prep.required_roles[1]) }
     }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -304,11 +383,12 @@ if ($prep) {
 Write-Step 'Commit（POST /preparations/{id}/commit → Ed25519 单次 Capability，TTL 300s）'
 $executionRunId = $null
 if ($prep) {
-    $commit = Invoke-Api -Method POST -Path "/api/v1/preparations/$($prep.id)/commit"
+    $commit = Invoke-Api -Method POST -Path "/api/v1/preparations/$($prep.id)/commit" -ActorId $operatorSubject
     if ($commit) {
-        $executionRunId = $commit.execution_run_id
+        # CommitResponse 契约字段（harness/schemas.py）：run_id / token_id / expires_at
+        $executionRunId = $commit.run_id
         Write-Ok ("ExecutionRun {0}（QUEUED）" -f $executionRunId)
-        Write-Ok ("Capability {0} · 过期于 {1}" -f $commit.capability_token_id, $commit.capability_expires_at)
+        Write-Ok ("Capability {0} · 过期于 {1}" -f $commit.token_id, $commit.expires_at)
     }
 }
 Write-Mock 'SeaTunnel REST 提交作业为 mock（S10 引擎口径：人类裁决 C）——其余步骤真实执行'
@@ -320,17 +400,23 @@ Write-Step '执行监控与质量报告（GET /executions/{id} + /quality-report
 if ($executionRunId) {
     $execution = Invoke-Api -Method GET -Path "/api/v1/executions/$executionRunId"
     if ($execution) {
-        Write-Ok ("执行 status={0} · 源行数={1} · 目标行数={2}" -f $execution.status, $execution.source_rows, $execution.target_rows)
-        if ($execution.supervision_action) {
-            Write-Info ("监督动作={0} · risk={1}" -f $execution.supervision_action, $execution.supervision_risk)
+        # ExecutionDetailResponse 契约字段（execution/schemas.py）：sink_rows / failure_*；
+        # supervision_snapshot 当前恒 None（S7 遗留硬编码，S8 落表后未回填，已记异常清单）
+        if ($execution.status -eq 'FAILED') {
+            Write-Fail ("执行失败：category={0} · stage={1} · {2}" -f $execution.failure_category, $execution.failure_stage, $execution.diagnosis)
+        } else {
+            Write-Ok ("执行 status={0} · 源行数={1} · 目标行数={2}" -f $execution.status, $execution.source_rows, $execution.sink_rows)
+        }
+        if ($execution.supervision_snapshot) {
+            Write-Info ("监督快照：{0}" -f ($execution.supervision_snapshot | ConvertTo-Json -Compress -Depth 6))
         }
     }
     $quality = Invoke-Api -Method GET -Path "/api/v1/executions/$executionRunId/quality-report"
     if ($quality) {
         Write-Ok ("质量报告 status={0} · 总 {1} / 通过 {2} / 拒绝 {3} · 拒绝率 {4:P2}" -f `
             $quality.status, $quality.total_rows, $quality.passed_rows, $quality.rejected_rows, $quality.reject_rate)
-        if ($quality.error_code_distribution) {
-            Write-Info ("错误码分布：{0}" -f ($quality.error_code_distribution | ConvertTo-Json -Compress))
+        if ($quality.valid_sink -or $quality.error_sink) {
+            Write-Info ("好数据落表 {0} · 脏数据落表 {1}" -f $quality.valid_sink, $quality.error_sink)
         }
     }
 }

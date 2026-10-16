@@ -12,6 +12,63 @@ from etl_agent.profiles import introspect, statistics
 from etl_agent.secrets.factory import create_provider
 
 
+def test_introspect_doris_type_registered() -> None:
+    """Doris 纳入可内省类型（最小实现：FE 3.x 讲 MySQL 协议，走 MySQL 通道）。"""
+    assert "DORIS" in introspect.INTROSPECTABLE_TYPES
+
+
+async def test_open_source_doris_uses_mysql_channel(monkeypatch) -> None:
+    """DORIS 连接的只读会话必须走 MySQL 通道（fix/S10-demo-script 最小实现）。"""
+    from contextlib import asynccontextmanager
+
+    from etl_agent.infrastructure.models import DataConnection
+
+    sentinel = object()
+    opened: list[str] = []
+
+    @asynccontextmanager
+    async def _fake_mysql(connection: DataConnection, credentials: object) -> object:
+        opened.append(connection.connector_type)
+        yield sentinel
+
+    monkeypatch.setattr(introspect, "_open_mysql", _fake_mysql)
+    connection = DataConnection(
+        name="doris-spy",
+        connector_type="DORIS",
+        host="127.0.0.1",
+        port=9030,
+        database_name="doris_dw",
+    )
+    async with introspect.open_source(connection, {}) as source:
+        assert source is sentinel
+    assert opened == ["DORIS"]
+
+
+class _FakeCursor:
+    """返回大写列名行的假 DictCursor（模拟 MySQL 8.4 information_schema 行为）。"""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    async def execute(self, sql: str, params: object = None) -> None:
+        return None
+
+    async def fetchall(self) -> list[dict[str, object]]:
+        return self._rows
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_mysql_session_lowercases_column_keys() -> None:
+    """MySQL 通道统一小写键名：8.4 的 COLUMN_NAME 与 Doris 的 column_name 同构。"""
+    from etl_agent.profiles.introspect import _MySQLSession
+
+    session = _MySQLSession(raw=None, cursor=_FakeCursor([{"COLUMN_NAME": "order_id"}]))
+    rows = await session.fetch("SELECT 1")
+    assert rows == [{"column_name": "order_id"}]
+
+
 def test_introspect_pg_catalog_only() -> None:
     """只读系统目录：语句全部命中 information_schema / pg_catalog，且无全表 COUNT（FR-12）。"""
     statements = introspect.PG_CATALOG_STATEMENTS + introspect.MYSQL_CATALOG_STATEMENTS

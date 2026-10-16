@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.infrastructure.database import engine
 from etl_agent.infrastructure.models import DataProfile
 from etl_agent.profiles.masking import MASK_TOKEN
 from tests.helpers import SAMPLE_EMAILS, SeededWorkspace, dev_pg_credentials, make_client
@@ -27,12 +28,17 @@ async def test_zero_plaintext_profile_response(
     connection, _ = seeded_connection
     password = str(dev_pg_credentials()["password"])
 
-    # 自证：样本明文确实存在于源表（否则下面的「不含明文」断言毫无意义）
-    stored = (
-        await db_session.execute(
-            text(f'SELECT customer_email FROM public."{profile_source_table}" ORDER BY id')
-        )
-    ).scalars().all()
+    # 自证：样本明文确实存在于源表（否则下面的「不含明文」断言毫无意义）。
+    # 走独立连接读已提交数据：经 db_session 读会把 ACCESS SHARE 锁持进外层事务，
+    # 而 create_profile 路由的 commit 在 savepoint 夹具下被转译为 RELEASE SAVEPOINT、
+    # 锁被洗进外层事务，随后 teardown 的 savepoint 级 rollback 释放不掉，
+    # profile_source_table 的 DROP 将互等致死（fix/S10-demo-script 联调回归）。
+    async with engine.begin() as conn:
+        stored = (
+            await conn.execute(
+                text(f'SELECT customer_email FROM public."{profile_source_table}" ORDER BY id')
+            )
+        ).scalars().all()
     assert list(stored) == list(SAMPLE_EMAILS)
 
     async with make_client(app) as client:
