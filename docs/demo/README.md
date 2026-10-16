@@ -98,29 +98,29 @@ Vite 已配置 `/api` 与 `/health` 代理到 `http://127.0.0.1:8000`，无需�
 pwsh -File infra/e2e/demo-scenario-a.ps1
 ```
 
-脚本按 12 步推进，每步打印事实：
+脚本按 **13 步**推进，每步打印事实（run17 起「澄清恢复」独立成步，原 12 步版本见 `演示回放.md` §8.3）：
 
-| 步骤 | 动作 | 观察点 | 对应 AC |
+| 步 | 动作 | 观察点 | 对应 AC |
 | --- | --- | --- | --- |
-| 00 | `GET /health` | 后端在线、Worker 摘要 | — |
-| 01 | `POST /bootstrap` | `project_id` / `admin_user_id`（幂等：409 可重入） | — |
-| 02 | `POST /connections` ×2 | 凭据**只传不回显**，响应零明文 | AC-02 |
-| 03 | `POST /connections/{id}/test` | 连通性状态回写 | — |
-| 04 | `POST /agent-runs` | AgentRun 创建，可能返回 `WAITING_INPUT` | AC-03 |
-| 05 | `POST /agent-runs/{id}/messages` | **同 `thread_id` 复用**（不是新起线程） | **AC-03** |
-| 06 | `GET /pipeline-versions/{id}` | EtlPlan / HOCON 候选 + `artifact_sha256` | — |
-| 07 | `POST /pipeline-versions/{id}/freeze` | 14 项门禁全 PASS 才冻结 | **AC-09** |
-| 08 | `POST /preparations` | 风险等级 / 需批准人数 / 影响报告 | AC-05 |
-| 09 | `POST /preparations/{id}/decisions` ×2 | 四眼双人批准，**换身份**（禁自批） | **AC-01** |
-| 10 | `POST /preparations/{id}/commit` | Ed25519 单次 Capability，TTL 300 s；`[MOCK]` 提交 | **AC-05** |
-| 11 | `GET /executions/{id}` + `/quality-report` | 监督动作、四态质量报告、错误码分布 | **AC-07** |
-| 12 | `GET /evidence-stream/verify` | `valid=true` + `head_hash` | **AC-09** |
+| 01 | `GET /health` | 后端在线、Worker 摘要 | — |
+| 02 | `POST /bootstrap` | `project_id` / actor subject（幂等：409 可重入）；审批/操作员环境预备 | — |
+| 03 | `POST /connections` ×2 + `POST /profiles` ×2 | 凭据**只传不回显**；双 Profile 探查（Doris 走 MySQL 协议通道） | AC-02 |
+| 04 | `POST /connections/{id}/test` | mysql 受理 TESTING；Doris 422 为预期（无探针实装） | — |
+| 05 | `POST /agent-runs`（**只传 requirement**） | 缺参 → `WAITING_INPUT` + `pending_question` | **AC-03** |
+| 06 | `POST /agent-runs/{id}/messages` ×2 | 两步补参（来源端→目标端）→ 收敛；**同 `thread_id` 复用** | **AC-03** |
+| 07 | `GET /pipeline-versions/{id}` | EtlPlan / HOCON 候选 + `artifact_sha256` | — |
+| 08 | （版本冻结）14 项门禁 | 全 PASS 才冻结（`VALIDATED`） | **AC-09** |
+| 09 | `POST /preparations`（含 `budget` 超限） | 命中 P1 → `risk=P1 · required_approvals=1 · required_roles=[SECURITY_APPROVER]` | AC-05 |
+| 10 | `POST /preparations/{id}/decisions`（按 required_roles） | 换身份审批（**禁自批**）→ `READY` | **AC-01** |
+| 11 | `POST /preparations/{id}/commit` | Ed25519 单次 Capability，TTL 300 s；`[MOCK]` 提交 | **AC-05** |
+| 12 | `GET /executions/{id}` + `/quality-report` | 执行终态（轮询）、四态质量报告、落表 | **AC-07** |
+| 13 | `GET /evidence-stream/verify` | `valid=true` + `event_count` + `head_hash` | **AC-09** |
 
-> **AC 覆盖口径（run15 验收实测，详见 `演示回放.md` 第 8.4 节）**：本轮 PDP 判 P3、
-> 四眼审批未激活， AC-01/AC-03 **未覆盖**、AC-05 **部分**（commit 已走）；AC-04 全覆盖
-> （门禁 14/14）；AC-06/07/10 为 mock 口径下的部分覆盖（引擎合成指标、Swap 不执行）；
-> AC-09（Benchmark 证据覆盖率）为独立任务。**AC-01/AC-03/AC-05 的完整覆盖见后续
-> fix/S10-demo-coverage PR。**
+> **AC 覆盖口径（run17 验收实测，详见 `演示回放.md` 第 8.4 / 9 节）**：
+> AC-04 ✅（门禁 14/14）；**AC-03 ✅ / AC-05 ✅（run17 补齐**：缺参→澄清→两步同线程恢复；
+> P1 预算超限→审批激活→commit 全链路）；**AC-01 ⚠️ 部分**（run17 补齐审批激活 + 禁自批 +
+> 槽位唯一 + 票数达标；「双人不同槽」子项仅 P0 可达，由场景 B 覆盖）；
+> AC-06/07/10 为 mock 口径下的部分覆盖（引擎合成指标、Swap 不执行）；AC-09 为独立任务。
 
 ---
 
