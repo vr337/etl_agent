@@ -1,6 +1,9 @@
 name: etl_agent
 
 services:
+  # ============================================================
+  # 基础层（S1）：PostgreSQL + Redis
+  # ============================================================
   postgres:
     image: postgres:17-alpine
     container_name: etl_agent_postgres
@@ -38,10 +41,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-  # ============ S7：控制面 API 容器化 ============
+
+  # ============================================================
+  # S7 控制面 API 容器化
+  # ============================================================
   # 容器内寻址覆盖：`infra/.env` 是**开发主机**口径（PG/Redis 在 localhost），
-  # 容器网络里必须按 compose 服务名解析，故此处以 `environment` 覆盖（env_file 先加载、
-  # environment 后覆盖）。这是 compose 侧的部署事实，不需要也不允许改 `infra/.env`。
+  # 容器网络里必须按 compose 服务名解析，故此处以 `environment` 覆盖
+  #（env_file 先加载、environment 后覆盖）。这是 compose 侧的部署事实，
+  # 不需要也不允许改 `infra/.env`。
   api:
     build:
       context: ..
@@ -65,7 +72,9 @@ services:
       - "8000:8000"
     profiles: ["app"]
 
-  # ============ S7：Celery Worker ============
+  # ============================================================
+  # S7 Celery Worker
+  # ============================================================
   # 无容器级 healthcheck：Worker 存活由 `worker_heartbeats`（10s 上报 / 35s 判失活）
   # 与 `/health` 的 Worker 摘要承载（FR-38）——那是比 `pgrep` 更可信的业务级信号。
   worker:
@@ -83,6 +92,10 @@ services:
       ETL_AGENT_REDIS_PORT: "6379"
       ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
       ETL_AGENT_FILE_ASSET_ROOT: /data/file-assets
+      # 引擎通道选型（F5：S10 演示口径 mock，人类裁决 C）——check/submit 为演示态
+      # 合成指标，其余链路全真实执行。生产部署删掉此行使 config.py 默认 real 生效；
+      # validate_worker 双保险（ENV=prod + mock 拒绝启动）。worker 启动日志打印实际模式。
+      ETL_AGENT_ENGINE_MODE: mock
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,7 +105,9 @@ services:
       - D:/Documents/Docker/volume/app/etl_agent/file_assets:/data/file-assets:ro
     profiles: ["exec"]
 
-  # ============ S7：Celery Beat ============
+  # ============================================================
+  # S7 Celery Beat
+  # ============================================================
   beat:
     build:
       context: ..
@@ -107,18 +122,24 @@ services:
       ETL_AGENT_REDIS_HOST: redis
       ETL_AGENT_REDIS_PORT: "6379"
       ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
+      # 与 worker 同值（F5）：beat 不建引擎客户端，仅保持启动日志口径一致
+      ETL_AGENT_ENGINE_MODE: mock
     depends_on:
       redis:
         condition: service_healthy
     profiles: ["exec"]
 
-  # ============ S7：SeaTunnel Zeta ============
+  # ============================================================
+  # S7 SeaTunnel Zeta
+  # ============================================================
   # 启动命令与挂载路径按镜像实测对齐（flowpilot/seatunnel:2.3.13）：
   # - 镜像默认 CMD 是 `bash`，不指定 command 会立即退出并进入 restart 循环；
   #   `bin/seatunnel-cluster.sh`（前台）启动 master+worker 单节点并监听 REST :8080；
   # - 镜像配置目录是 `/opt/seatunnel/config`（不是 `conf`），挂载点必须写对，
   #   否则挂了个没人读的空目录（配置静默不生效）。
   # healthcheck 用镜像自带的 python3（镜像内无 curl/wget）。
+  #
+  # 【注】S10 走 mock 引擎；本服务当前仅用于「启动健康探测」，不参与真实数据搬运。
   seatunnel:
     image: flowpilot/seatunnel:2.3.13
     container_name: etl_agent_seatunnel
@@ -133,10 +154,97 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/', timeout=5).status == 200 else 1)\"",
+          'python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(''http://localhost:8080/'', timeout=5).status == 200 else 1)"',
         ]
       interval: 15s
       timeout: 10s
       retries: 10
       start_period: 60s
     profiles: ["exec", "e2e"]
+
+  # ============================================================
+  # S10 端到端演示：MySQL 源端
+  # ============================================================
+  mysql:
+    image: mysql:8.4
+    container_name: etl_agent_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: dev_root_2026
+      MYSQL_DATABASE: source_db
+      TZ: Asia/Shanghai
+    volumes:
+      - ./e2e/mysql-init:/docker-entrypoint-initdb.d:ro
+      - D:/Documents/Docker/volume/app/etl_agent/mysql_data:/var/lib/mysql
+    ports:
+      # 13306：宿主机 WSL relay（wslrelay.exe）占用 127.0.0.1:3306，
+      # 直发 3306 的连接会被 WSL 服务劫走；改发 13306 规避宿主端口冲突
+      - "13306:3306"
+    profiles: ["e2e"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pdev_root_2026"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ============================================================
+  # S10 端到端演示：Doris FE（前端节点）
+  # ============================================================
+  # 双网络：
+  # - `etl_agent_e2e`：Doris FE/BE 内部通信（固定 IP 172.20.80.2）
+  # - `default`：让 worker / seatunnel 等 default 网络内的容器能按服务名访问
+  doris-fe:
+    image: apache/doris:fe-3.0.8
+    container_name: etl_agent_doris_fe
+    restart: unless-stopped
+    environment:
+      FE_SERVERS: "fe1:172.20.80.2:9010"
+      FE_ID: "1"
+    volumes:
+      - D:/Documents/Docker/volume/app/etl_agent/doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - D:/Documents/Docker/volume/app/etl_agent/doris_fe_log:/opt/apache-doris/fe/log
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+      - "9010:9010"
+    networks:
+      default: {}
+      etl_agent_e2e:
+        ipv4_address: 172.20.80.2
+    profiles: ["e2e"]
+
+  # ============================================================
+  # S10 端到端演示：Doris BE（后端节点）
+  # ============================================================
+  doris-be:
+    image: apache/doris:be-3.0.8
+    container_name: etl_agent_doris_be
+    restart: unless-stopped
+    environment:
+      FE_SERVERS: "fe1:172.20.80.2:9010"
+      BE_ADDR: "172.20.80.3:9050"
+    volumes:
+      - D:/Documents/Docker/volume/app/etl_agent/doris_be_storage:/opt/apache-doris/be/storage
+      - D:/Documents/Docker/volume/app/etl_agent/doris_be_log:/opt/apache-doris/be/log
+    ports:
+      - "8040:8040"
+      - "9050:9050"
+    depends_on:
+      - doris-fe
+    networks:
+      default: {}
+      etl_agent_e2e:
+        ipv4_address: 172.20.80.3
+    profiles: ["e2e"]
+
+# ============================================================
+# 顶层网络定义（关键：doris-fe / doris-be 引用了 etl_agent_e2e）
+# ============================================================
+networks:
+  default:
+    name: etl_agent_default
+  etl_agent_e2e:
+    name: etl_agent_e2e
+    ipam:
+      config:
+        - subnet: 172.20.80.0/24

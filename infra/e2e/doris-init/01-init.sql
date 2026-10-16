@@ -44,15 +44,18 @@ DROP TABLE IF EXISTS order_wide_shadow;
 CREATE TABLE order_wide_shadow LIKE order_wide;
 
 -- ---- 质量分流表：只存聚合事实，不回原始值（M-K 边界） ----
+-- 注意：DUPLICATE KEY (run_id, error_code) 要求 KEY 列是 schema 的有序前缀，
+--   故 error_code 必须排在第 2 位（Doris 报错 1105 Key columns should be a
+--   ordered prefix of the schema），调整列序时勿把 error_code 移出前两列。
 DROP TABLE IF EXISTS etl_quality_summary;
 
 CREATE TABLE etl_quality_summary (
   run_id        VARCHAR(64)  NOT NULL COMMENT '执行标识',
+  error_code    VARCHAR(64)  NOT NULL COMMENT '错误码（如 QUALITY_NOT_NULL_AMOUNT）',
   total_rows    BIGINT       NOT NULL COMMENT '总行数',
   passed_rows   BIGINT       NOT NULL COMMENT '通过行数',
   rejected_rows BIGINT       NOT NULL COMMENT '拒绝行数',
   reject_rate   DOUBLE       NOT NULL COMMENT '拒绝率 = rejected / total',
-  error_code    VARCHAR(64)  NOT NULL COMMENT '错误码（如 QUALITY_NOT_NULL_AMOUNT）',
   error_count   BIGINT       NOT NULL COMMENT '该错误码命中行数',
   occurred_at   DATETIME     NOT NULL COMMENT '报告时间'
 )
