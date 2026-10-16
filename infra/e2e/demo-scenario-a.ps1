@@ -391,7 +391,15 @@ if ($prep) {
         Write-Ok ("Capability {0} · 过期于 {1}" -f $commit.token_id, $commit.expires_at)
     }
 }
-Write-Mock 'SeaTunnel REST 提交作业为 mock（S10 引擎口径：人类裁决 C）——其余步骤真实执行'
+# 引擎通道标注与 engine-mode 值绑定（F5：不是硬编码字符串）：
+# 取会话环境变量 ETL_AGENT_ENGINE_MODE（与 worker compose 的 ETL_AGENT_ENGINE_MODE
+# 同一变量；两者分属不同进程，一致性由演示 Runbook 约定 + worker 启动日志核对）。
+$engineMode = if ($env:ETL_AGENT_ENGINE_MODE) { $env:ETL_AGENT_ENGINE_MODE } else { 'real' }
+if ($engineMode -eq 'mock') {
+    Write-Mock ("engine_mode=mock（人类裁决 C）：引擎 check/submit 为演示态合成指标——其余（后端 API / 审批 / HOCON 生成 / 质量契约判定 / 证据链路）全部真实执行" )
+} else {
+    Write-Ok ("engine_mode={0}：真实引擎执行" -f $engineMode)
+}
 
 # ---------------------------------------------------------------------------
 # STEP 11 — 执行监控与质量报告（AC-07）

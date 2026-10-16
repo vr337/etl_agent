@@ -14,10 +14,15 @@ Broker 与结果后端同为 Redis（SPEC 2.1：Celery Broker、结果后端、�
 """
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
 from celery.schedules import schedule as celery_schedule
+from celery.signals import worker_init
 
 from etl_agent.config import settings
+
+logger = logging.getLogger("etl_agent.worker")
 
 app = Celery("etl_agent", broker=settings.resolved_redis_url, backend=settings.resolved_redis_url)
 app.conf.update(
@@ -30,5 +35,19 @@ app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
 )
+
+
+@worker_init.connect
+def _log_engine_mode(**_kwargs: object) -> None:
+    """Worker 启动时打印引擎通道选型（F5：可审、可关）。
+
+    engine_mode=real 时后面附引擎地址，便于核对「演示声称 mock」与「worker 实际
+    通道」是否一致——两者分属不同进程配置，启动日志是事后核对的唯一锚点。
+    """
+    if settings.is_mock_engine:
+        logger.info("worker 启动：engine_mode=mock（演示态合成指标：check/submit 为 mock，其余链路真实执行）")
+    else:
+        logger.info("worker 启动：engine_mode=real（受管 SeaTunnel 执行：url=%s）", settings.seatunnel_url)
+
 
 __all__ = ["app", "celery_schedule"]
