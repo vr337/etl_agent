@@ -63,11 +63,18 @@ class AgentRunListView(BaseModel):
     `pipeline_id` 经 `pipeline_version_id → PipelineVersion.pipeline_id` 派生（agent_runs
     无 pipeline_id 列）。遥测字段与 `AgentRunResponse` 同源，**不含 Prompt / 候选正文**
     （FR-67 红线：业务库禁存这两类字段）。
+
+    AMEND-010（追加件，fix/S10-console-refresh-defects）：追加 `pipeline_version_id`——
+    AMEND-009 只补了 create/resume 出参，列表出参仍缺版本 id，前端 Studio 只能拿
+    `pipeline_id` 去试 `GET /pipeline-versions/{id}`（必 404 回退演示态）。本字段为
+    加法、非空（agent_runs.pipeline_version_id 是 NOT NULL 外键），前端可直接取用。
     """
 
     id: uuid.UUID
     thread_id: str
     pipeline_id: uuid.UUID
+    # AMEND-010：本次运行绑定的版本 id（列表直接可读，免去「按 pipeline 猜版本」）
+    pipeline_version_id: uuid.UUID
     status: str
     repair_count: int = 0
     clarify_question: str | None = None

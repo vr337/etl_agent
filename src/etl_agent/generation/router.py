@@ -94,6 +94,8 @@ async def list_agent_runs(
             id=run.id,
             thread_id=run.thread_id,
             pipeline_id=pipeline_id,
+            # AMEND-010：列表出参补版本 id（前端 Studio 直取，免去按 pipeline 猜版本）
+            pipeline_version_id=run.pipeline_version_id,
             status=run.status,
             repair_count=run.generation_repair_count or 0,
             clarify_question=run.pending_question,

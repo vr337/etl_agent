@@ -116,7 +116,13 @@ async function load() {
   }
 
   const run = runs.value[0]
-  const versionId = run?.pipeline_id ? await resolveVersionId(run.pipeline_id) : null
+  // AMEND-010：列表出参直接携带本次运行绑定的版本 id，优先直取；
+  // 仅当后端未回该字段（历史版本）才回退 resolveVersionId 兜底。
+  const versionId = run?.pipeline_version_id
+    ? run.pipeline_version_id
+    : run?.pipeline_id
+      ? await resolveVersionId(run.pipeline_id)
+      : null
   if (versionId) {
     await loadVersion(versionId)
   } else {
@@ -124,7 +130,7 @@ async function load() {
   }
 }
 
-/** 由 pipeline_id 取最新版本（后端无「列版本」端点，故从管线详情回退到 404 容忍）。 */
+/** 降级兜底：按 pipeline_id 试取版本（老后端无 pipeline_version_id 时的历史兼容路径）。 */
 async function resolveVersionId(pipelineId: string): Promise<string | null> {
   try {
     const version = await getVersion(pipelineId)
