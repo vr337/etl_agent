@@ -177,3 +177,17 @@
 | AMEND-008 | 审计证据与评测安全进化域错误码补充 | Accepted | SPEC v1.0.3-Baseline 6.4 |
 | AMEND-009 | 生成运行响应追加 pipeline_version_id（API-05/06 出参） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05/06） |
 | AMEND-010 | 生成运行**列表**出参追加 pipeline_version_id（API-05 列表） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05 列表） |
+
+## 五、操作日志（破例与流程偏差）
+
+### 2026-10-16：文档措辞变更破例直推 master（`381b5a2`）
+
+- **内容**：`docs/demo/演示回放.md` §8.9 与 `docs/stages/assets/S10-demo-a/README.md`
+  的「Studio 未截图」口径改为简明版（人类指定措辞：PR #15 已修 / 下次取证补至 6 张）。
+- **性质**：**非 Baseline 的文档措辞**、极小改动（2 文件 +9/−11，无代码 / 契约 /
+  配置 / 密钥影响；diff 仅两个 hunk）。
+- **经过**：当轮人类合并 PR #15 后工作区停在 `master`，会话侧误判为「更新 PR #15」
+  而直接 `commit + push` 到 master；人类裁决**保留**（内容正确）。
+- **口径澄清（防复发）**：**本条不构成「可以随便推 master」的先例**。自本条起：
+  **所有改动（含文档、单行）一律走 PR，除非人类明确说「这次直推」。**
+- **关联**：PR #16（过期状态引用清理 + 本条登记）。
