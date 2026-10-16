@@ -28,6 +28,8 @@
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 独立排期 | **T-AUDIT-01** |
+| S10 | 4 | 影子表执行通道为 Logging，不建真实 Doris 表 | 独立排期 | **T-SHADOW-01** |
+| S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
 
 ## 三、独立运维事项
 
@@ -109,6 +111,34 @@
   注意与 T-COMMIT-01 同族风险），补路由级 spy 测试；`execution/router.py`
   详情端 `supervision_snapshot` 硬编码 None（S7 遗留）一并评估回填
 - **关联**：fix/S10-demo-script（F3 判定结论）；docs/spec/amendments/AMEND-008
+
+### T-SHADOW-01：影子表执行通道为 Logging，不建真实 Doris 表
+
+- **状态**：Open（独立排期）
+- **发现**：S10 场景 A 修复后重跑（2026-10-16，execution.shadow_ready 事件只有日志、
+  Doris 侧 `order_wide_shadow` 无任何 worker 侧 DDL 痕迹）
+- **现象**：`consume_outbox.scan_outbox_once` 的 `shadow_executor` 参数缺省为
+  **Logging 通道**（无 Doris 的开发/测试环境用），生产 `_run()` 未注入真实
+  Doris 影子表执行器 → 影子表只落事件日志，不在 Doris 侧真实创建
+- **影响**：原子 Swap（FR-39）缺前置影子表；质量分流「先写 shadow 再 REPLACE」
+  的演示链路在 mock 引擎下本就不搬数据，与 T-ENGINE-01 叠加后影子表链路整体
+  未闭环。当前不影响 AC-10 主链路其余证据（mock 口径下 Doris 表保持空表）
+- **修复建议**（未实施，待排期）：实现 Doris 影子表执行器（`CREATE TABLE ... LIKE`
+  已由 init SQL 提供示例），`_run()` 按环境注入；补 spy 测试断言 shadow DDL 真实下发
+- **关联**：T-ENGINE-01；F5 mock 引擎接线（fix/S10-demo-script e0632da）
+
+### T-SHADOW-02：质量契约 valid_sink 与派生影子表名漂移
+
+- **状态**：Open（独立排期）
+- **发现**：S10 场景 A 修复后重跑（2026-10-16，事件流 `execution.shadow_contract_drift`）
+- **现象**：生成计划 `quality_contract.valid_sink` 与按计划推得的影子表名
+  （`shadow_table_name(valid_sink)`）不一致，worker 以 WARN 事件记录后按计划继续
+  （漂移不阻断，见 consume_outbox.py 注释）
+- **影响**：质量分流表指向与影子表指向可能不是同一张表（若真实链路搬数据会写错
+  目标）；mock 引擎下不影响演示结论，但属生成计划的一致性问题
+- **修复建议**（未实施，待排期）：生成域出参校验（计划内 valid_sink 必须与
+  目标宽表派生规则一致）或消费端按计划重算对齐，二选一排期
+- **关联**：T-SHADOW-01；S5 生成引擎质量契约口径
 
 ## 四、AMEND 追加件登记
 
