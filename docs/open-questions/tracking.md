@@ -23,7 +23,8 @@
 
 | 阶段 | 遗留 # | 摘要 | 分类 | 处理 |
 |------|-------|------|------|------|
-| S7 | 1 | SeaTunnel REST `submit-job` NPE | 独立运维 | **T-ENGINE-01** |
+| S7 | 1 | SeaTunnel REST `submit-job` NPE | CLI 通道已落地（部分完成） | **T-ENGINE-01**（AC-16 闭环待 T-ENGINE-02） |
+| S10 | 7 | 生成模板硬编码 PG 驱动 +  worker 容器内寻址不可达 | 独立排期 | **T-ENGINE-02** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
@@ -34,9 +35,9 @@
 
 ## 三、独立运维事项
 
-### T-ENGINE-01：SeaTunnel REST submit-job NPE（跨 4 版本）
+### T-ENGINE-01：SeaTunnel REST submit-job NPE（跨 4 版本）—— **部分完成**
 
-- **状态**：Open
+- **状态**：**部分完成**（2026-10-16，fix/T-ENGINE-01）
 - **发现**：S7 阶段（2026-10-15）
 - **根因**：SeaTunnel 2.3.x REST 提交路径 `ConfigShadeUtils.processConfig` NPE
 - **已试（4 版本均失败）**：
@@ -48,15 +49,40 @@
   - ❌ 请求体问题（JSON + HOCON 两种格式都失败）
   - ❌ 镜像问题（flowpilot + apache 官方都失败）
   - ❌ 版本问题（2.3.8 / 2.3.11 / 2.3.13 三个版本都失败）
-- **影响**：
-  - AC-16（L2 真实链路）未在真引擎上跑通
-  - S10 演示走 mock 引擎 + 真实 Doris（人类裁决 C）
-- **后续方案**（S10 后独立做，1~2 小时）：
-  - ⭐ **CLI 提交**：改用 `seatunnel.sh --config <hocon>`（绕过 REST 路径）
-  - 备选：深入 SeaTunnel 源码 / 提 GitHub issue
-  - 可接受：保持 mock 引擎
-- **关联**：SPEC S-Q4（SeaTunnel 部署形态）
-- **当前镜像**：`apache/seatunnel:2.3.13`（官方）
+- **已完成（本 PR，CLI 提交通道落地）**：
+  - ✅ 引擎实测：`seatunnel.sh --config <f> --async` 提交本机集群成功（job id 可解析，
+    ~2s 返回）；`--check` 校验可用；`--cancel-job` 取消可用；REST `/job-info/{id}`
+    对 CLI 提交的作业有效
+  - ✅ `CliSeaTunnelClient`（check/submit/stop 走 CLI、job_status 复用 REST）+ `engine_mode=real-cli`
+  - ✅ `infra/Dockerfile.worker`（worker 专用镜像：JDK8 同源 + SeaTunnel 引擎客户端层裁剪
+    + connector 白名单 + cluster-members=seatunnel:5801），镜像 2.71GB，启动日志/容器 env 双证据
+  - ✅ 14 个新测试 + 904 passed 全量绿
+- **仍未闭环**：**AC-16「Doris 有真实数据」未达成**——真引擎首次执行暴露**生成模板缺陷**
+  （详见 **T-ENGINE-02**），本 PR 按 X3 范围控制不修；T-SHADOW-01（影子表通道）在真实链路
+  下同样仍未实现（当前 HOCON 为裸 `insert into order_wide` 直插目标表，非原子 Swap 语义）
+- **关联**：SPEC S-Q4（SeaTunnel 部署形态）；T-ENGINE-02（生成模板，阻塞 AC-16 闭环）
+- **当前镜像**：`flowpilot/seatunnel:2.3.13`（compose e2e/exec）
+
+### T-ENGINE-02：生成模板不感知 connector_type + 容器内寻址不可达（新，Open）
+
+- **状态**：Open（2026-10-16，T-ENGINE-01 真引擎首跑暴露；独立 PR 立项）
+- **发现**：T-ENGINE-01 步骤 4 前置判定（生成 HOCON 后读 checkpoint 候选正文）
+- **缺陷 1（驱动/协议硬编码）**：HOCON 模板 source/sink 均硬编码
+  `driver = "org.postgresql.Driver"` + `jdbc:postgresql://`，**不按连接的
+  `connector_type`（MYSQL / DORIS）渲染**。物化后 source 指向 MySQL 容器
+  （MySQL 协议）、sink 指向 Doris FE（MySQL 协议）→ PostgreSQL 驱动连 MySQL
+  协议端口，JDBC 握手即败。mock 时代引擎不出水故完全不可见。
+- **缺陷 2（执行视角寻址）**：物化取连接行 host/port **原值**（演示数据按宿主机视角填
+  `127.0.0.1:13306/9030`），而引擎提交发生在 **worker 容器内**——`127.0.0.1` 是它自己，
+  source/sink 均不可达。需要「执行视角 host 解析」（容器网络名映射或连接行执行字段）。
+- **附带（次要）**：`insert into order_wide` 裸 INSERT 无列清单，列序依赖 JDBC 默认排序。
+- **影响**：**AC-16 不闭环**——真引擎模式下所有作业必然失败（两个缺陷各自都可致命）；
+  T-ENGINE-01 的 CLI 提交通道已就绪，此为其下游唯一阻断。
+- **修复范围**：生成域（HOCON 模板渲染按 connector_type 选 driver/URL + 执行视角
+  寻址解析）；改动涉及契约面，可能需 AMEND 登记；引擎侧驱动不缺
+  （lib 已有 postgresql-42.7.5 / mysql-connector-j-8.4.0，worker 白名单含 connector-jdbc）。
+- **关联**：T-ENGINE-01（上游已就绪）；T-SHADOW-01（影子表通道，真实链路另一缺口）；
+  T-SHADOW-02（valid_sink 契约漂移，修复时一并评估）
 
 ### T-DEMO-01：demo seed 脏行 3 不可落库（address 超列宽）
 

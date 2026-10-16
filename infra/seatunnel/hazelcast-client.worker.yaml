@@ -1,0 +1,25 @@
+#
+# T-ENGINE-01：worker 容器专用 Hazelcast 客户端配置
+# （与引擎镜像 flowpilot/seatunnel:2.3.13 内置 /opt/seatunnel/config/hazelcast-client.yaml
+#   唯一差别：cluster-members 从 localhost:5801 改为 compose 服务名 seatunnel:5801）
+#
+# 为什么需要改：worker 容器里 localhost 是它自己——CLI 提交（seatunnel.sh --async）
+# 会连错端点，提交永远超时/失败。引擎 master 未设 network.interfaces，绑 0.0.0.0，
+# 容器间经 compose default 网络按服务名可达（2026-10-16 实测 TCP OK）。
+#
+# 该文件经 infra/Dockerfile.worker 覆盖进 worker 镜像的
+# /opt/seatunnel/config/hazelcast-client.yaml；**不挂载、不改引擎容器配置**。
+#
+# 许可证头与上游一致（Apache License 2.0）。
+#
+
+hazelcast-client:
+  cluster-name: seatunnel
+  properties:
+    hazelcast.logging.type: log4j2
+  connection-strategy:
+    connection-retry:
+      cluster-connect-timeout-millis: 3000
+  network:
+    cluster-members:
+      - seatunnel:5801

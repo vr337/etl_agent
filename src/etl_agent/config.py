@@ -17,9 +17,11 @@ SECRET_PROVIDERS = frozenset({"fernet-db", "vault-kv-v2"})
 LLM_PROVIDERS = frozenset(
     {"openai", "deepseek", "doubao", "kimi", "zhipu", "custom", "mock"}
 )
-# 引擎通道选型（F5，S10 演示口径：人类裁决 C mock engine）：
-# real = 受管 SeaTunnel 执行；mock = 演示态合成指标（check/submit 为 mock）
-ENGINE_MODES = frozenset({"real", "mock"})
+# 引擎通道选型（F5 mock；T-ENGINE-01：CLI 提交绕开 REST submit-job 全版本 NPE）：
+# real     = REST 提交（引擎 bug 致暂不可用，保留为契约基线与对照）
+# real-cli = SeaTunnel CLI 提交（--async/--check/--cancel-job）+ REST 状态查询
+# mock     = 演示态合成指标（check/submit 为 mock，不搬数据）
+ENGINE_MODES = frozenset({"real", "real-cli", "mock"})
 
 # 生产强制项（AC-11 / SPEC 4.4-3）：HMAC 密钥与 Bootstrap Token 的最小长度
 MIN_SECRET_LENGTH = 32

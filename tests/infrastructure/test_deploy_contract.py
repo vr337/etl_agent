@@ -20,22 +20,46 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / "infra" / "Dockerfile.api"
+WORKER_DOCKERFILE = REPO_ROOT / "infra" / "Dockerfile.worker"
+WORKER_HAZELCAST_CLIENT = REPO_ROOT / "infra" / "seatunnel" / "hazelcast-client.worker.yaml"
 
 # 镜像运行必需的文件集（漏一个即特定运行期故障，逐项对应一次真实事故或已知依赖）
 REQUIRED_COPIES = ("src/", "alembic/", "alembic.ini", "configs/")
 
+# T-ENGINE-01：worker 镜像的引擎客户端层（CLI 提交通道）必需 COPY 来源
+# （含 COPY --from=seatunnel-client 多阶段来源；漏一个则 CLI 不可用/连不上集群）
+WORKER_ENGINE_COPIES = (
+    "/usr/local/openjdk-8",  # JRE：与引擎镜像同源（SeaTunnel 2.3.x 官方 JDK8）
+    "/opt/seatunnel/bin",
+    "/opt/seatunnel/config",
+    "/opt/seatunnel/lib",
+    "/opt/seatunnel/starter",
+)
+# 演示所需 connector 白名单（MySQL(JDBC 源) → Doris(目标) + Console/Fake 冒烟）；
+# 漏拷对应 jar 时 CLI 提交会在插件解析阶段失败（plugin not found）
+WORKER_CONNECTOR_WHITELIST = ("connector-jdbc-", "connector-doris-")
 
-def _copy_sources() -> list[str]:
-    """解析 Dockerfile 的 COPY 行，回传源路径列表（跳过 COPY --from 多阶段行）。"""
+
+def _copy_sources(dockerfile: Path = DOCKERFILE, *, include_from: bool = False) -> list[str]:
+    """解析 Dockerfile 的 COPY 行，回传源路径列表。
+
+    Args:
+        dockerfile: 目标 Dockerfile。
+        include_from: 是否包含 `COPY --from=<stage> ...` 多阶段来源
+            （worker 镜像的引擎客户端层即此类）。
+    """
     sources: list[str] = []
-    for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
+    for line in dockerfile.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if not stripped.startswith("COPY ") or stripped.startswith("COPY --from"):
+        if not stripped.startswith("COPY "):
             continue
-        # COPY <src> <dst>——取第一段为源（本仓 Dockerfile 均为单源单目标）
+        if stripped.startswith("COPY --from") and not include_from:
+            continue
         parts = stripped.split()
-        if len(parts) >= 3:
-            sources.append(parts[1])
+        # COPY <src> <dst>：源为第 2 段；COPY --from=<stage> <src> <dst>：源为第 3 段
+        source_index = 2 if stripped.startswith("COPY --from") else 1
+        if len(parts) > source_index:
+            sources.append(parts[source_index])
     return sources
 
 
@@ -98,14 +122,61 @@ def test_dockerfile_declares_configs_before_runtime_layers() -> None:
 
 
 def test_compose_worker_engine_mode_is_explicit() -> None:
-    """compose worker 显式声明 ETL_AGENT_ENGINE_MODE（演示口径可审，不靠默认）。"""
+    """compose worker 显式声明 ETL_AGENT_ENGINE_MODE（模式可审，不靠默认）。
+
+    T-ENGINE-01 起演示口径为 `real-cli`（SeaTunnel CLI 提交 + REST 状态）；
+    `mock` 保留为可切回演示态，切换即改这一行。
+    """
     compose = (REPO_ROOT / "infra" / "docker-compose.yml").read_text(encoding="utf-8")
     # worker 段（至下一个服务定义前）必须显式出现 engine_mode 覆盖
     worker_section = re.search(
         r"^  worker:.*?(?=^  \w|\Z)", compose, flags=re.MULTILINE | re.DOTALL
     )
     assert worker_section, "compose 缺少 worker 服务定义"
-    assert "ETL_AGENT_ENGINE_MODE: mock" in worker_section.group(0), (
-        "worker 必须显式声明 ETL_AGENT_ENGINE_MODE（F5：演示口径" 
-        "可审、可关；缺省 real 由 config.py 保证）"
+    assert "ETL_AGENT_ENGINE_MODE: real-cli" in worker_section.group(0), (
+        "worker 必须显式声明 ETL_AGENT_ENGINE_MODE（T-ENGINE-01 演示口径 real-cli；"
+        "切回演示态改 mock；缺省 real 由 config.py 保证）"
+    )
+
+
+def test_worker_dockerfile_covers_python_and_engine_layers() -> None:
+    """T-ENGINE-01：worker 镜像必须同时覆盖 Python 层与引擎客户端层。"""
+    assert WORKER_DOCKERFILE.is_file(), "缺少 infra/Dockerfile.worker（worker 专用镜像）"
+    sources = _copy_sources(WORKER_DOCKERFILE, include_from=True)
+    missing_python = [item for item in REQUIRED_COPIES if item not in sources]
+    assert not missing_python, f"Dockerfile.worker 漏 COPY：{missing_python}（当前：{sources}）"
+    missing_engine = [item for item in WORKER_ENGINE_COPIES if item not in sources]
+    assert not missing_engine, (
+        f"Dockerfile.worker 漏引擎客户端层 COPY：{missing_engine}"
+        "（漏则 CLI 不可用——worker 将无法提交真实引擎作业，T-ENGINE-01 失效）"
+    )
+
+
+def test_worker_dockerfile_connector_whitelist_covers_demo() -> None:
+    """T-ENGINE-01：connector 白名单必须覆盖演示所需类型（MySQL→Doris 最小集）。"""
+    sources = _copy_sources(WORKER_DOCKERFILE, include_from=True)
+    connectors = [item for item in sources if item.startswith("/opt/seatunnel/connectors/")]
+    missing = [
+        wanted
+        for wanted in WORKER_CONNECTOR_WHITELIST
+        if not any(wanted in item for item in connectors)
+    ]
+    assert not missing, (
+        f"Dockerfile.worker 的 connector 白名单漏拷：{missing}"
+        f"（当前白名单：{connectors}；漏 jar 时 CLI 提交在插件解析阶段失败）"
+    )
+
+
+def test_worker_hazelcast_client_points_to_engine_service() -> None:
+    """T-ENGINE-01：worker 的 Hazelcast 客户端必须指向 compose 服务名。"""
+    assert WORKER_HAZELCAST_CLIENT.is_file(), "缺少 infra/seatunnel/hazelcast-client.worker.yaml"
+    content = WORKER_HAZELCAST_CLIENT.read_text(encoding="utf-8")
+    assert "seatunnel:5801" in content, (
+        "worker hazelcast-client 的 cluster-members 必须指向 seatunnel:5801"
+        "（镜像内置是 localhost:5801，worker 容器里会连自己）"
+    )
+    # Dockerfile.worker 必须把它覆盖进镜像（否则 COPY 了却没人用）
+    worker_dockerfile = WORKER_DOCKERFILE.read_text(encoding="utf-8")
+    assert "hazelcast-client.worker.yaml" in worker_dockerfile, (
+        "Dockerfile.worker 必须把 hazelcast-client.worker.yaml 覆盖进 /opt/seatunnel/config/"
     )

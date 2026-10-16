@@ -39,17 +39,22 @@ app.conf.update(
 
 @worker_ready.connect
 def _log_engine_mode(**_kwargs: object) -> None:
-    """Worker 就绪时打印引擎通道选型（F5：可审、可关）。
+    """Worker 就绪时打印引擎通道选型（可审、可关）。
 
     用 `worker_ready` 而非 `worker_init`：后者触发时 celery 日志系统尚未装配，
     INFO 行会被丢弃（2026-10-16 首版实证）。就绪时打，日志稳定落盘。
-    engine_mode=real 时附引擎地址，便于核对「演示声称 mock」与「worker 实际
-    通道」是否一致——两者分属不同进程配置，本行与 `docker exec env` 互为锚点。
+    三种模式分句打印；real-cli 附加集群地址，便于核对「演示声称真实」与
+    「worker 实际通道」是否一致（与 `docker exec env` 互为锚点）。
     """
     if settings.is_mock_engine:
         logger.info("worker 就绪：engine_mode=mock（演示态合成指标：check/submit 为 mock，其余链路真实执行）")
+    elif settings.engine_mode == "real-cli":
+        logger.info(
+            "worker 就绪：engine_mode=real-cli（SeaTunnel CLI 提交 + REST 状态查询：真实引擎，url=%s）",
+            settings.seatunnel_url,
+        )
     else:
-        logger.info("worker 就绪：engine_mode=real（受管 SeaTunnel 执行：url=%s）", settings.seatunnel_url)
+        logger.info("worker 就绪：engine_mode=real（受管 SeaTunnel REST 执行：url=%s）", settings.seatunnel_url)
 
 
 __all__ = ["app", "celery_schedule"]
