@@ -183,9 +183,17 @@ class Settings(BaseSettings):
     seatunnel_url: str = "http://localhost:8080"
     seatunnel_submit_timeout_seconds: int = SEATUNNEL_SUBMIT_TIMEOUT_SECONDS_DEFAULT
     seatunnel_check_timeout_seconds: int = SEATUNNEL_CHECK_TIMEOUT_SECONDS_DEFAULT
-    # 引擎通道选型（F5：S10 演示口径 mock engine，人类裁决 C）：
-    # real = RestSeaTunnelClient（REST 提交 + CLI --check）；mock = MockSeaTunnelClient
-    #（check / submit 为演示态合成，其余链路全真实执行）。缺省 real——漏配绝不静默降级。
+    # T-ENGINE-02：执行视角 host 映射（worker 容器内不可达宿主机回环地址，如
+    # 127.0.0.1:13306）。env `ETL_AGENT_HOST_MAP`，JSON：{"127.0.0.1:13306":"mysql:3306"}。
+    # 只在 worker 物化 HOCON 时生效（API 探测路径用连接行原值）；未命中直通、
+    # null-safe。默认空 = 不重写；pydantic-settings 对 dict 字段按 JSON 解析，
+    # 非法 JSON 在启动期 fail-fast（不静默吞）。
+    host_map: dict[str, str] = {}
+    # 引擎通道选型（F5 mock；T-ENGINE-01 增 real-cli：CLI 提交绕开 REST NPE）：
+    # real = RestSeaTunnelClient（REST 提交 + CLI --check）
+    # real-cli = CliSeaTunnelClient（CLI 提交 + REST 状态，当前真实链路取值）
+    # mock = MockSeaTunnelClient（check / submit 为演示态合成，其余链路全真实执行）。
+    # 缺省 real——漏配绝不静默降级；白名单见下方 ENGINE_MODES。
     engine_mode: str = "real"
 
     # ---- Celery Worker / Beat（S7：FR-38/40 / ADR-06）----

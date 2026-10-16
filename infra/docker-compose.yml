@@ -94,6 +94,11 @@ services:
       ETL_AGENT_REDIS_PORT: "6379"
       ETL_AGENT_SEATUNNEL_URL: http://seatunnel:8080
       ETL_AGENT_FILE_ASSET_ROOT: /data/file-assets
+      # T-ENGINE-02：执行视角 host 映射（worker 容器内不可达宿主机回环地址）。
+      # 连接行按宿主机视角填写（127.0.0.1:13306/9030），物化 HOCON 时按此表重写为
+      # compose 服务名；未命中直通、null-safe；仅 worker 物化路径消费（API 探测
+      # 用原值）。格式 {"host:port": "host:port"}；不需要时删掉本行即可。
+      ETL_AGENT_HOST_MAP: '{"127.0.0.1:13306":"mysql:3306","127.0.0.1:9030":"doris-fe:9030"}'
       # 引擎通道选型（T-ENGINE-01：真实引擎——SeaTunnel CLI 提交 + REST 状态查询）：
       # check/submit 走 seatunnel.sh（--async/--check/--cancel-job），status 走
       # /job-info；绕开引擎 REST submit-job 全版本 NPE（T-ENGINE-01）。

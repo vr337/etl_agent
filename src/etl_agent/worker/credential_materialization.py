@@ -21,6 +21,7 @@ FILE_ASSET_BASE 取配置的挂载根目录。
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -137,11 +138,41 @@ def clear_values(values: dict[str, str]) -> None:
     values.clear()
 
 
+def _apply_host_map(
+    values: dict[str, str],
+    prefix: str,
+    host_map: Mapping[str, str] | None,
+) -> None:
+    """执行视角 host 重写（T-ENGINE-02）。
+
+    worker 容器内 `127.0.0.1:13306` 这类宿主机回环地址不可达；连接行按宿主机视角
+    填写，物化时按 `ETL_AGENT_HOST_MAP`（host:port → host:port）重写为容器可达名。
+
+    语义：**只重写vals内对应端点的 HOST/PORT**；未命中直通；host 为 None 或
+    host_map 为空 / None 时原样返回（null-safe，绝不抛错）。
+    """
+    if not host_map:
+        return
+    host = values.get(f"{prefix}_HOST")
+    if not host:
+        return
+    port = values.get(f"{prefix}_PORT")
+    key = f"{host}:{port}" if port else host
+    replacement = host_map.get(key)
+    if replacement is None:
+        return
+    parts = replacement.split(":", 1)
+    values[f"{prefix}_HOST"] = parts[0]
+    if len(parts) == 2:
+        values[f"{prefix}_PORT"] = parts[1]
+
+
 def values_for_connection(
     connection: Any,
     secret_values: dict[str, str],
     prefix: str,
     file_asset_base: str | None = None,
+    host_map: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """按端点角色（SRC / SINK）组装物化取值（非密字段取连接行，口令取 SecretProvider）。
 
@@ -150,6 +181,8 @@ def values_for_connection(
         secret_values: SecretProvider.read 返回的明文（username / password 等）。
         prefix: SRC 或 SINK。
         file_asset_base: FILE_ASSET_BASE 取值（来源为文件资产时注入）。
+        host_map: 执行视角 host 映射（T-ENGINE-02；None / 空 = 不重写）。仅本函数
+            （worker 物化路径）消费——API 探测路径用连接行原值，两视角各取所需。
 
     Returns:
         dict[str, str]: 占位符变量名 → 真实值。
@@ -161,6 +194,7 @@ def values_for_connection(
         raw = getattr(connection, field, None)
         if raw is not None:
             values[variable] = str(raw)
+    _apply_host_map(values, prefix, host_map)
     # 口令与非密用户名来自 SecretProvider（连接行不存口令，FR-04/06）
     username = secret_values.get("username")
     password = secret_values.get("password")

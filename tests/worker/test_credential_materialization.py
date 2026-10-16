@@ -166,3 +166,84 @@ async def test_materialized_hocon_not_persisted(
         default=str,
     )
     assert password not in haystack
+
+
+# ---------------------------------------------------------------------------
+# T-ENGINE-02：执行视角 host 映射（ETL_AGENT_HOST_MAP）
+# ---------------------------------------------------------------------------
+
+
+def test_values_for_connection_host_map_rewrites_host_and_port() -> None:
+    """命中映射：host:port 键同时替换 HOST 与 PORT（物化路径专用）。"""
+
+    class _Connection:
+        host = "127.0.0.1"
+        port = 13306
+        database_name = "source_db"
+
+    values = values_for_connection(
+        _Connection(),
+        {},
+        "SRC",
+        host_map={"127.0.0.1:13306": "mysql:3306"},
+    )
+    assert values["SRC_HOST"] == "mysql"
+    assert values["SRC_PORT"] == "3306"
+    assert values["SRC_DB"] == "source_db"
+
+
+def test_values_for_connection_host_map_miss_passes_through() -> None:
+    """未命中：原值直通，不报错（映射表只覆盖已知回环地址）。"""
+
+    class _Connection:
+        host = "db.internal"
+        port = 5432
+        database_name = "etl_source"
+
+    values = values_for_connection(
+        _Connection(),
+        {},
+        "SRC",
+        host_map={"127.0.0.1:13306": "mysql:3306"},
+    )
+    assert values["SRC_HOST"] == "db.internal"
+    assert values["SRC_PORT"] == "5432"
+
+
+def test_values_for_connection_host_map_null_safe() -> None:
+    """null-safe：host_map 为 None / 空 / host 为 None / port 缺失均不抛。"""
+
+    class _NoHost:
+        host = None
+        port = None
+        database_name = "etl_source"
+
+    class _HostOnly:
+        host = "127.0.0.1"
+        port = None
+        database_name = "source_db"
+
+    for host_map in (None, {}, {"127.0.0.1:13306": "mysql:3306"}):
+        values = values_for_connection(_NoHost(), {}, "SRC", host_map=host_map)
+        assert "SRC_HOST" not in values  # host 为 None 原样（不进 values）
+        values = values_for_connection(_HostOnly(), {}, "SRC", host_map=host_map)
+        # port 缺失时键退化为纯 host——命中纯 host 键则替换，未命中直通
+        assert values["SRC_HOST"] == (
+            "mysql" if (host_map or {}).get("127.0.0.1") else "127.0.0.1"
+        )
+        assert "SRC_PORT" not in values
+
+
+def test_values_for_connection_host_map_host_only_key() -> None:
+    """纯 host 键（无端口）也能命中替换（映射值可只给主机名）。"""
+
+    class _Connection:
+        host = "127.0.0.1"
+        port = None
+        database_name = "source_db"
+
+    values = values_for_connection(
+        _Connection(), {}, "SRC", host_map={"127.0.0.1": "mysql"}
+    )
+    assert values["SRC_HOST"] == "mysql"
+    assert "SRC_PORT" not in values
