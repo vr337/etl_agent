@@ -25,15 +25,33 @@ from etl_agent.infrastructure.models import HarnessEvidenceEvent, HarnessEvidenc
 from tests.helpers import SeededWorkspace, make_client
 
 
-async def _evidence_event_types(db_session: AsyncSession) -> set[str]:
+async def _evidence_event_types(db_session: AsyncSession, project_id) -> set[str]:
+    """项目下证据事件类型集合（按项目过滤：流按项目唯一，全表查询会被
+    其他工作区/历史数据污染——联调 dev 库常态）。"""
     rows = (
-        (await db_session.execute(select(HarnessEvidenceEvent.event_type))).scalars().all()
+        (
+            await db_session.execute(
+                select(HarnessEvidenceEvent.event_type)
+                .join(HarnessEvidenceStream, HarnessEvidenceStream.id == HarnessEvidenceEvent.stream_id)
+                .where(HarnessEvidenceStream.project_id == project_id)
+            )
+        )
+        .scalars()
+        .all()
     )
     return set(rows)
 
 
-async def _stream_count(db_session: AsyncSession) -> int:
-    return len((await db_session.execute(select(HarnessEvidenceStream))).scalars().all())
+async def _stream_count(db_session: AsyncSession, project_id) -> int:
+    return len(
+        (
+            await db_session.execute(
+                select(HarnessEvidenceStream).where(HarnessEvidenceStream.project_id == project_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def _prepare_p0(
@@ -67,11 +85,11 @@ async def test_prepare_emits_pdp_and_prepare_evidence(
     """钩子 1+2：创建准备单 → PDP_DECISION 与 PREPARE_CREATED 双写证据账本。"""
     await _prepare_p0(app, seeded, frozen_version, "hook-prep-001")
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, seeded.project_a_id)
     assert "PDP_DECISION" in types
     assert "PREPARE_CREATED" in types
     # 证据流按项目唯一：一次创建只开一条流（get_or_create_stream 语义）
-    assert await _stream_count(db_session) == 1
+    assert await _stream_count(db_session, seeded.project_a_id) == 1
 
 
 async def test_deny_evidence_survives_403(
@@ -112,7 +130,7 @@ async def test_deny_evidence_survives_403(
             requested_by=seeded.engineer_a_user_id,
         )
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, seeded.project_a_id)
     assert "PDP_DECISION" in types
 
 
@@ -144,6 +162,6 @@ async def test_approval_and_commit_emit_evidence(
         )
         assert committed.status_code in (200, 201), committed.text
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, seeded.project_a_id)
     assert "APPROVAL_DECISION" in types
     assert "COMMIT_ISSUED" in types

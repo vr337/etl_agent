@@ -15,7 +15,8 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from etl_agent.infrastructure.models import HarnessEvidenceEvent
+from etl_agent.execution.service import run_project_id
+from etl_agent.infrastructure.models import HarnessEvidenceEvent, HarnessEvidenceStream
 from etl_agent.supervision.contracts import SupervisionContract
 from etl_agent.worker.tasks.consume_outbox import scan_outbox_once
 from etl_agent.worker.tasks.supervise import supervise_run
@@ -23,9 +24,22 @@ from tests.helpers import FakeSeaTunnelClient, SeededExecution, make_settings
 from tests.worker.test_consume_outbox import _loader
 
 
-async def _evidence_event_types(db_session: AsyncSession) -> set[str]:
+async def _evidence_event_types(db_session: AsyncSession, project_id) -> set[str]:
+    """项目下证据事件类型集合（按项目过滤：流按项目唯一，全表查询会被
+    演示数据/历史工作区污染——联调 dev 库常态）。"""
     rows = (
-        (await db_session.execute(select(HarnessEvidenceEvent.event_type))).scalars().all()
+        (
+            await db_session.execute(
+                select(HarnessEvidenceEvent.event_type)
+                .join(
+                    HarnessEvidenceStream,
+                    HarnessEvidenceStream.id == HarnessEvidenceEvent.stream_id,
+                )
+                .where(HarnessEvidenceStream.project_id == project_id)
+            )
+        )
+        .scalars()
+        .all()
     )
     return set(rows)
 
@@ -45,7 +59,7 @@ async def test_execution_transitions_emit_evidence(
     )
     assert summary.submitted == 1
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, seeded_execution.project_id)
     assert "EXECUTION_TRANSITION" in types
 
 
@@ -60,5 +74,5 @@ async def test_supervision_action_emits_evidence(
     await db_session.flush()
     assert action  # CONTINUE / 减损动作之一均可，本用例只守证据双写
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, await run_project_id(db_session, run))
     assert "SUPERVISION_ACTION" in types

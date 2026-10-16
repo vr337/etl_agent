@@ -14,14 +14,27 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from etl_agent.infrastructure.models import HarnessEvidenceEvent
-from etl_agent.rollback.service import mark_executed, mark_executing
+from etl_agent.infrastructure.models import HarnessEvidenceEvent, HarnessEvidenceStream
+from etl_agent.rollback.service import mark_executed, mark_executing, run_project
 from tests.helpers import SeededWorkspace, make_client
 
 
-async def _evidence_event_types(db_session: AsyncSession) -> set[str]:
+async def _evidence_event_types(db_session: AsyncSession, project_id) -> set[str]:
+    """项目下证据事件类型集合（按项目过滤：流按项目唯一，全表查询会被
+    历史工作区污染——联调 dev 库常态）。"""
     rows = (
-        (await db_session.execute(select(HarnessEvidenceEvent.event_type))).scalars().all()
+        (
+            await db_session.execute(
+                select(HarnessEvidenceEvent.event_type)
+                .join(
+                    HarnessEvidenceStream,
+                    HarnessEvidenceStream.id == HarnessEvidenceEvent.stream_id,
+                )
+                .where(HarnessEvidenceStream.project_id == project_id)
+            )
+        )
+        .scalars()
+        .all()
     )
     return set(rows)
 
@@ -51,7 +64,7 @@ async def test_rollback_phases_emit_evidence(
     await mark_executed(db_session, __import__("uuid").UUID(rollback_id))
     await db_session.flush()
 
-    types = await _evidence_event_types(db_session)
+    types = await _evidence_event_types(db_session, await run_project(db_session, run.id))
     assert "ROLLBACK_REQUESTED" in types
     assert "ROLLBACK_DECIDED" in types
     assert "ROLLBACK_EXECUTED" in types
