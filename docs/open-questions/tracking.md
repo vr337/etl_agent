@@ -27,7 +27,7 @@
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
 | S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
 | S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
-| S10 | 3 | 审计钩子未接线，证据账本恒空 | 独立排期 | **T-AUDIT-01** |
+| S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
 | S10 | 4 | 影子表执行通道为 Logging，不建真实 Doris 表 | 独立排期 | **T-SHADOW-01** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | 独立排期 | **T-SHADOW-02** |
 
@@ -93,9 +93,9 @@
   commit-spy 回归测试（`tests/test_commit_persistence.py` 同款探针）
 - **关联**：fix/S10-demo-script（F1 演示路径 4 处已修，人类裁决范围控制不外溢）
 
-### T-AUDIT-01：审计钩子未接线，证据账本恒空
+### T-AUDIT-01：审计钩子未接线，证据账本恒空（已修复）
 
-- **状态**：Open（独立排期）
+- **状态**：✅ 已修复（F3，人类裁决闭环；fix/S10-demo-script）
 - **发现**：S10 场景 A 修复后重跑（2026-10-16，STEP 12 evidence verify 404 判定）
 - **现象**：`audit/hooks.py` 的 7 类 `on_*` 钩子（PDP 决策 / Prepare 创建 /
   审批决策 / Commit 签发 / 执行迁移 / 监督动作 / 回滚）在 `src/` 全域
@@ -104,13 +104,21 @@
   返回 404 `BIZ_404_EVIDENCE_STREAM_NOT_FOUND`
 - **根因**：S9 实现了钩子与证据链模块，但未在 preparation / commit / execution /
   PDP 服务路径接线；测试直调钩子故全绿（又一联调盲区）
-- **影响**：AC-09 证据覆盖率度量失真（覆盖率统计口径与真实链路脱节）；
-  S10 演示 STEP 12 `[FAIL]` 为**已知项**（非回归，随 F3 判定记录在案）
-- **修复建议**（未实施，待排期）：四类服务路径接线双写（`audit_events` +
-  evidence），明确 session 与提交语义（钩子内只 flush、由调用方事务提交，
-  注意与 T-COMMIT-01 同族风险），补路由级 spy 测试；`execution/router.py`
-  详情端 `supervision_snapshot` 硬编码 None（S7 遗留）一并评估回填
-- **关联**：fix/S10-demo-script（F3 判定结论）；docs/spec/amendments/AMEND-008
+- **修复**（fix/S10-demo-script，七钩子全部接线；钩子内只 flush，证据随调用方
+  既有事务提交——与 T-COMMIT-01 同族风险同解）：
+  - prepare service：`on_pdp_decision` + `on_prepare_created`；**DENY 特判**：
+    raise PolicyDeny 前 service 单独 commit 决策行 + 证据（403 回滚不冲掉 P0 留痕）
+  - approve service：`on_approval_decision`；commit service：`on_commit_issued`
+  - execution service：`on_execution_transition` 接在 `transition` 咽喉
+    （project_id 经派生链单查询，孤儿运行告警降级不抛）
+  - supervise 任务：`on_supervision_action`；rollback service 三相：
+    `on_rollback_event`（REQUESTED / DECIDED / EXECUTED）
+  - 测试：tests/harness|worker|rollback 三个 test_audit_hooks.py 共 6 例
+    （含 DENY 证据存活、happy path 证据行）
+- **遗留观察**：`execution/router.py` 详情端 `supervision_snapshot` 硬编码 None
+  （S7 遗留）仍未回填；检查点签名器（CheckpointSigner）生产未装配——
+  证据链哈希完整但无 Ed25519 检查点，另行评估
+- **关联**：fix/S10-demo-script（F3）；docs/spec/amendments/AMEND-008
 
 ### T-SHADOW-01：影子表执行通道为 Logging，不建真实 Doris 表
 
