@@ -85,8 +85,12 @@ $env:ETL_AGENT_BOOTSTRAP_TOKEN = "<your-token>"
 ```powershell
 cd frontend
 npm install
-npm run dev          # → http://127.0.0.1:5173
+npm run dev          # → http://localhost:5173
 ```
+
+> **地址口径**：Vite 默认把 dev server 绑在 **IPv6 回环 `[::1]`**，故浏览器必须用
+> `http://localhost:5173`；写 `http://127.0.0.1:5173`（IPv4）会连不上。
+> （后端仍是 `http://127.0.0.1:8000`，Vite 的 `/api` 代理不受影响。）
 
 Vite 已配置 `/api` 与 `/health` 代理到 `http://127.0.0.1:8000`，无需额外跨域设置。
 

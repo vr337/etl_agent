@@ -44,6 +44,9 @@
 | S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | 独立排期 | **T-OBS-01** |
 | S10 | 16 | 引擎容器（worker/seatunnel/doris）未设 TZ，与源库 CST 差 8h → 水位谓词全量拒收 | **已修（fix/infra-tz；run28 复验 1000/2）** | ✅ **T-TZ-01 Closed** |
 | S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | 独立排期 | **T-QUALITY-01** |
+| S10 | 18 | Pipeline Studio 门禁 14/14 / HOCON 正文 / 版本链 / 候选数为硬编码演示态，未标「示意」 | 独立排期 | **T-CONSOLE-02** |
+| S10 | 19 | Safety 页 Benchmark 六项门禁回落演示值，`live` 字段算了但模板未用 | 独立排期 | **T-CONSOLE-03** |
+| S10 | 20 | Studio 读 `version_no`（实际 `version_number`）→ 渲染 `Vundefined` / `VNaN` / 版本链恒 `V7` | 独立排期 | **T-CONSOLE-04** |
 
 ## 三、独立运维事项
 
@@ -537,6 +540,65 @@
   `worker/tasks/consume_outbox.py:735`、`llm/mock_provider.py:126-145`、
   `harness/prepare/service.py:37-45`、`supervision/contracts.py:35`；
   `docs/stages/assets/S10-e2e/demo-a-run27-20261017.log`
+
+### T-CONSOLE-02：Pipeline Studio 多处演示态数据未标注（新，Open）
+
+- **状态**：Open（前端；第 1 项可能需后端补出参）
+- **发现**：S10 补 Studio 截图取证（2026-10-17，A5 采集时逐项读码核对）
+- **现象（同一页四处）**：
+  1. **门禁 `14 / 14`**：`PipelineStudio.vue:77-92` 的 `DEFAULT_GATES`（14 项恒
+     `passed: true`），`loadVersion()` 在 **L152 无条件** `gates.value = DEFAULT_GATES`
+     —— 门禁清单**从未从后端取**，页面也不标「示意」
+  2. **HOCON 正文**：`hoconText = currentVersion.value?.hocon ?? ''`（L70），而
+     `GET /pipeline-versions/{id}` **不出参 `hocon`** → 恒空 → 回落 `SAMPLE_HOCON`（L336 / L447）
+  3. **版本链 `V4`~`V6`**：`versionChain.length === 0` 时渲染 `chain__card--ghost`
+     静态卡（L417-439），内容为原型图口径（「已回滚：凭据过期」等）
+  4. **候选 `2 / 3`**：`Math.min(repairCount + 2, REPAIR_BUDGET)`（L96），`+2` 为原型图口径
+- **影响**：控制台把演示值当真实治理事实展示 → 截图取证必须人工注记
+  （见 `演示回放.md` §8.9「演示值注记」表）；`GateChecklist.vue:12-15` 的 `GateItem`
+  只有 `{key,label,passed}`，**无 live / 示意 概念** → 无法在组件层标注
+- **修复方向**（待裁决）：① 后端补「版本门禁结果」出参（`freeze` 已收 `gate_results`
+  入参，但未落库回传）→ 前端改真实取数；② 或统一给 `GateChecklist` 加 `live` 徽标，
+  演示态一律标「示意」（与 `SafetyGovernance.vue` 的 PDP 静态渲染口径一致）
+- **关联**：`frontend/src/views/PipelineStudio.vue:70/77-92/96/152/336/417-439`、
+  `frontend/src/components/GateChecklist.vue:12-15`；`docs/demo/演示回放.md` §8.9
+
+### T-CONSOLE-03：Safety 页 Benchmark 六项门禁回落演示值，未标「示意」（新，Open）
+
+- **状态**：Open（前端，最小改动）
+- **发现**：S10 补 Studio 截图取证（2026-10-17，A4 观察点复核时读码确认）
+- **现象**：`SafetyGovernance.vue:65-88` 的 `gateRows` 在 `latestRun` 为空时回落到
+  fallback 实测值（1.00 / 0.97 / 0.02 / 1.00 / 1.00 / 0.05）且 `passed: true`；
+  本机 `GET /projects/{id}/benchmark-runs` 实测为空 `{runs: [], total: 0}` → 页面恒显
+  **`6 / 6 PASS`**。页头 `report_sha256` 亦有硬编码兜底（`?? '9b602'`）
+- **关键点**：`gateRows` 已算出 `live: Boolean(found)`（L85），但**模板从未使用该字段**
+  （表格列只有 门禁指标 / 阈值 / 实测 / 结论）→ 演示值与真实值在视觉上不可区分
+- **影响**：与 T-CONSOLE-02 同类；A4 截图里「Benchmark 6/6 · 证据覆盖率 100%」是演示值，
+  而同屏「证据时间线 7 事件」是真的 —— 二者混排易被误读为同一来源
+- **修复方向**（待裁决）：模板消费 `live` 字段，对回落行加「示意」徽标（最小改动，
+  与 PDP 策略包「示意」徽标 L308 同口径）
+- **关联**：`frontend/src/views/SafetyGovernance.vue:65-88/196-235/308`；
+  `docs/demo/演示回放.md` §8.9
+
+### T-CONSOLE-04：Studio 读 `version_no`，后端回 `version_number` → 渲染 `Vundefined` / `VNaN`（新，Open）
+
+- **状态**：Open（前端字段名 / 取数路径）
+- **发现**：S10 补 Studio 截图取证（2026-10-17，A5 画面出现 `VNaN` 后读码定位）
+- **现象（A5 截图可见）**：
+  - Diff 标题渲染为 **`Vundefined（VALIDATED）→ VNaN（DRAFT）`**
+    （`V${undefined}` / `V${undefined + 1}`，`PipelineStudio.vue:373-374`）
+  - 版本链首卡恒显 **`V7`**（`currentVersion?.version_no ?? 7`，L411）
+- **根因**：前端 `PipelineVersionView` 声明 `version_no: number`（`types.ts:135`），
+  而 `GET /pipeline-versions/{id}` 实际出参是 **`version_number`**（run28 curl 实测 +
+  `pipeline_versions` 表列名）→ 取到 `undefined`
+- **同源问题**：该端点也不出参 `hocon` / `etl_plan`（前端类型声明有），
+  故 HOCON 视图恒回落 `SAMPLE_HOCON`（已并入 T-CONSOLE-02 第 2 项）
+- **影响**：取证画面带明显 bug 文案；但**不影响**版本 `status=VALIDATED` 与
+  `artifact_sha256` 的真实性（二者字段名正确、值来自后端）
+- **修复方向**（待裁决）：前端统一改读 `version_number`（1 处类型 + 2 处引用），
+  或后端出参加 `version_no` 别名；**选后端方案即涉接口字段口径 → 需 AMEND**
+- **关联**：`frontend/src/views/PipelineStudio.vue:373-374/411`、
+  `frontend/src/api/types.ts:132-143`；`docs/demo/演示回放.md` §8.9「缺陷详情备查 2」
 
 ## 四、AMEND 追加件登记
 
