@@ -25,13 +25,20 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-L / 第 4.3 章进程
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from etl_agent.execution.service import STATUS_CANCELLING, STATUS_RUNNING, STATUS_SUBMITTED
+from etl_agent.audit.hooks import on_supervision_action
+from etl_agent.execution.service import (
+    STATUS_CANCELLING,
+    STATUS_RUNNING,
+    STATUS_SUBMITTED,
+    run_project_id,
+)
 from etl_agent.infrastructure.models import ExecutionRun, QualityReport
 from etl_agent.supervision.contracts import (
     SupervisionContract,
@@ -46,6 +53,8 @@ from etl_agent.supervision.mitigation import (
 )
 from etl_agent.supervision.snapshot import record_supervision_event, write_snapshot
 from etl_agent.worker.celery_app import app
+
+logger = logging.getLogger("etl_agent.worker.supervise")
 
 # 单遍最多监督的运行数（防止一次扫全表；监督是周期任务，可跨遍摊平）
 MAX_SUPERVISE_PER_SCAN = 200
@@ -128,6 +137,25 @@ async def supervise_run(
     outcome = evaluate(contract, observation)
     await write_snapshot(session, run, outcome=outcome, observation=observation)
     await record_supervision_event(session, run, outcome=outcome, observation=observation)
+
+    # 钩子 6（F3）：监督动作双写证据账本（判罚事实先于减损动作落库，与隔离
+    # 先于中断同序——留痕不依赖减损是否成功）。project_id 走 execution 域派生链
+    # 单查询；孤儿运行只告警不阻断监督流程（人类裁决补充 2）。随 worker 周期
+    # 会话提交，钩子只 flush 不自行 commit。
+    project_id = await run_project_id(session, run)
+    if project_id is None:
+        logger.warning(
+            "证据账本跳过：运行 %s 的版本链断裂，监督留痕降级", run.id
+        )
+    else:
+        await on_supervision_action(
+            session,
+            project_id=project_id,
+            run_id=run.id,
+            action=outcome.action,
+            risk_level=outcome.risk_level,
+            rule_ids=list(outcome.rule_ids),
+        )
 
     plan = plan_mitigation(outcome.matches)
     if plan.quarantines:

@@ -739,17 +739,14 @@ async def _run() -> dict[str, object]:
     """Celery 任务体：开会话 → 装配交接通道 / 引擎 / 影子表通道 → 扫描一遍。"""
     from etl_agent.infrastructure.redis_client import create_redis_client
     from etl_agent.worker.capability_handoff import RedisCapabilityHandoff
-    from etl_agent.worker.seatunnel_client import RestSeaTunnelClient
+    from etl_agent.worker.seatunnel_client import build_engine
     from etl_agent.worker.session import worker_session
 
     settings = default_settings
     redis = create_redis_client(settings.resolved_redis_url)
     handoff = RedisCapabilityHandoff(redis, key_prefix=settings.capability_handoff_key_prefix)
-    engine = RestSeaTunnelClient(
-        settings.seatunnel_url,
-        submit_timeout_seconds=settings.seatunnel_submit_timeout_seconds,
-        check_timeout_seconds=settings.seatunnel_check_timeout_seconds,
-    )
+    # 引擎通道按 engine_mode 选型（F5：mock=演示态合成；real=受管 SeaTunnel 执行）
+    engine = build_engine(settings)
     try:
         async with worker_session() as session:
             summary = await scan_outbox_once(

@@ -43,6 +43,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from etl_agent.audit.hooks import on_rollback_event
 from etl_agent.execution.service import record_event
 from etl_agent.infrastructure.models import ExecutionRun, RollbackRequest
 from etl_agent.rollback.artifacts import (
@@ -245,6 +246,19 @@ async def create_rollback_request(
         message=f"回滚申请已创建（{request.id}）：{_brief(payload.reason)}",
         stage="rollback",
     )
+    # 钩子 7（F3，REQUESTED 相位）：回滚申请双写证据账本。project_id 经申请入口
+    # 既有的 run_project 反查（运行不存在则 RollbackNotFound——申请前置已鉴权，
+    # 走到此处运行必然存在）。随调用方（路由 / Worker 会话）既有事务提交，
+    # 钩子只 flush 不自行 commit。
+    await on_rollback_event(
+        session,
+        project_id=await run_project(session, payload.run_id),
+        rollback_id=request.id,
+        phase="REQUESTED",
+        actor_id=payload.requested_by,
+        status=request.status,
+        reason=payload.reason,
+    )
     return request
 
 
@@ -285,6 +299,16 @@ async def decide_rollback(
         event_type="rollback.decided",
         message=f"回滚申请 {decision}（{request.id}）：{_brief(reason or '')}",
         stage="rollback",
+    )
+    # 钩子 7（F3，DECIDED 相位）：审批决策双写证据账本（APPROVE / REJECT 均留痕）
+    await on_rollback_event(
+        session,
+        project_id=await run_project(session, request.run_id),
+        rollback_id=request.id,
+        phase="DECIDED",
+        actor_id=decided_by,
+        status=request.status,
+        reason=reason,
     )
     _ = now
     return request
@@ -331,6 +355,15 @@ async def mark_executed(
         event_type="rollback.executed",
         message=f"回滚已执行完成（{request.id}）：影子表数据已清理，正式表未动（FR-48）",
         stage="rollback",
+    )
+    # 钩子 7（F3，EXECUTED 相位）：执行完成双写证据账本。本相位在 src 中暂无
+    # Worker 驱动（S8 遗留），接线落在相位函数内——未来执行任务接入即自动留痕。
+    await on_rollback_event(
+        session,
+        project_id=await run_project(session, request.run_id),
+        rollback_id=request.id,
+        phase="EXECUTED",
+        status=request.status,
     )
     return request
 

@@ -45,6 +45,10 @@ class AgentRunResponse(BaseModel):
     id: uuid.UUID
     thread_id: str
     status: str
+    # AMEND-009（追加件，fix/S10-demo-script）：向调用方回传本次运行绑定的首个
+    # PipelineVersion，使「创建运行 → 读取版本 → 冻结 → 准备单」链路无需猜 id。
+    # 加法字段、可缺省，向后兼容；DB 模型 agent_runs.pipeline_version_id 早有该列。
+    pipeline_version_id: uuid.UUID | None = None
     pending_question: str | None = None
     generation_backend: str | None = None
     generation_model: str | None = None

@@ -248,3 +248,92 @@ def _parse_job_info(payload: Any) -> EngineJobStatus:
         raw_error = payload.get("error")
     error = str(raw_error) if raw_error is not None else None
     return EngineJobStatus(job_id=job_id, status=status, metrics=metrics, error=error)
+
+
+# ---------------------------------------------------------------------------
+# MockSeaTunnelClient（F5：S10 演示口径 mock engine，人类裁决 C）
+#
+# 背景：裁决 C 的「mock engine」此前只在 tests/helpers.py 有替身，生产 worker 的
+# `_run()` 硬编码 RestSeaTunnelClient——容器内既无 seatunnel.sh（CLI --check 必败），
+# REST submit 又撞 T-ENGINE-01 的 NPE，演示链路走不到提交之后。本类把演示态引擎
+# 通道落到 src 侧，由 `engine_mode=mock` 选型（config.py 白名单 + 生产禁用）。
+#
+# 语义边界（不可扩张）：
+# - **只 mock 引擎交互本身**（check / submit / status）：返回演示态合成指标；
+# - 不搬数据：Doris 源/目标表不会被本类写入，质量契约/监督/回滚判定消费的是
+#   合成指标（脚本 [MOCK] 标注必须如实反映本模式，见 demo-scenario-a.ps1）；
+# - 指标形态与真实 seed 对齐（1002 行 / 2 脏行：NULL 金额、水位越界），
+#   换取质量分流四态可演示，不伪装成真实引擎结果。
+# ---------------------------------------------------------------------------
+class MockSeaTunnelClient:
+    """演示态引擎客户端（engine_mode=mock）：check/submit/status 全合成。
+
+    与 `tests/helpers.py::FakeSeaTunnelClient` 的分工：后者是单测的脚本化替身
+    （可按状态序列回放），本类是**生产可装配**的演示态通道（`build_engine` 选型），
+    测试镜像不含 tests/ 目录，二者不能互相替代。
+    """
+
+    # 稳定 job_id 前缀（对齐稳定 JobId 语义：同版本重复提交同一 id）
+    JOB_ID_PREFIX = "mock-job-"
+
+    async def check(self, hocon: str) -> dict[str, Any]:
+        """引擎校验：mock 直接通过（不探测 CLI、不起子进程——容器内 CLI 不可用）。"""
+        return {"ok": True, "summary": "engine check passed (mock)"}
+
+    async def submit_job(self, hocon: str, *, job_name: str = "") -> str:
+        """提交：不起 REST，返回稳定 mock job_id（幂等可重放）。"""
+        return f"{self.JOB_ID_PREFIX}{job_name or 'unnamed'}"
+
+    async def job_status(self, job_id: str) -> EngineJobStatus:
+        """状态：恒 FINISHED + 演示态聚合指标（与真实 seed 1002 行 / 2 脏行同形态）。"""
+        return EngineJobStatus(
+            job_id=job_id,
+            status=STATUS_FINISHED,
+            metrics=self.demo_metrics(),
+        )
+
+    async def stop_job(self, job_id: str) -> None:
+        """终止：no-op（mock 通道没有真实作业可停）。"""
+
+    @staticmethod
+    def demo_metrics() -> dict[str, Any]:
+        """演示态聚合指标（引擎回传口径：行数 / 字节 / 质量分流事实）。
+
+        脏行两条：NULL 金额、updated_at 越界（T-DEMO-01 现状下地址超宽行
+        已不可落库）。reject_rate≈0.2%，低于典型质量契约阈值，四态走 PASS。
+        """
+        return {
+            "source_rows": 1002,
+            "sink_rows": 1000,
+            "source_bytes": 102_400,
+            "sink_bytes": 101_200,
+            "tables": [{"table": "order_wide", "rows": 1000, "bytes": 101_200}],
+            "quality": {
+                "total_rows": 1002,
+                "passed_rows": 1000,
+                "rejected_rows": 2,
+                "error_codes": {
+                    "QUALITY_NOT_NULL_AMOUNT": 1,
+                    "QUALITY_WATERMARK_OUT_OF_RANGE": 1,
+                },
+            },
+        }
+
+
+def build_engine(settings: Any) -> SeaTunnelClient:
+    """按引擎选型装配客户端（F5：engine_mode 白名单在 config 侧 fail-fast）。
+
+    Args:
+        settings: 应用 Settings（读取 engine_mode / seatunnel_url / 超时）。
+
+    Returns:
+        engine_mode=mock → MockSeaTunnelClient；其余（real）→ RestSeaTunnelClient。
+        非法值已在 `Settings.validate_worker` 启动期拒绝，此处不再重复校验。
+    """
+    if settings.engine_mode == "mock":
+        return MockSeaTunnelClient()
+    return RestSeaTunnelClient(
+        settings.seatunnel_url,
+        submit_timeout_seconds=settings.seatunnel_submit_timeout_seconds,
+        check_timeout_seconds=settings.seatunnel_check_timeout_seconds,
+    )

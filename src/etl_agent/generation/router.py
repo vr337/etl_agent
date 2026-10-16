@@ -37,6 +37,7 @@ def _to_response(run: AgentRun) -> AgentRunResponse:
         id=run.id,
         thread_id=run.thread_id,
         status=run.status,
+        pipeline_version_id=run.pipeline_version_id,  # AMEND-009 加法字段
         pending_question=run.pending_question,
         generation_backend=run.generation_backend,
         generation_model=run.generation_model,

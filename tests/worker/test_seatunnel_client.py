@@ -1,7 +1,8 @@
 """SeaTunnel 客户端用例（T-13.7 / FR-20/38）。
 
 覆盖：REST 提交与状态查询、失败分类（拒绝 / 不可达）、CLI `--check` 脱敏摘要与
-临时文件（含明文凭据）用后即删。
+临时文件（含明文凭据）用后即删；MockSeaTunnelClient（S10 演示口径：人类裁决 C
+mock engine，F5）与 build_engine 选型（engine_mode 白名单）。
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
+from etl_agent.config import ProductionConfigError
 from etl_agent.execution.errors import (
     SeatunnelCheckFailed,
     SeatunnelSubmitFailed,
@@ -24,6 +26,7 @@ from etl_agent.worker.seatunnel_client import (
     ENGINE_TERMINAL_STATUSES,
     RestSeaTunnelClient,
 )
+from tests.helpers import make_settings
 
 _HOCON_WITH_SECRET = 'sink { Jdbc { password = "super-secret-value" } }'
 
@@ -247,3 +250,80 @@ async def test_check_temp_file_mode_restricted(monkeypatch: pytest.MonkeyPatch) 
     assert not Path(captured["config_path"]).exists()
     if os.name != "nt":
         assert captured["mode"] == "0o600"
+
+
+# ---------------------------------------------------------------------------
+# MockSeaTunnelClient（F5：S10 演示口径 mock engine，人类裁决 C）
+# 容器 worker 无 seatunnel.sh（F5 实证），且 REST submit 撞 T-ENGINE-01 NPE——
+# 裁决 C 的「mock engine」此前只在 tests/helpers.py 有替身、生产从未接线，
+# 本类把演示态引擎通道落到 src 侧，check/submit 为 mock、其余链路全真实执行。
+# ---------------------------------------------------------------------------
+
+
+async def test_mock_client_check_ok() -> None:
+    """mock check 直接通过：不探测 CLI、不起子进程（F5：容器内 CLI 不可用）。"""
+    client = module.MockSeaTunnelClient()
+    assert await client.check("hocon-body") == {"ok": True, "summary": "engine check passed (mock)"}
+
+
+async def test_mock_client_submit_returns_stable_job_id() -> None:
+    """mock submit 返回稳定 job_id（同版本重复提交同一 id，对齐稳定 JobId 语义）。"""
+    client = module.MockSeaTunnelClient()
+    job_a = await client.submit_job("hocon-body", job_name="etl-job-1")
+    job_b = await client.submit_job("hocon-body", job_name="etl-job-1")
+    assert job_a == job_b
+    assert job_a.startswith("mock-job-")
+
+
+async def test_mock_client_status_finished_with_demo_metrics() -> None:
+    """mock 终态 FINISHED + 演示态指标：与真实 seed 形态一致（1002 行 / 2 脏行）。
+
+    脏行两条：NULL 金额、updated_at 越界（T-DEMO-01 现状：地址超宽行已不可落库）。
+    mock 不搬数据——Doris 表不会被写入，指标是演示态合成值（脚本 [MOCK] 标注来源）。
+    """
+    client = module.MockSeaTunnelClient()
+    status = await client.job_status("mock-job-1")
+
+    assert status.status == "FINISHED"
+    assert status.status in ENGINE_TERMINAL_STATUSES
+    metrics = status.metrics or {}
+    assert metrics["source_rows"] == 1002
+    assert metrics["sink_rows"] == 1000
+    quality = metrics["quality"]
+    assert (quality["total_rows"], quality["passed_rows"], quality["rejected_rows"]) == (1002, 1000, 2)
+    assert quality["error_codes"] == {
+        "QUALITY_NOT_NULL_AMOUNT": 1,
+        "QUALITY_WATERMARK_OUT_OF_RANGE": 1,
+    }
+
+
+async def test_mock_client_stop_job_is_noop() -> None:
+    """mock 终止作业：no-op 不抛（取消链路容错）。"""
+    client = module.MockSeaTunnelClient()
+    await client.stop_job("mock-job-1")
+
+
+def test_build_engine_real_by_default() -> None:
+    """缺省 engine_mode=real：生产安全默认，绝不因漏配静默降级为 mock。"""
+    engine = module.build_engine(make_settings())
+    assert isinstance(engine, RestSeaTunnelClient)
+
+
+def test_build_engine_mock_when_configured() -> None:
+    """engine_mode=mock：返回 mock 客户端（S10 演示 / 无引擎环境联调）。"""
+    engine = module.build_engine(make_settings(engine_mode="mock"))
+    assert isinstance(engine, module.MockSeaTunnelClient)
+
+
+def test_engine_mode_mock_banned_in_production() -> None:
+    """ENV=prod 禁止 engine_mode=mock（对齐 llm_provider 红线：生产拒绝 mock 引擎）。"""
+    settings = make_settings(env="prod", engine_mode="mock")
+    with pytest.raises(ProductionConfigError, match="ENGINE_MODE"):
+        settings.validate_worker()
+
+
+def test_engine_mode_whitelist() -> None:
+    """engine_mode 白名单：非法值拒绝启动（fail-fast，不允许运行期猜）。"""
+    settings = make_settings(engine_mode="turbo")
+    with pytest.raises(ProductionConfigError, match="ENGINE_MODE"):
+        settings.validate_worker()

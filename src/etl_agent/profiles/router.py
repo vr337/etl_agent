@@ -142,4 +142,8 @@ async def create_profile(
         payload=payload,
         settings=request.app.state.settings,
     )
+    # 提交语义（联调回归）：create_profile 只 flush，必须在本路由 commit——
+    # `get_session` 退出即回滚，漏 commit 会「返回 201 但 Profile 不存在」，
+    # 生成运行随后取不到 profile，恒以 WAITING_INPUT 挂起（fix/S10-demo-script）。
+    await session.commit()
     return _to_response(profile)

@@ -25,11 +25,21 @@ async def test_router_create_agent_run(
             },
             headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
         )
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "WAITING_APPROVAL"
-    for absent in ("etl_plan", "hocon", "requirement", "candidate"):
-        assert absent not in body
+        assert response.status_code == 201
+        body = response.json()
+        assert body["status"] == "WAITING_APPROVAL"
+        for absent in ("etl_plan", "hocon", "requirement", "candidate"):
+            assert absent not in body
+
+        # AMEND-009：响应回传本次运行绑定的版本 id，且该版本可经 API 直取
+        version_id = body["pipeline_version_id"]
+        assert version_id
+        version = await client.get(
+            f"/api/v1/pipeline-versions/{version_id}",
+            headers={"X-Actor-ID": SeededWorkspace.ENGINEER_A},
+        )
+    assert version.status_code == 200, version.text
+    assert version.json()["id"] == version_id
 
 
 async def test_router_cross_project_403(app: FastAPI, seeded: SeededWorkspace) -> None:

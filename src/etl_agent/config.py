@@ -17,6 +17,9 @@ SECRET_PROVIDERS = frozenset({"fernet-db", "vault-kv-v2"})
 LLM_PROVIDERS = frozenset(
     {"openai", "deepseek", "doubao", "kimi", "zhipu", "custom", "mock"}
 )
+# 引擎通道选型（F5，S10 演示口径：人类裁决 C mock engine）：
+# real = 受管 SeaTunnel 执行；mock = 演示态合成指标（check/submit 为 mock）
+ENGINE_MODES = frozenset({"real", "mock"})
 
 # 生产强制项（AC-11 / SPEC 4.4-3）：HMAC 密钥与 Bootstrap Token 的最小长度
 MIN_SECRET_LENGTH = 32
@@ -178,6 +181,10 @@ class Settings(BaseSettings):
     seatunnel_url: str = "http://localhost:8080"
     seatunnel_submit_timeout_seconds: int = SEATUNNEL_SUBMIT_TIMEOUT_SECONDS_DEFAULT
     seatunnel_check_timeout_seconds: int = SEATUNNEL_CHECK_TIMEOUT_SECONDS_DEFAULT
+    # 引擎通道选型（F5：S10 演示口径 mock engine，人类裁决 C）：
+    # real = RestSeaTunnelClient（REST 提交 + CLI --check）；mock = MockSeaTunnelClient
+    #（check / submit 为演示态合成，其余链路全真实执行）。缺省 real——漏配绝不静默降级。
+    engine_mode: str = "real"
 
     # ---- Celery Worker / Beat（S7：FR-38/40 / ADR-06）----
     worker_heartbeat_interval_seconds: int = WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
@@ -248,6 +255,11 @@ class Settings(BaseSettings):
     def is_mock_llm(self) -> bool:
         """是否使用 mock provider（测试 / 无 Key 环境；生产被 validate_llm 拒绝）。"""
         return self.llm_provider == "mock"
+
+    @property
+    def is_mock_engine(self) -> bool:
+        """引擎通道是否为 mock（F5：check/submit 演示态合成，生产被 validate_worker 拒绝）。"""
+        return self.engine_mode == "mock"
 
     @property
     def file_asset_max_bytes(self) -> int:
@@ -383,6 +395,16 @@ class Settings(BaseSettings):
             )
         if not self.seatunnel_url.strip():
             raise ProductionConfigError("ETL_AGENT_SEATUNNEL_URL 未配置（FR-38：执行面唯一引擎出口）")
+        if self.engine_mode not in ENGINE_MODES:
+            raise ProductionConfigError(
+                f"ETL_AGENT_ENGINE_MODE 非法: {self.engine_mode!r}，可选 {sorted(ENGINE_MODES)}"
+            )
+        if self.is_mock_engine and self.is_production:
+            # 对齐 validate_llm 红线（S5 提示词 11.2）：生产环境 mock 引擎等于
+            # 用合成指标冒充执行事实，质量/监督/回滚全链路判定失真——严禁。
+            raise ProductionConfigError(
+                "ENV=prod 禁止 ETL_AGENT_ENGINE_MODE=mock（F5：mock 引擎仅限演示 / 联调）"
+            )
         if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
             raise ProductionConfigError(
                 "ETL_AGENT_OTEL_ENABLED=true 时 ETL_AGENT_OTEL_EXPORTER_OTLP_ENDPOINT 必填（FR-60）"

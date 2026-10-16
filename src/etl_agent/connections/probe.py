@@ -81,11 +81,16 @@ async def run_probe(
         summary = mask_error(str(exc), [config.password, config.username])
         connection.status = "FAILED"
         await session.flush()
+        # 提交语义（联调回归，fix/S10-demo-script）：终态必须在本分支 commit——
+        # 路由层已提交 TESTING（事务 1），此处处于同 session 的新隐式事务；
+        # 漏 commit 则终态随 get_session 退出回滚，连接永远停在 TESTING。
+        await session.commit()
         # 日志同样脱敏（S3 提示词 9.13：日志不含 password）
         logger.warning("probe failed: connection=%s summary=%s", connection.id, summary)
         return ProbeOutcome(status="FAILED", error_summary=summary)
     connection.status = "READY"
     await session.flush()
+    await session.commit()
     return ProbeOutcome(status="READY")
 
 
