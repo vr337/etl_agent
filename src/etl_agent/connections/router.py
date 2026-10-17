@@ -7,6 +7,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 6.1 章 API-02/03 / 第 3.2 章
 凭据治理端点（轮换 / 迁移 / 销毁）在 secrets 域服务落地后由本路由器的
 governance 分区挂载（S3 提示词 9.7~9.9 的路径均挂在 connections 之下）。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -67,7 +68,9 @@ def _to_response(connection: DataConnection, username: str | None = None) -> Con
     )
 
 
-@router.post("/projects/{project_id}/connections", status_code=201, response_model=ConnectionResponse)
+@router.post(
+    "/projects/{project_id}/connections", status_code=201, response_model=ConnectionResponse
+)
 async def register_connection(
     project_id: uuid.UUID,
     payload: ConnectionRegisterRequest,
@@ -98,9 +101,7 @@ async def list_connections(
     return [_to_response(connection) for connection in connections]
 
 
-@router.get(
-    "/projects/{project_id}/connections/{connection_id}", response_model=ConnectionResponse
-)
+@router.get("/projects/{project_id}/connections/{connection_id}", response_model=ConnectionResponse)
 async def get_connection(
     project_id: uuid.UUID,
     connection_id: uuid.UUID,
@@ -177,6 +178,9 @@ async def update_connection_policy(
     connection = await policy_service.update_policy(
         session, project_id=project_id, connection_id=connection_id, payload=payload
     )
+    # 提交语义（T-COMMIT-01）：policy_service.update_policy 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return _to_response(connection)
 
 
@@ -244,6 +248,9 @@ async def create_rotation(
         requested_by=actor.user_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：rotation_service.create_rotation 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return _rotation_response(rotation)
 
 
@@ -291,6 +298,9 @@ async def validate_rotation(
         rotation_id=rotation_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：rotation_service.validate_rotation 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return _rotation_response(rotation)
 
 
@@ -309,6 +319,9 @@ async def approve_rotation(
     rotation = await rotation_service.approve_rotation(
         session, project_id=project_id, rotation_id=rotation_id, approved_by=actor.user_id
     )
+    # 提交语义（T-COMMIT-01）：rotation_service.approve_rotation 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return _rotation_response(rotation)
 
 
@@ -324,12 +337,13 @@ async def activate_rotation(
     session: AsyncSession = Depends(get_session),
 ) -> RotationResponse:
     """激活轮换（FR-07：APPROVED → ACTIVATING → SUCCEEDED，切换连接到新凭据）。"""
-    await rotation_service.begin_activation(
-        session, project_id=project_id, rotation_id=rotation_id
-    )
+    await rotation_service.begin_activation(session, project_id=project_id, rotation_id=rotation_id)
     rotation = await rotation_service.finish_activation(
         session, project_id=project_id, rotation_id=rotation_id
     )
+    # 提交语义（T-COMMIT-01）：rotation_service.begin_activation + finish_activation 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return _rotation_response(rotation)
 
 
@@ -354,6 +368,9 @@ async def rollback_rotation(
         requested_by=actor.user_id,
         reason=reason,
     )
+    # 提交语义（T-COMMIT-01）：rollback_service.rollback_rotation 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return RollbackResponse(
         id=rollback.id,
         rotation_request_id=rollback.rotation_request_id,
@@ -404,6 +421,9 @@ async def create_migration(
         requested_by=actor.user_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：migration_service.create_migration 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return MigrationResponse(
         id=migration.id,
         connection_id=migration.connection_id,
@@ -434,6 +454,9 @@ async def stage_migration(
         migration_id=migration_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：migration_service.stage_migration 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return MigrationResponse(
         id=migration.id,
         connection_id=migration.connection_id,
@@ -460,6 +483,9 @@ async def activate_migration(
     migration = await migration_service.activate_migration(
         session, project_id=project_id, migration_id=migration_id
     )
+    # 提交语义（T-COMMIT-01）：migration_service.activate_migration 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return MigrationResponse(
         id=migration.id,
         connection_id=migration.connection_id,
@@ -495,6 +521,9 @@ async def create_destruction(
         requested_by=actor.user_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：destruction_service.request_destruction 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return DestructionResponse(
         id=destruction.id,
         secret_id=destruction.secret_id,
@@ -527,6 +556,9 @@ async def execute_destruction(
         destruction_id=destruction_id,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：destruction_service.execute_destruction 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return DestructionResponse(
         id=destruction.id,
         secret_id=destruction.secret_id,

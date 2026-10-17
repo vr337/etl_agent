@@ -27,8 +27,8 @@
 | S10 | 7 | 生成模板硬编码 PG 驱动 + worker 容器内寻址不可达 + worker 镜像漏插件索引 | **已修（真引擎通到执行阶段）** | ✅ **T-ENGINE-02 Closed** |
 | S10 | 8 | 生成的 sink `query` 非完整 INSERT，Doris 解析失败 | **已修（run20 落数 1000 行）** | ✅ **T-ENGINE-03 Closed** |
 | S7 | 6 | 调度环境继承口径 | 本阶段可收尾 | ✅ 人类裁决 A |
-| S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | 演示数据形态待裁决 | **T-DEMO-01** |
-| S10 | 2 | 非演示路径 12 处路由漏 commit | 独立排期 | **T-COMMIT-01** |
+| S10 | 1 | demo seed 脏行 3 不可落库（address 超宽） | **已修（VARCHAR(500)，重 init 1003 行）** | ✅ **T-DEMO-01 Closed** |
+| S10 | 2 | 非演示路径 12 处路由漏 commit | **已修（fix/T-COMMIT-01，12 处 + 12 测试）** | ✅ **T-COMMIT-01 Closed** |
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
 | S10 | 4 | 影子表/错误表执行通道为 Logging + 无质量分流（双路） | **已修（PR-A + PR-B，AC-16 真闭环）** | ✅ **T-SHADOW-01 Closed** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | **已修（命名统一到 `_shadow`）** | ✅ **T-SHADOW-02 Closed** |
@@ -202,7 +202,7 @@
 
 ### T-DEMO-01：demo seed 脏行 3 不可落库（address 超列宽）
 
-- **状态**：Open
+- **状态**：**已修（fix/T-COMMIT-01 一并处理，人类 2026-10-17 裁决）**
 - **发现**：S10 场景 A 演示准备（2026-10-16，MySQL 重新 init 时暴露）
 - **现象**：`infra/e2e/mysql-init/01-seed.sql` 脏数据 3（order_id=9003，
   `REPEAT('X', 400)` 地址）超出源表 `address VARCHAR(255)`，MySQL 8 严格模式
@@ -213,14 +213,18 @@
   `order_wide.address VARCHAR(255)` 的长度约束拒绝」，但源表自身先拒。
 - **影响**：质量分流的「地址超长」错误码不会出现（当前 2 条脏行：
   NULL 金额、未来水位）；不影响 AC-10 主链路其余证据。
-- **修复建议**（未实施，待人类裁决）：源表 `address` 加宽至 VARCHAR(500)
-  （或 TEXT），保留 400 字符脏行。注意会改变演示数据形态
-  （1002 → 1003 行、错误码分布 +1），需与质量报告预期一并评估。
+- **修复**：源表 `address` 加宽至 **VARCHAR(500)**（`infra/e2e/mysql-init/01-seed.sql:32`），
+  400 字符脏行得以落库；重 init 后实测 **1003 行**（1000 干净 + 3 脏），
+  seed 脚本不再于第 79 行中止（`CREATE USER demo_reader` 等尾部语句恢复执行）。
+- **演示数据形态随之改变**：一次真跑的质量口径从 `1002 / 1000 / 2（0.20%）` 变为
+  **`1003 / 1000 / 3（0.30%）`**，错误码多一条「地址超长」。
+  ⚠️ §8.9 的 A2/A3 截图仍是 run17（1002/2）口径，与重跑结果不再一致 ——
+  需要另起一次取证才能刷新（未在本次范围）。
 - **关联**：S10 T-22 demo-scenario-a；`etl_quality_summary` 表注释
 
 ### T-COMMIT-01：非演示路径 12 处路由漏 commit
 
-- **状态**：Open（独立排期，不混入 fix/S10-demo-script PR）
+- **状态**：**已修（fix/T-COMMIT-01）**
 - **发现**：S10 场景 A 联调排障（2026-10-16，F1 全库 AST 扫描：40 个写路由中
   14 个无 commit，generation create/resume 经 service 内部 commit 判否后实缺 15，
   演示路径 4 已修，余 12 在此登记）
@@ -232,8 +236,17 @@
   - `files` upload_file（1）
 - **影响**：对应功能在真实调用下静默丢数据；单测抓不到——conftest 的
   savepoint 模式下应用侧 commit 只释放 savepoint，与 F1 同族盲区
-- **修复建议**（未实施，待排期）：照 F1 范式补 `await session.commit()` 并配
-  commit-spy 回归测试（`tests/test_commit_persistence.py` 同款探针）
+- **修复**：照 F1 范式在**路由层**补 `await session.commit()`（12 处，`connections` 11 +
+  `files` 1），探针同款（`_spy_commits` from `tests/test_commit_persistence.py`）。
+  ⚠️ **其中 4 个 service 有不可逆外部副作用**（`create_rotation`→`provider.store`、
+  `stage_migration`→`source.read`+`target.store`、`execute_destruction`→`provider.destroy`、
+  `validate_rotation`→`provider.read`），发生在 flush 之前 —— 漏 commit 时
+  「凭据已写/已抄/已销毁，DB 记录消失」，`execute_destruction` 尤其致命
+  （不可逆 + 无审计记录）。本次修复已消除该窗口。
+- **回归**：`tests/test_commit_persistence_governance.py` 12 条 commit-spy
+  （负向验证：撤掉修复 12 failed / 装上 12 passed）；全量 **955 passed, 2 skipped**；
+  mypy 259 files 无问题；ruff check 我的 3 文件全过（`alembic/env.py` 的 2 个
+  I001 为 clean master 既有基线，非本次引入）。
 - **关联**：fix/S10-demo-script（F1 演示路径 4 处已修，人类裁决范围控制不外溢）
 
 ### T-AUDIT-01：审计钩子未接线，证据账本恒空（已修复）

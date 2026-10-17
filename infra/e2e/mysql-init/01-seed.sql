@@ -29,7 +29,7 @@ CREATE TABLE orders (
   customer_id  BIGINT       NOT NULL COMMENT '客户编号',
   amount       DECIMAL(18, 2) DEFAULT NULL COMMENT '金额（分；脏数据含 NULL）',
   status       VARCHAR(16)  NOT NULL DEFAULT 'PAID' COMMENT '订单状态',
-  address      VARCHAR(255) DEFAULT NULL COMMENT '收货地址（待归一化）',
+  address      VARCHAR(500) DEFAULT NULL COMMENT '收货地址（待归一化）',
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '增量水位列',
   PRIMARY KEY (order_id),
   KEY idx_orders_updated_at (updated_at),

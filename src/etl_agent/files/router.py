@@ -6,6 +6,7 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-E / 第 5.2 章 file_
 
 中间件分层沿用 S2/S3：权限走 `require_project_member` 依赖，不在中间件查业务表。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -99,6 +100,9 @@ async def upload_file_asset(
         upload=file,
         settings=request.app.state.settings,
     )
+    # 提交语义（T-COMMIT-01）：file_service.upload_file 只 flush 不 commit，`get_session` 退出即回滚
+    # → 「返回 2xx 但数据丢失」。必须在本路由落库（与 register_connection / /test 同范式）。
+    await session.commit()
     return FileAssetResponse(
         id=asset.id,
         format=asset.format,
@@ -108,9 +112,7 @@ async def upload_file_asset(
     )
 
 
-@router.get(
-    "/projects/{project_id}/file-assets/{asset_id}", response_model=FileProbeResponse
-)
+@router.get("/projects/{project_id}/file-assets/{asset_id}", response_model=FileProbeResponse)
 async def probe_file_asset(
     project_id: uuid.UUID,
     asset_id: uuid.UUID,
