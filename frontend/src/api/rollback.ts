@@ -6,13 +6,13 @@
  * 对应 AC：AC-08（硬中断 + 根因诊断 + 受管回滚）
  */
 import client from './client'
-import type { CleanupScanResponse, RollbackView } from './types'
+import type { CleanupScanResponse, RollbackListView, RollbackView } from './types'
 
 export async function listRollbacks(
   projectId: string,
   runId: string,
-): Promise<RollbackView[]> {
-  const { data } = await client.get<RollbackView[]>(
+): Promise<RollbackListView[]> {
+  const { data } = await client.get<RollbackListView[]>(
     `/projects/${projectId}/executions/${runId}/rollbacks`,
   )
   return data

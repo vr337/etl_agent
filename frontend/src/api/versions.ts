@@ -6,7 +6,12 @@
  * 对应 AC：AC-17（版本 Diff 视图）、AC-09（门禁全过才可冻结）
  */
 import client from './client'
-import type { PipelineVersionView, VersionDiffView } from './types'
+import type {
+  DeriveResponseView,
+  FreezeResponseView,
+  PipelineVersionView,
+  VersionDiffView,
+} from './types'
 
 export async function getVersion(versionId: string): Promise<PipelineVersionView> {
   const { data } = await client.get<PipelineVersionView>(`/pipeline-versions/${versionId}`)
@@ -16,8 +21,8 @@ export async function getVersion(versionId: string): Promise<PipelineVersionView
 export async function freezeVersion(
   versionId: string,
   payload: { gate_results: Record<string, boolean>; schedule_cron?: string },
-): Promise<PipelineVersionView> {
-  const { data } = await client.post<PipelineVersionView>(
+): Promise<FreezeResponseView> {
+  const { data } = await client.post<FreezeResponseView>(
     `/pipeline-versions/${versionId}/freeze`,
     payload,
   )
@@ -27,8 +32,8 @@ export async function freezeVersion(
 export async function deriveVersion(
   versionId: string,
   payload: { reason: string },
-): Promise<PipelineVersionView> {
-  const { data } = await client.post<PipelineVersionView>(
+): Promise<DeriveResponseView> {
+  const { data } = await client.post<DeriveResponseView>(
     `/pipeline-versions/${versionId}/derive`,
     payload,
   )

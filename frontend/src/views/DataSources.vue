@@ -55,33 +55,42 @@ const form = ref({
   password: '',
 })
 
+/**
+ * 表格列。
+ *
+ * 口径（`fix/S10-console-contract-a`）：后端 `ConnectionResponse` **只回**
+ * `host / port / database_name / username / secret_ref / credential_max_age_days /
+ * credential_warning_days`。历史列「凭据 Provider / 账龄（天）/ 到期预警 / 最后测试」
+ * 依赖后端**不存在**的字段（`secret_provider` / `secret_age_days` / `expiry_warning` /
+ * `last_tested_at`）→ 四列恒「—」。已替换为真实字段：地址 + 凭据托管引用。
+ */
 const columns: Column[] = [
   { key: 'name', label: '数据连接' },
   { key: 'connector_type', label: '类型' },
   { key: 'status', label: '状态' },
-  { key: 'secret_provider', label: '凭据 Provider' },
-  { key: 'secret_age_days', label: '账龄（天）', align: 'right' },
-  { key: 'expiry_warning', label: '到期预警' },
-  { key: 'last_tested_at', label: '最后测试' },
+  { key: 'address', label: '地址' },
+  { key: 'secret_ref', label: '凭据托管' },
   { key: 'actions', label: '操作', align: 'right' },
 ]
 
 const readyCount = computed(() => connections.value.filter((c) => c.status === 'READY').length)
 const testingCount = computed(() => connections.value.filter((c) => c.status === 'TESTING').length)
 const failedCount = computed(() => connections.value.filter((c) => c.status === 'FAILED').length)
-const expiringCount = computed(() => connections.value.filter((c) => c.expiry_warning).length)
-const providerModes = computed(
-  () => new Set(connections.value.map((c) => c.secret_provider ?? '—')).size,
-)
+/** 已托管凭据的连接数（`secret_ref` 非空即已托管） */
+const hostedCount = computed(() => connections.value.filter((c) => c.secret_ref).length)
+/** 凭据策略（后端按连接回 `credential_max_age_days` / `credential_warning_days`；取首条展示策略口径） */
+const policyLabel = computed(() => {
+  const first = connections.value[0]
+  return first ? `${first.credential_max_age_days} / ${first.credential_warning_days}` : '—'
+})
 
-function expiryTone(value: string | null): string {
-  if (!value) return 'neutral'
-  const upper = value.toUpperCase()
-  if (upper.includes('OVERDUE')) return 'danger'
-  if (upper.includes('WARN')) return 'warn'
-  return 'success'
-}
-
+/**
+ * 凭据轮换 / 迁移 / 销毁 / Webhook 退避 / Provider 迁移 的聚合指标。
+ *
+ * **无数据源**：后端 API 面未提供这些聚合端点（只有单条连接的
+ * `credential_max_age_days` / `credential_warning_days`）。历史上此面板是 5 个硬编码数字
+ * （1 项 / 3 项 / 2 条 / 0 项），已删除 —— 不以演示值冒充真实治理事实。
+ */
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KiB`
@@ -157,14 +166,17 @@ onMounted(load)
       :value="connections.length"
       :hint="`READY ${readyCount} · TESTING ${testingCount} · FAILED ${failedCount}`"
     />
-    <StatCard label="凭据 Provider" :value="`${providerModes} 模式`" hint="fernet-db · vault-kv-v2" />
     <StatCard
-      label="凭据到期预警"
-      :value="expiringCount"
-      hint="14 天内到期 · WARNING 级"
-      :tone="expiringCount ? 'warn' : 'default'"
+      label="凭据已托管"
+      :value="`${hostedCount} / ${connections.length}`"
+      hint="secret_ref 非空即已托管（响应零明文）"
     />
     <StatCard label="文件资产" :value="files.length" hint="上限 25 MiB / 100,000 行" />
+    <StatCard
+      label="凭据策略"
+      :value="policyLabel"
+      hint="最大账龄 / 预警提前量（天）"
+    />
   </div>
 
   <div class="ds-row">
@@ -234,14 +246,15 @@ onMounted(load)
             <template #cell-status="{ row }">
               <StatusBadge :status="row.status as string" />
             </template>
-            <template #cell-expiry_warning="{ row }">
-              <span v-if="row.expiry_warning" class="badge" :class="`badge--${expiryTone(row.expiry_warning as string)}`">
-                {{ row.expiry_warning }}
+            <template #cell-address="{ row }">
+              <span class="mono muted">
+                {{ row.host ?? '—' }}:{{ row.port ?? '—' }}
+                <template v-if="row.database_name">/ {{ row.database_name }}</template>
               </span>
-              <span v-else class="badge badge--success">OK</span>
             </template>
-            <template #cell-last_tested_at="{ row }">
-              <span class="muted mono">{{ row.last_tested_at ? String(row.last_tested_at).slice(0, 16).replace('T', ' ') : '—' }}</span>
+            <template #cell-secret_ref="{ row }">
+              <span v-if="row.secret_ref" class="badge badge--success">已托管</span>
+              <span v-else class="badge badge--neutral">未托管</span>
             </template>
             <template #cell-actions="{ row }">
               <button
@@ -272,11 +285,22 @@ onMounted(load)
           <span class="badge badge--warn">fernet 主密钥 KMS 托管待 S-Q7</span>
         </div>
         <div class="card__body grid-5">
-          <div><div class="mini__k">Provider 分布</div><div class="mini__v">{{ connections.length }} / {{ providerModes }}</div><div class="mini__h">fernet-db / vault-kv-v2</div></div>
-          <div><div class="mini__k">轮换进行中</div><div class="mini__v">1 项</div><div class="mini__h">VALIDATING → SUCCEEDED</div></div>
-          <div><div class="mini__k">销毁墓碑</div><div class="mini__v">3 项</div><div class="mini__h">不含密钥，仅保留定位</div></div>
-          <div><div class="mini__k">Webhook 退避冷却</div><div class="mini__v">2 条</div><div class="mini__h">退避 2/5 · 冷却中</div></div>
-          <div><div class="mini__k">Provider 迁移</div><div class="mini__v">0 项</div><div class="mini__h">目标 UUID · 终态重试</div></div>
+          <div>
+            <div class="mini__k">已托管凭据</div>
+            <div class="mini__v">{{ hostedCount }} / {{ connections.length }}</div>
+            <div class="mini__h">secret_ref 非空即已托管</div>
+          </div>
+          <div>
+            <div class="mini__k">最大账龄 / 预警提前</div>
+            <div class="mini__v">{{ policyLabel }}</div>
+            <div class="mini__h">credential_max_age_days / warning_days（天）</div>
+          </div>
+          <div style="grid-column: span 3">
+            <div class="mini__k">轮换 / 迁移 / 销毁 / Webhook 退避</div>
+            <div class="mini__h">
+              后端 API 面未提供这些聚合端点，故此处不展示数值 —— 不以演示值代替真实治理事实。
+            </div>
+          </div>
         </div>
       </section>
     </div>

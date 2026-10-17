@@ -16,14 +16,31 @@ import StatusBadge from './StatusBadge.vue'
 
 const props = defineProps<{ report: QualityReportView | null | undefined }>()
 
-const errorCodes = computed(() => {
-  const dist = props.report?.error_code_distribution ?? {}
-  return Object.entries(dist).sort((a, b) => b[1] - a[1])
+/**
+ * 错误码分布。
+ *
+ * 口径（`fix/S10-console-contract-a`）：后端 `QualityReportView` **没有**
+ * `error_code_distribution` 字段 —— 错误码在 `diagnostics` 里，
+ * 形如 `{kind:'error_codes', counts:{CODE: n}}`。历史实现读不存在的字段 →
+ * 「错误码分布」区块恒不渲染。
+ */
+const errorCodes = computed<[string, number][]>(() => {
+  const diag = props.report?.diagnostics?.find((item) => item.kind === 'error_codes')
+  const counts = diag?.counts ?? {}
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])
 })
 
-const rejectRatePercent = computed(() =>
-  props.report ? (props.report.reject_rate * 100).toFixed(2) : '—',
+/** 其余诊断条目（`insufficient_rows` / `quarantined` 等）转可读文本——后端是对象，不能直接插值。 */
+const diagnosticTexts = computed<string[]>(() =>
+  (props.report?.diagnostics ?? [])
+    .filter((item) => item.kind !== 'error_codes')
+    .map((item) => (item.detail ? `${item.kind}：${item.detail}` : item.kind)),
 )
+
+const rejectRatePercent = computed(() => {
+  const rate = props.report?.reject_rate
+  return typeof rate === 'number' ? (rate * 100).toFixed(2) : '—'
+})
 </script>
 
 <template>
@@ -36,15 +53,15 @@ const rejectRatePercent = computed(() =>
     <div class="quality__grid">
       <div class="quality__cell">
         <div class="quality__k">总行数</div>
-        <div class="quality__v">{{ report.total_rows.toLocaleString() }}</div>
+        <div class="quality__v">{{ report.total_rows?.toLocaleString() ?? '—' }}</div>
       </div>
       <div class="quality__cell">
         <div class="quality__k">通过</div>
-        <div class="quality__v quality__v--ok">{{ report.passed_rows.toLocaleString() }}</div>
+        <div class="quality__v quality__v--ok">{{ report.passed_rows?.toLocaleString() ?? '—' }}</div>
       </div>
       <div class="quality__cell">
         <div class="quality__k">拒绝</div>
-        <div class="quality__v quality__v--bad">{{ report.rejected_rows.toLocaleString() }}</div>
+        <div class="quality__v quality__v--bad">{{ report.rejected_rows?.toLocaleString() ?? '—' }}</div>
       </div>
       <div class="quality__cell">
         <div class="quality__k">拒绝率</div>
@@ -61,8 +78,8 @@ const rejectRatePercent = computed(() =>
       </div>
     </div>
 
-    <ul v-if="report.diagnostics.length" class="quality__diag">
-      <li v-for="(item, index) in report.diagnostics" :key="index">{{ item }}</li>
+    <ul v-if="diagnosticTexts.length" class="quality__diag">
+      <li v-for="(item, index) in diagnosticTexts" :key="index">{{ item }}</li>
     </ul>
   </div>
   <div v-else class="quality__empty">暂无质量报告（运行完成后生成）</div>

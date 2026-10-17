@@ -32,11 +32,11 @@ import type {
   ProfileView,
 } from '@/api/types'
 import GateChecklist, { type GateItem } from '@/components/GateChecklist.vue'
-import HoconViewer from '@/components/HoconViewer.vue'
 import SchemaDiff, { type DiffRow } from '@/components/SchemaDiff.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useActorStore } from '@/stores/actor'
 import { useNotificationStore } from '@/stores/notification'
+import { toDiffRows } from '@/utils/versionDiffRows'
 
 const actor = useActorStore()
 const notifications = useNotificationStore()
@@ -67,11 +67,13 @@ const repairCount = computed(() => activeRun.value?.repair_count ?? 0)
 const REPAIR_BUDGET = 3
 const repairExhausted = computed(() => repairCount.value >= REPAIR_BUDGET)
 
-const hoconText = computed(() => currentVersion.value?.hocon ?? '')
-const etlPlanText = computed(() => {
-  const plan = currentVersion.value?.etl_plan
-  return plan ? JSON.stringify(plan, null, 2) : ''
-})
+/*
+ * 候选正文（HOCON / EtlPlan）**后端不提供**：
+ * `GET /pipeline-versions/{id}` 只回摘要（`artifact_sha256` + `artifacts[]` 的 SHA256），
+ * 正文留在 `etl_checkpoint`（FR-67），API 面无「取版本正文」端点。
+ * 历史实现回落 `SAMPLE_HOCON` / `SAMPLE_ETLPLAN` 演示正文 —— 已删除，模板改为显式空态
+ * （`fix/S10-console-contract-a`）。
+ */
 
 /** 门禁 14 项（FR-55）：全 PASS 才允许冻结（AC-09）。 */
 const DEFAULT_GATES: GateItem[] = [
@@ -92,8 +94,13 @@ const DEFAULT_GATES: GateItem[] = [
 ]
 const gatesPassed = computed(() => gates.value.filter((gate) => gate.passed).length)
 
-/** 候选预算 ≤3 / 候选 2/3（原型图口径）。 */
-const candidateOrdinal = computed(() => Math.min(repairCount.value + 2, REPAIR_BUDGET))
+/**
+ * 修回次数（真实字段 `AgentRunListView.repair_count`）。
+ *
+ * 历史实现是「候选 = repair_count + 2 / 3」（原型图口径），会凭空显示「候选 2/3」
+ * 这类不存在的候选序号 —— 已改为直接展示修回次数（`fix/S10-console-contract-a`）。
+ */
+const repairBudgetLabel = computed(() => `${repairCount.value} / ${REPAIR_BUDGET}`)
 
 /* ---- 加载 ---- */
 async function load() {
@@ -153,7 +160,7 @@ async function loadVersion(versionId: string) {
   await loadDiff(versionId)
 }
 
-/** 与父版本 diff（AC-17）：无父版本则无差异可述。 */
+/** 与父版本 diff（AC-17）：无父版本则无差异可述；映射走共享工具（与 Diff 视图同源）。 */
 async function loadDiff(targetVersionId: string) {
   const parentId = currentVersion.value?.parent_version_id
   if (!parentId) {
@@ -161,27 +168,7 @@ async function loadDiff(targetVersionId: string) {
     return
   }
   try {
-    const diff = await diffVersions(targetVersionId, parentId)
-    diffRows.value = [
-      ...diff.schema_changes.map((change) => ({
-        changeType: 'Schema' as const,
-        object: change.object,
-        before: change.before,
-        after: change.after,
-      })),
-      ...diff.hocon_changes.map((change) => ({
-        changeType: 'HOCON' as const,
-        object: change.object,
-        before: change.before,
-        after: change.after,
-      })),
-      ...diff.quality_changes.map((change) => ({
-        changeType: '质量规则' as const,
-        object: change.object,
-        before: change.before,
-        after: change.after,
-      })),
-    ]
+    diffRows.value = toDiffRows(await diffVersions(targetVersionId, parentId))
   } catch {
     diffRows.value = []
   }
@@ -190,10 +177,18 @@ async function loadDiff(targetVersionId: string) {
 /* ---- 动作 ---- */
 async function onGenerate() {
   if (!actor.projectId) return
-  const source = connections.value.find((conn) => conn.endpoint_role === 'SOURCE')
-  const sink = connections.value.find((conn) => conn.endpoint_role === 'SINK')
+  // 端点角色只能从 **Profile** 取：`ConnectionResponse` 无 `endpoint_role` 字段
+  // （历史实现按连接找，恒失败 → 生成按钮永远报「需先登记 SOURCE 与 SINK」）。
+  const sourceProfile = profiles.value.find((item) => item.endpoint_role === 'SOURCE')
+  const sinkProfile = profiles.value.find((item) => item.endpoint_role === 'SINK')
+  const source = sourceProfile
+    ? connections.value.find((conn) => conn.id === sourceProfile.connection_id)
+    : undefined
+  const sink = sinkProfile
+    ? connections.value.find((conn) => conn.id === sinkProfile.connection_id)
+    : undefined
   if (!source || !sink) {
-    notifications.error('需先登记 SOURCE 与 SINK 两类数据连接（数据源与资产页）')
+    notifications.error('需先登记 SOURCE 与 SINK 两类数据连接的 Profile（数据源与资产页发起表级探查）')
     return
   }
   submitting.value = true
@@ -271,17 +266,14 @@ onMounted(load)
           <div class="clarify__head">
             <span class="badge badge--info">LLM 澄清问题</span>
           </div>
-          <p class="clarify__q">{{ activeRun?.clarify_question ?? '请补充增量水位列与时区口径。' }}</p>
+          <p class="clarify__q">{{ activeRun?.clarify_question ?? '（后端未回传澄清问题）' }}</p>
         </div>
         <div v-else-if="activeRun" class="clarify">
           <div class="clarify__head">
             <span class="badge badge--neutral">澄清已收敛</span>
           </div>
           <p class="clarify__q">
-            {{
-              (activeRun.telemetry?.clarify_question as string | undefined) ??
-              'orders.updated_at 是否可作为增量水位列？时区与滞后秒数如何取？'
-            }}
+            本次运行已收敛（status = <span class="mono">{{ activeRun.status }}</span>），无待回答问题。
           </p>
         </div>
 
@@ -319,7 +311,7 @@ onMounted(load)
           <h2 class="card__title">候选产物（预算 ≤{{ REPAIR_BUDGET }}）</h2>
           <p class="card__subtitle">EtlPlan + HOCON 双后端产出</p>
         </div>
-        <span class="badge badge--info">候选 {{ candidateOrdinal }} / {{ REPAIR_BUDGET }}</span>
+        <span class="badge badge--info">修回 {{ repairBudgetLabel }}（预算 ≤{{ REPAIR_BUDGET }}）</span>
       </div>
       <div class="card__body" style="padding-top: 0">
         <div class="tabs">
@@ -331,19 +323,18 @@ onMounted(load)
           </button>
         </div>
 
-        <div v-if="candidateTab === 'hocon'">
-          <HoconViewer v-if="hoconText" :code="hoconText" max-height="300px" />
-          <pre v-else class="code" style="max-height: 300px">{{ SAMPLE_HOCON }}</pre>
-        </div>
-        <div v-else>
-          <pre v-if="etlPlanText" class="code" style="max-height: 300px">{{ etlPlanText }}</pre>
-          <pre v-else class="code" style="max-height: 300px">{{ SAMPLE_ETLPLAN }}</pre>
-        </div>
+        <p class="card__subtitle" style="padding: 12px 0; margin: 0">
+          {{ candidateTab === 'hocon' ? 'HOCON' : 'EtlPlan' }} 正文不在本端点出参内：
+          <span class="mono">GET /pipeline-versions/{id}</span> 只回制品摘要
+          （<span class="mono">artifacts[]</span> 的 SHA256），正文留在
+          <span class="mono">etl_checkpoint</span>（FR-67）。此处不展示演示正文。
+        </p>
 
         <div class="candidate__foot">
           <div class="row">
-            <span class="badge badge--success">✓ SeaTunnel --check 通过</span>
-            <span class="muted" style="font-size: 10.5px">运行期变量在 Worker 期物化，图内仅存记号</span>
+            <span class="muted" style="font-size: 10.5px">
+              运行期变量在 Worker 期物化，图内仅存记号；引擎校验结论以执行事件流为准
+            </span>
           </div>
         </div>
         <p class="card__subtitle">
@@ -408,76 +399,30 @@ onMounted(load)
       <div v-if="versionChain.length === 0" class="chain">
         <div class="chain__card">
           <div class="chain__top">
-            <span class="chain__v">V{{ currentVersion?.version_number ?? 7 }}</span>
-            <StatusBadge :status="currentVersion?.status ?? 'DRAFT'" />
+            <span class="chain__v">{{ currentVersion ? `V${currentVersion.version_number}` : 'V—' }}</span>
+            <StatusBadge :status="currentVersion?.status ?? '—'" />
           </div>
-          <div class="chain__meta">未冻结 · 当前编辑</div>
-          <div class="chain__meta mono">parent_version_id = {{ currentVersion?.parent_version_id ? currentVersion.parent_version_id.slice(0, 8) : '—' }}</div>
+          <div class="chain__meta">
+            {{ currentVersion?.parent_version_id ? '派生版本' : '首版本（无父版本）' }}
+          </div>
+          <div class="chain__meta mono">
+            parent_version_id = {{ currentVersion?.parent_version_id ? currentVersion.parent_version_id.slice(0, 8) : '—' }}
+          </div>
+          <div class="chain__meta mono">
+            artifact_sha256 = {{ currentVersion?.artifact_sha256 ? `${currentVersion.artifact_sha256.slice(0, 8)}…` : '—' }}
+          </div>
+          <div class="chain__meta mono">lock_version = {{ currentVersion?.lock_version ?? '—' }}</div>
         </div>
-        <div class="chain__card chain__card--ghost">
-          <div class="chain__top">
-            <span class="chain__v">V6</span>
-            <span class="badge badge--success">APPROVED</span>
-          </div>
-          <div class="chain__meta mono">{{ (currentVersion?.artifact_sha256 ?? 'a9d1c2ff').slice(0, 8) }}…</div>
-          <div class="chain__meta">审批人: DATA_APPROVER + SECURITY_APPROVER</div>
-        </div>
-        <div class="chain__card chain__card--ghost">
-          <div class="chain__top">
-            <span class="chain__v">V5</span>
-            <span class="badge badge--danger">REJECTED</span>
-          </div>
-          <div class="chain__meta mono">7b02c8</div>
-          <div class="chain__meta">驳回原因：放宽质量阈值</div>
-        </div>
-        <div class="chain__card chain__card--ghost">
-          <div class="chain__top">
-            <span class="chain__v">V4</span>
-            <span class="badge badge--success">APPROVED</span>
-          </div>
-          <div class="chain__meta mono">c2f8d44</div>
-          <div class="chain__meta">lock_version = 4</div>
+        <div class="chain__meta" style="align-self: center; max-width: 320px">
+          版本链只能靠 <span class="mono">parent_version_id</span> 逐级回溯 ——
+          后端没有「列出版本链」端点，故此处只展示当前版本，**不再渲染演示用的历史版本卡**
+          （历史实现固定画了 V4/V5/V6 三张假卡，含假 APPROVED/REJECTED 状态与假 SHA）。
         </div>
       </div>
     </div>
   </section>
 </template>
 
-<script lang="ts">
-/** 演示态样例正文（后端无候选产物时兜底；`SeaTunnel --check` 依赖引擎，S10 为 mock 模式）。 */
-export const SAMPLE_HOCON = `{
-  "plan_version": "1",
-  "source": {
-    "connection": "mysql_orders",
-    "table": "orders",
-    "columns": ["order_id", "amount", "updated_at"],
-    "endpoint_role": "SOURCE"
-  },
-  "sink": {
-    "connection": "doris_dw",
-    "table": "order_wide",
-    "write_mode": "upsert",
-    "publish": "atomic_swap"
-  },
-  "transform": [
-    { "type": "sql", "expr": "amount / 100.0 AS amount" },
-    { "type": "lin_row", "provider": "DEEPSPEED" },
-    { "prompt_ref": "secret://prompt/add-norm" }
-  ],
-  "incremental": { "watermark_column": "updated_at", "lag_seconds": 300 },
-  "quality": { "max_reject_rate": 0.5, "valid_reject_route": true }
-}`
-
-export const SAMPLE_ETLPLAN = `{
-  "plan_version": "1",
-  "steps": [
-    { "id": "extract", "connector": "mysql-cdc", "table": "source_db.orders" },
-    { "id": "transform", "ops": ["money::fen_to_yuan", "text::address_normalize"] },
-    { "id": "load", "connector": "doris", "table": "doris_dw.order_wide", "mode": "upsert" }
-  ],
-  "quality": { "reject_route": "etl_quarantine", "max_reject_rate": 0.5 }
-}`
-</script>
 
 <style scoped>
 .studio-top {

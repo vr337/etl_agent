@@ -17,6 +17,7 @@ import { diffVersions, getVersion } from '@/api/versions'
 import type { PipelineVersionView, VersionDiffView } from '@/api/types'
 import SchemaDiff, { type DiffRow } from '@/components/SchemaDiff.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import { diffCounts, toDiffRows } from '@/utils/versionDiffRows'
 import { useActorStore } from '@/stores/actor'
 
 const actor = useActorStore()
@@ -29,36 +30,20 @@ const baseVersion = ref<PipelineVersionView | null>(null)
 const loading = ref(false)
 const errorText = ref('')
 
-const rows = computed<DiffRow[]>(() => {
-  const current = diff.value
-  if (!current) return []
-  return [
-    ...current.schema_changes.map((change) => ({
-      changeType: 'Schema' as const,
-      object: change.object,
-      before: change.before,
-      after: change.after,
-    })),
-    ...current.hocon_changes.map((change) => ({
-      changeType: 'HOCON' as const,
-      object: change.object,
-      before: change.before,
-      after: change.after,
-    })),
-    ...current.quality_changes.map((change) => ({
-      changeType: '质量规则' as const,
-      object: change.object,
-      before: change.before,
-      after: change.after,
-    })),
-  ]
-})
+/** 三类正文级差异 → 表格行（映射逻辑见 `@/utils/versionDiffRows`，与 Studio 共用）。 */
+const rows = computed<DiffRow[]>(() => toDiffRows(diff.value))
 
-const counts = computed(() => ({
-  schema: diff.value?.schema_changes.length ?? 0,
-  hocon: diff.value?.hocon_changes.length ?? 0,
-  quality: diff.value?.quality_changes.length ?? 0,
-}))
+const counts = computed(() => diffCounts(diff.value))
+
+/** 制品摘要级差异（`artifact_digests`，**恒可用**，不依赖 Checkpoint 正文）。 */
+const artifactRows = computed(() =>
+  Object.entries(diff.value?.artifact_digests ?? {}).map(([type, item]) => ({
+    type,
+    before: item.before,
+    after: item.after,
+    changed: item.changed,
+  })),
+)
 
 async function submit() {
   if (!targetId.value || !baseId.value) {
@@ -146,7 +131,35 @@ onMounted(() => {
       </div>
     </div>
     <div class="card__body" style="padding: 0">
-      <SchemaDiff :rows="rows" empty-text="两版本在三类维度上均无差异" />
+      <p v-if="!diff.content_available" class="card__subtitle" style="padding: 12px 14px; margin: 0">
+        两版本候选正文未能同时从 Checkpoint 取到（<span class="mono">content_available=false</span>），
+        故 Schema / HOCON / 质量规则三个**正文级** diff 为空；下方另给出**制品摘要级**差异。
+      </p>
+      <SchemaDiff :rows="rows" empty-text="两版本在三类正文维度上均无差异（或正文不可得）" />
+    </div>
+    <div v-if="artifactRows.length" class="card__body" style="padding: 0">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>制品摘要</th>
+            <th>Before</th>
+            <th>After</th>
+            <th style="width: 110px">结论</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in artifactRows" :key="item.type">
+            <td class="mono">{{ item.type }}</td>
+            <td class="mono muted">{{ item.before.slice(0, 12) }}…</td>
+            <td class="mono muted">{{ item.after.slice(0, 12) }}…</td>
+            <td>
+              <span class="badge" :class="item.changed ? 'badge--warn' : 'badge--neutral'">
+                {{ item.changed ? 'CHANGED' : '不变' }}
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     <div class="card__body" style="padding-top: 0">
       <div class="hash-grid">
