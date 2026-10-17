@@ -6,7 +6,7 @@
  * 对应 AC：AC-02（脱敏样本无明文）
  */
 import client from './client'
-import type { ProfileView } from './types'
+import type { ProfileResponseView, ProfileView } from './types'
 
 export async function listProfiles(projectId: string): Promise<ProfileView[]> {
   const { data } = await client.get<ProfileView[]>(`/projects/${projectId}/profiles`)
@@ -22,7 +22,10 @@ export async function probeTable(
     endpoint_role: 'SOURCE' | 'SINK'
     sample_limit: number
   },
-): Promise<ProfileView> {
-  const { data } = await client.post<ProfileView>(`/projects/${projectId}/profiles`, payload)
+): Promise<ProfileResponseView> {
+  const { data } = await client.post<ProfileResponseView>(
+    `/projects/${projectId}/profiles`,
+    payload,
+  )
   return data
 }

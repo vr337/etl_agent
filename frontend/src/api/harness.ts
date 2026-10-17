@@ -7,7 +7,13 @@
  * 对应 AC：AC-05（Harness 三阶段协议）、AC-01（职责分离：不可自批）
  */
 import client from './client'
-import type { CommitResponse, DecisionRequest, PreparationView } from './types'
+import type {
+  CommitResponse,
+  DecisionRequest,
+  DecisionResponseView,
+  PreparationCreateResponseView,
+  PreparationView,
+} from './types'
 
 export async function listPreparations(projectId: string): Promise<PreparationView[]> {
   const { data } = await client.get<PreparationView[]>(`/projects/${projectId}/preparations`)
@@ -17,8 +23,8 @@ export async function listPreparations(projectId: string): Promise<PreparationVi
 export async function createPreparation(
   projectId: string,
   payload: { pipeline_version_id: string; target_environment: string },
-): Promise<PreparationView> {
-  const { data } = await client.post<PreparationView>(
+): Promise<PreparationCreateResponseView> {
+  const { data } = await client.post<PreparationCreateResponseView>(
     `/projects/${projectId}/preparations`,
     payload,
   )
@@ -28,8 +34,8 @@ export async function createPreparation(
 export async function decidePreparation(
   preparationId: string,
   payload: DecisionRequest,
-): Promise<PreparationView> {
-  const { data } = await client.post<PreparationView>(
+): Promise<DecisionResponseView> {
+  const { data } = await client.post<DecisionResponseView>(
     `/preparations/${preparationId}/decisions`,
     payload,
   )

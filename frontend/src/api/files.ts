@@ -6,18 +6,25 @@
  * 对应 AC：AC-02（上传路径不落明文；本页只列元数据）
  */
 import client from './client'
-import type { FileAssetView } from './types'
+import type { FileAssetDetailView, FileAssetView } from './types'
 
 export async function listFileAssets(projectId: string): Promise<FileAssetView[]> {
   const { data } = await client.get<FileAssetView[]>(`/projects/${projectId}/file-assets`)
   return data
 }
 
-export async function uploadFileAsset(projectId: string, file: File): Promise<FileAssetView> {
+export async function uploadFileAsset(
+  projectId: string,
+  file: File,
+): Promise<FileAssetDetailView> {
   const form = new FormData()
   form.append('file', file)
-  const { data } = await client.post<FileAssetView>(`/projects/${projectId}/file-assets`, form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+  const { data } = await client.post<FileAssetDetailView>(
+    `/projects/${projectId}/file-assets`,
+    form,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    },
+  )
   return data
 }

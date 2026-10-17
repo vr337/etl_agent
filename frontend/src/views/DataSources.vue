@@ -126,7 +126,7 @@ async function onTest(connectionId: string) {
   testingId.value = connectionId
   try {
     const result = await testConnection(actor.projectId, connectionId)
-    notifications.success(`连通性测试：${result.status}（${result.latency_ms ?? '—'} ms）`)
+    notifications.success(`连通性测试已受理：status=${result.status}（受理于 ${result.started_at}）`)
     await load()
   } catch {
     // 错误已由 client 拦截器统一提示
