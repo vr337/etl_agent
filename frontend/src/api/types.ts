@@ -196,6 +196,23 @@ export interface VersionArtifactView {
   sha256: string
 }
 
+/** 冻结出参（对齐后端 `FreezeResponse`：版本级摘要 + 制品明细，**无** `version_number` 等）。 */
+export interface FreezeResponseView {
+  id: string
+  artifact_sha256: string
+  status: string
+  artifacts: VersionArtifactView[]
+}
+
+/** 派生新版本出参（对齐后端 `DeriveResponse`；新版本为 DRAFT，无 `artifact_sha256`）。 */
+export interface DeriveResponseView {
+  id: string
+  pipeline_id: string
+  version_number: number
+  status: string
+  parent_version_id: string | null
+}
+
 export interface GateResultView {
   rule_id: string
   name: string
@@ -318,11 +335,12 @@ export type ExecutionStatus =
   | 'CANCELLED'
   | 'QUARANTINED'
 
+/** 执行事件流条目（对齐后端 `ExecutionEventView`：level / stage / event_type / message / occurred_at）。 */
 export interface ExecutionEventView {
-  id: string
+  level: string
+  stage: string | null
   event_type: string
-  message: string | null
-  payload: Record<string, unknown> | null
+  message: string
   occurred_at: string
 }
 
@@ -343,12 +361,41 @@ export interface ExecutionRunView {
   snapshot_sha256: string | null
 }
 
-export interface ExecutionDetailView extends ExecutionRunView {
-  events: ExecutionEventView[]
+/**
+ * 执行运行**详情**（对齐后端 `ExecutionDetailResponse` = 后端 `ExecutionRunView` + events + 监督快照）。
+ *
+ * **不能 `extends ExecutionRunView`**：前端 `ExecutionRunView` 对齐的是**列表**模型
+ * `ExecutionRunListView`（展示口径 `trigger_mode` / `target_rows` / `bytes_processed`），
+ * 而详情出参用的是**列名口径**（`trigger` / `sink_rows` / `source_bytes` / `sink_bytes`）。
+ * 两者是同一事实的两种命名 —— 混用会让详情页一半字段恒 `undefined`
+ * （`fix/S10-console-contract-a` 修正；由 `npm run check:contract` 发现）。
+ */
+export interface ExecutionDetailView {
+  id: string
+  pipeline_version_id: string
+  harness_preparation_id: string | null
+  status: ExecutionStatus
+  trigger: 'MANUAL' | 'SCHEDULED'
+  seatunnel_job_id: string | null
+  engine_status: string | null
+  scheduled_for: string | null
+  source_rows: number | null
+  sink_rows: number | null
+  source_bytes: number | null
+  sink_bytes: number | null
+  table_metrics: Record<string, unknown> | null
+  retry_of_run_id: string | null
+  attempt_number: number
   failure_category: string | null
   failure_stage: string | null
   retryable: boolean | null
-  recommendation: string | null
+  diagnosis: string | null
+  submitted_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  last_observed_at: string | null
+  events: ExecutionEventView[]
+  supervision_snapshot: Record<string, unknown> | null
 }
 
 /**
@@ -389,9 +436,27 @@ export interface QualityDiagnosticView {
 
 /* ---- 回滚 ---- */
 
+/**
+ * 回滚申请**列表**项（对齐后端 `RollbackListView`）。
+ *
+ * 与 `RollbackView`（详情）是**两套出参**：列表用 `execution_run_id`（= 后端 `run_id` 的
+ * 列表别名）且 `risk_level` 恒 `null`（PDP 风险判决落在 Harness 副作用准备单上，
+ * 回滚申请表无该列，后端不跨域拼接）。
+ */
+export interface RollbackListView {
+  id: string
+  execution_run_id: string
+  status: string
+  /** 后端如实回 `null`（回滚申请表无风险列） */
+  risk_level: RiskLevel | null
+  artifact_manifest: Record<string, unknown> | null
+  created_at: string
+}
+
+/** 回滚申请**详情**（对齐后端 `RollbackResponse`；`run_id` 非 `execution_run_id`）。 */
 export interface RollbackView {
   id: string
-  /** 关联执行运行（后端字段名 `run_id`，曾误写 `execution_run_id`） */
+  /** 关联执行运行（详情口径字段名 `run_id`） */
   run_id: string
   status: string
   reason: string | null
