@@ -32,6 +32,7 @@ export interface ApiErrorBody {
 
 export const ACTOR_STORAGE_KEY = 'actor_id'
 export const PROJECT_STORAGE_KEY = 'project_id'
+export const ACTOR_ROLE_STORAGE_KEY = 'actor_role'
 
 /**
  * 判断当前是否允许以 dev-header 注入身份。
@@ -60,6 +61,21 @@ export function getProjectId(): string | null {
 
 export function setProjectId(projectId: string): void {
   localStorage.setItem(PROJECT_STORAGE_KEY, projectId)
+}
+
+/**
+ * 职责（`ADMIN` / `DATA_ENGINEER` …）的持久化读写。
+ *
+ * T-CONSOLE-01：此前只有 `actor_id` / `project_id` 落 localStorage，`actorRole`
+ * 仅存内存 → F5 后顶部栏恒显「未绑定职责」。职责来自 bootstrap 响应
+ * （`role: 'ADMIN'`），不涉密，可随身份一并持久化。
+ */
+export function getActorRole(): string | null {
+  return localStorage.getItem(ACTOR_ROLE_STORAGE_KEY)
+}
+
+export function setActorRole(role: string): void {
+  localStorage.setItem(ACTOR_ROLE_STORAGE_KEY, role)
 }
 
 const client: AxiosInstance = axios.create({

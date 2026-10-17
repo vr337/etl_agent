@@ -21,9 +21,10 @@
  */
 import { computed, onMounted, ref } from 'vue'
 
-import { listExecutions, getQualityReport } from '@/api/executions'
+import { getExecution, listExecutions, getQualityReport } from '@/api/executions'
 import { commitPreparation, decidePreparation, listPreparations } from '@/api/harness'
 import type {
+  ExecutionDetailView,
   ExecutionRunView,
   PreparationView,
   QualityReportView,
@@ -37,6 +38,7 @@ import StatCard from '@/components/StatCard.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useActorStore } from '@/stores/actor'
 import { useNotificationStore } from '@/stores/notification'
+import { derivePublishState, type PublishStateView } from '@/utils/publishState'
 
 const actor = useActorStore()
 const notifications = useNotificationStore()
@@ -44,6 +46,8 @@ const notifications = useNotificationStore()
 const executions = ref<ExecutionRunView[]>([])
 const preparations = ref<PreparationView[]>([])
 const qualityReport = ref<QualityReportView | null>(null)
+/** T-OBS-01：最近一次 SUCCEEDED 运行的详情（只用来派生发布状态） */
+const executionDetail = ref<ExecutionDetailView | null>(null)
 const loading = ref(true)
 const committing = ref(false)
 
@@ -93,6 +97,14 @@ const supervisionRisk = computed<RiskLevel | null>(
 
 const failedRun = computed(() => executions.value.find((run) => run.status === 'FAILED') ?? null)
 
+/**
+ * T-OBS-01：发布状态。由 `events[]` 派生（后端不暴露该状态），取不到详情时为 null ——
+ * 模板据实显示「未知」，**不**回落到某个看似正常的状态。
+ */
+const publishState = computed<PublishStateView | null>(() =>
+  executionDetail.value ? derivePublishState(executionDetail.value.events) : null,
+)
+
 async function load() {
   if (!actor.projectId) {
     loading.value = false
@@ -111,7 +123,16 @@ async function load() {
   }
   const success = executions.value.find((run) => run.status === 'SUCCEEDED')
   if (success) {
-    qualityReport.value = await getQualityReport(success.id).catch(() => null)
+    const [report, detail] = await Promise.all([
+      getQualityReport(success.id).catch(() => null),
+      // T-OBS-01：发布状态只由事件流派生，后端不对外暴露 → 取同一次运行的详情，
+      // 用 events[] 派生「发布成没成 / 为什么被阻断」（不新增接口、不改契约）。
+      getExecution(success.id).catch(() => null),
+    ])
+    qualityReport.value = report
+    executionDetail.value = detail
+  } else {
+    executionDetail.value = null
   }
 }
 
@@ -325,6 +346,21 @@ onMounted(load)
               <span class="badge badge--outline">run {{ failedRun.id.slice(0, 8) }}</span>
             </div>
           </div>
+
+          <div class="row" style="justify-content: space-between">
+            <span class="diagnosis__label">发布状态</span>
+            <span v-if="!publishState" class="badge badge--neutral">未知（未取到执行详情）</span>
+            <span v-else-if="publishState.state === 'PUBLISHED'" class="badge badge--success">
+              已发布 PUBLISHED
+            </span>
+            <span v-else-if="publishState.state === 'BLOCKED'" class="badge badge--danger">
+              发布被阻断 BLOCKED
+            </span>
+            <span v-else class="badge badge--neutral">未发布 READY</span>
+          </div>
+          <p v-if="publishState?.state === 'BLOCKED' && publishState.reason" class="card__subtitle" style="margin: 0">
+            {{ publishState.reason }}
+          </p>
 
           <QualityReportCard :report="qualityReport" />
 
