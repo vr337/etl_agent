@@ -132,7 +132,13 @@ export interface AgentRunView {
 export interface PipelineVersionView {
   id: string
   pipeline_id: string
-  version_no: number
+  /**
+   * 版本号。**字段名对齐后端** `PipelineVersionResponse.version_number`
+   * （`src/etl_agent/versions/schemas.py:29`）—— 曾误写为 `version_no`，
+   * 后端该端点不返回该字段 → 取值恒 `undefined`，页面渲染 `Vundefined` / `VNaN`
+   * （T-CONSOLE-04，fix/S10-console-version-no 修复）。
+   */
+  version_number: number
   status: string
   artifact_sha256: string
   parent_version_id: string | null
