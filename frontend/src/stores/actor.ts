@@ -11,7 +11,15 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { getActorId, getProjectId, setActorId, setProjectId } from '@/api/client'
+import {
+  ACTOR_ROLE_STORAGE_KEY,
+  getActorId,
+  getActorRole,
+  getProjectId,
+  setActorId,
+  setActorRole,
+  setProjectId,
+} from '@/api/client'
 
 export const useActorStore = defineStore('actor', () => {
   const actorId = ref<string | null>(getActorId())
@@ -19,7 +27,8 @@ export const useActorStore = defineStore('actor', () => {
   // 刷新后从 localStorage 恢复显示名（actor_id 即 subject，与 bind() 传入的 name 同源）；
   // 此前仅 id/projectId 持久化、actorName 恒回初值「未登录」，导致 F5 后顶部栏身份丢失。
   const actorName = ref<string>(getActorId() ?? '未登录')
-  const actorRole = ref<string>('')
+  // T-CONSOLE-01：职责一并持久化，否则 F5 后顶部栏恒显「未绑定职责」
+  const actorRole = ref<string>(getActorRole() ?? '')
 
   function bind(actor: { actorId: string; projectId: string; name?: string; role?: string }) {
     actorId.value = actor.actorId
@@ -31,6 +40,7 @@ export const useActorStore = defineStore('actor', () => {
     }
     if (actor.role) {
       actorRole.value = actor.role
+      setActorRole(actor.role)
     }
     // 演示期把 subject 末段作为展示名（后端无「显示名」字段，避免臆造字段）
     if (!actor.name) {
@@ -45,6 +55,7 @@ export const useActorStore = defineStore('actor', () => {
     actorRole.value = ''
     localStorage.removeItem('actor_id')
     localStorage.removeItem('project_id')
+    localStorage.removeItem(ACTOR_ROLE_STORAGE_KEY)
   }
 
   const isReady = () => Boolean(actorId.value && projectId.value)

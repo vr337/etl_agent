@@ -3,6 +3,7 @@
 覆盖：9 类分类全可达、显式分类优先、异常类型映射、消息关键字兜底、
 可重试性判定、UNKNOWN 兜底。
 """
+
 from __future__ import annotations
 
 from etl_agent.diagnosis.classifiers import (
@@ -57,7 +58,7 @@ def test_classify_configuration() -> None:
 
 def test_classify_credentials() -> None:
     """物化失败 / 鉴权失败 → CREDENTIALS。"""
-    assert classify(message="credential materialization failed") .category == CATEGORY_CREDENTIALS
+    assert classify(message="credential materialization failed").category == CATEGORY_CREDENTIALS
     assert classify(message="password 鉴权失败").category == CATEGORY_CREDENTIALS
     assert classify(message="unauthorized").category == CATEGORY_CREDENTIALS
 
@@ -80,6 +81,23 @@ def test_classify_sink_write() -> None:
     """目标写入失败 → SINK_WRITE。"""
     result = classify(message="permission denied: disk full")
     assert result.category == CATEGORY_SINK_WRITE
+
+
+def test_classify_data_plane_ddl_engine() -> None:
+    """数据面 DDL 失败 → ENGINE（T-CLASSIFY-01：run21 的 aiomysql OperationalError 实测形态）。
+
+    回归口径：`DorisShadowTableExecutor` 抛的是 aiomysql 原生
+    `OperationalError(1105, "errCode = 2, ...")`（未包本域异常），异常类型匹配不到，
+    只能靠消息关键字判；判成 UNKNOWN 会让诊断读不出族别、重试决策退化成兜底值。
+    """
+    result = classify(message='OperationalError: (1105, "errCode = 2, ... already exists")')
+    assert result.category == CATEGORY_ENGINE
+    assert result.retryable is True
+    assert result.matched_by == "keyword"
+
+    # 纯 DDL 语义也要命中（不依赖具体错误码）
+    assert classify(message="CREATE TABLE order_wide_error failed").category == CATEGORY_ENGINE
+    assert classify(message="ALTER TABLE swap 被拒").category == CATEGORY_ENGINE
 
 
 def test_classify_engine() -> None:

@@ -23,6 +23,7 @@ ENGINE/OBSERVABILITY/CANCELLATION/UNKNOWN + 失败阶段 + 可重试性 + 修复
 判定顺序：**显式传入的 `failure_category` 优先**（监督链路已判决的事实不被关键字覆盖），
 其次异常类型，最后消息关键字。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -161,6 +162,29 @@ _KEYWORD_RULES: tuple[tuple[tuple[str, ...], str, bool, str], ...] = (
         CATEGORY_CONFIGURATION,
         False,
         "配置类失败：核对 HOCON 与连接器参数，重新生成版本后再执行",
+    ),
+    (
+        # 数据面 DDL 失败（T-CLASSIFY-01：run21 暴露）。`DorisShadowTableExecutor`
+        # 直接抛 aiomysql 的 `OperationalError`（未包本域异常），异常类型匹配不到，
+        # 只能靠消息关键字判。**必须排在 CONNECTIVITY / SINK_WRITE 之前**：
+        # 上游失败消息里含 "errCode = 2" 这类无意义提示词，落到连通族会误导重试决策。
+        # `1105` 是 Doris 常见的「存储/元数据不可用」码（run21 实测形态）。
+        (
+            "ddl",
+            "alter table",
+            "create table",
+            "drop table",
+            "already exists",
+            "errcode",
+            "1105",
+            "数据面",
+        ),
+        CATEGORY_ENGINE,
+        True,
+        (
+            "数据面 DDL 失败（影子表 / 错误表 / 目标表建表或 Swap）：核对目标端 Doris "
+            "可用性与表结构；依赖不可用另见 CONNECTIVITY"
+        ),
     ),
     (
         ("otel", "trace", "logger", "遥测", "日志"),

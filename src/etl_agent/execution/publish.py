@@ -12,13 +12,14 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-K / 第 6.1 章 API-1
 | 1 | 未被 QUARANTINE（`quarantined_at` / `supervision_action`） | `BIZ_422_SWAP_QUARANTINED` | `evaluate_publish_gate` |
 | 2 | 质量报告 `PASSED` | `BIZ_422_SWAP_QUALITY_FAILED` | `evaluate_publish_gate` |
 | 3 | 影子表与正式表 Schema 一致 | `BIZ_422_SWAP_SCHEMA_MISMATCH` | `execute_atomic_swap`（swap 前读两侧 `DESC` 逐列比对） |
-| 4 | 幂等：未发布过 | —（直接返回已发布） | `publish_run`（由事件流派生） |
+| 4 | 幂等：未发布过 | —（直接返回已发布） | `evaluate_publish_gate`（结论随 `PublishDecision.already_published` 回传） |
 
-**为什么第 3 道不在门禁函数里**（T-SHADOW-01 PR-B 修正说明）：本 PR 前 docstring 误称
-「四道都在 `evaluate_publish_gate`」，实际该函数只判 1、2 道，且白收了一个未使用的
-`executor` 参数。**本 PR 只做最小修正**（删僵尸参数 + 让文档说真话），不把 schema 校验
-挪进门禁函数——那会让 Doris 被读两次，且属重构，不在「接线」范围内。
-收拢到一处的后续事项见 tracking 的 **T-PUBLISH-01**。
+**门禁分布说明**（T-PUBLISH-01）：1/2/4 道在 `evaluate_publish_gate` 一处判，
+第 3 道**留在** `execute_atomic_swap` 内——它必须读两侧 `DESC`，属执行期动作，
+挪进门禁函数会让 Doris 被读两次（T-SHADOW-01 PR-B 的结论，本 PR 沿用）。
+历史上 docstring 曾误称「四道都在 `evaluate_publish_gate`」且门禁函数白收未用的
+`executor` 僵尸参数，PR-B 已删参数并让文档说真话；本 PR 再把第 4 道的判据从
+`publish_run` 收拢进来（原先它另行查一次事件流，与本函数判据重复）。
 
 **发布状态机的状态载体**：SPEC 5.2 的 `execution_runs` 没有发布状态列，故状态由
 **事件流**（`execution.publish_*`）承载并由 `current_publish_state()` 派生——
@@ -81,6 +82,8 @@ class PublishDecision:
     allowed: bool
     reason: str
     code: str | None = None
+    """T-PUBLISH-01：第 4 道（幂等）的结论随裁决一起回传，调用方无需再查一次事件流。"""
+    already_published: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,13 +149,17 @@ async def evaluate_publish_gate(
     report: QualityReport | None,
     targets: PublishTargets,
 ) -> PublishDecision:
-    """门禁裁决（第 1、2 道；不执行任何副作用，失败只返回裁决，不抛异常）。
+    """门禁裁决（第 1、2、4 道；不执行任何副作用，失败只返回裁决，不抛异常）。
 
     `targets` 是**决策上下文**（要发布什么），故保留；`executor` 是执行通道依赖，
     属错误分层，T-SHADOW-01 PR-B 已删（原先是白收未用的僵尸参数）。
 
-    第 3 道（Schema 一致）在 `execute_atomic_swap` 内判——它必须读两侧 `DESC`，
-    属执行期动作；第 4 道（幂等）在 `publish_run` 判。见模块 docstring 的门禁分布表。
+    第 3 道（Schema 一致）**仍**在 `execute_atomic_swap` 内判——它必须读两侧 `DESC`，
+    属执行期动作；挪进来会让 Doris 被读两次。见模块 docstring 的门禁分布表。
+
+    T-PUBLISH-01：第 4 道（幂等）原先由 `publish_run` 另行查一次 `current_publish_state`，
+    与本函数的判据重复；现把结论并入 `PublishDecision.already_published`，
+    调用方直接取用（少一次事件流查询，且「是否幂等」只有一个判据来源）。
     """
     if is_quarantined(run):
         return PublishDecision(
@@ -168,7 +175,11 @@ async def evaluate_publish_gate(
             reason=f"质量报告状态 {status}，未达 PASSED，禁止原子发布（FR-43/44）",
         )
     if await current_publish_state(session, run.id) == STATE_PUBLISHED:
-        return PublishDecision(allowed=True, reason="幂等：该运行已发布")
+        return PublishDecision(
+            allowed=True,
+            already_published=True,
+            reason="幂等：该运行已发布，不重复 Swap",
+        )
     return PublishDecision(allowed=True, reason="四道门禁通过")
 
 
@@ -189,9 +200,7 @@ async def publish_run(
         SwapSchemaMismatch:     Schema 不一致（swap 前拦截）。
         DependencyUnavailable:  目标端 Doris 不可达。
     """
-    decision = await evaluate_publish_gate(
-        session, run, report=report, targets=targets
-    )
+    decision = await evaluate_publish_gate(session, run, report=report, targets=targets)
     if not decision.allowed:
         await record_event(
             session,
@@ -208,12 +217,12 @@ async def publish_run(
             reason=decision.reason,
             code=decision.code,
         )
-    if await current_publish_state(session, run.id) == STATE_PUBLISHED:
+    if decision.already_published:
         return PublishOutcome(
             published=True,
             blocked=False,
             state=STATE_PUBLISHED,
-            reason="幂等：该运行已发布，不重复 Swap",
+            reason=decision.reason,
         )
     try:
         result: SwapResult = await execute_atomic_swap(

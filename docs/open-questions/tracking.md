@@ -32,20 +32,20 @@
 | S10 | 3 | 审计钩子未接线，证据账本恒空 | 已修复（F3） | ✅ 人类裁决已闭环 |
 | S10 | 4 | 影子表/错误表执行通道为 Logging + 无质量分流（双路） | **已修（PR-A + PR-B，AC-16 真闭环）** | ✅ **T-SHADOW-01 Closed** |
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | **已修（命名统一到 `_shadow`）** | ✅ **T-SHADOW-02 Closed** |
-| S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 本 PR 已修） | 独立排期 | **T-CONSOLE-01** |
+| S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 已修） | **已修（actorRole 持久化）** | ✅ **T-CONSOLE-01 Closed** |
 | — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
 | S10 | 9 | 引擎 metrics 跨 task 重试累加，失败作业行数虚高（4008=4×1002） | 独立排期 | **T-METRICS-01** |
 | S10 | 12 | 未覆盖脏行类型（类型不匹配/超长）仍可能毒化 batch | 独立排期 | **T-SHADOW-03** |
 | S10 | 10 | doris-init 注释与 PRD 10.5 #4 矛盾（本 PR 不动） | 独立排期 | **T-DOCS-01** |
 | S10 | 11 | etl_quality_summary 在 src/ 下零写入点（死表） | 独立排期 | **T-SHADOW-04** |
-| S10 | 12 | 数据面 DDL 失败未映射到 ENGINE 族（run21 暴露，本 PR 不动） | 独立排期 | **T-CLASSIFY-01** |
-| S10 | 13 | 发布四门禁散在三处 + 门禁函数曾有僵尸 `executor` 参数 | 独立排期 | **T-PUBLISH-01** |
+| S10 | 12 | 数据面 DDL 失败未映射到 ENGINE 族（run21 暴露，本 PR 不动） | **已修（关键字映射 → ENGINE）** | ✅ **T-CLASSIFY-01 Closed** |
+| S10 | 13 | 发布四门禁散在三处 + 门禁函数曾有僵尸 `executor` 参数 | **已修（第 4 道判据收拢 + 文档改真）** | ✅ **T-PUBLISH-01 Closed** |
 | S10 | 14 | Swap 失败的回退状态未区分（swap 已执行 / 未执行） | 独立排期 | **T-SWAP-01** |
-| S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | 独立排期 | **T-OBS-01** |
+| S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | **已修（前端由 events[] 派生 + 角标）** | ✅ **T-OBS-01 Closed** |
 | S10 | 16 | 引擎容器（worker/seatunnel/doris）未设 TZ，与源库 CST 差 8h → 水位谓词全量拒收 | **已修（fix/infra-tz；run28 复验 1000/2）** | ✅ **T-TZ-01 Closed** |
 | S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | 独立排期 | **T-QUALITY-01** |
 | S10 | 18 | Pipeline Studio 门禁 14/14 / HOCON 正文 / 版本链 / 候选数为硬编码演示态，未标「示意」 | 独立排期 | **T-CONSOLE-02** |
-| S10 | 19 | Safety 页 Benchmark 六项门禁回落演示值，`live` 字段算了但模板未用 | 独立排期 | **T-CONSOLE-03** |
+| S10 | 19 | Safety 页 Benchmark 六项门禁回落演示值 | **已修（fix/S10-console-contract-a，PR #27）** | ✅ **T-CONSOLE-03 Closed** |
 | S10 | 20 | Studio 读 `version_no`（实际 `version_number`）→ 渲染 `Vundefined` / `VNaN` / 版本链恒 `V7` | **已修（PR #25，5 处引用全修）** | ✅ **T-CONSOLE-04 Closed** |
 
 ## 三、独立运维事项
@@ -343,7 +343,7 @@
 
 ### T-CLASSIFY-01：数据面 DDL 失败未映射到 ENGINE 族（新，Open）
 
-- **状态**：Open（**本 PR 不动**——X3 范围控制；T-SHADOW-01 run21 暴露）
+- **状态**：**已修（chore/M2-cleanup，取建议 ② 关键字映射，无需 AMEND）**
 - **现象**：run21 作业在建表阶段失败，`execution_runs.failure_category = **UNKNOWN**`、
   `failure_stage = dispatch`、`diagnosis` 是 aiomysql 原样的
   `OperationalError: (1105, "errCode = 2, ...")` —— 未被 `classify_failure` 归入
@@ -352,24 +352,38 @@
   演示与排障时运维看到的是原始堆栈摘要而非分类结论
 - **根因**：`execution/shadow.py` 的 `DorisShadowTableExecutor` 直接抛 aiomysql 的
   `OperationalError`（未包成本域异常），`classify_failure` 只认本域异常与已知引擎异常
-- **修复建议**（待裁决，二选一）：① 在 `execution/errors.py` 新增数据面 DDL 失败码
-  （如 `BIZ_503_DATA_PLANE_UNAVAILABLE`）并把 `OperationalError` 包成该族异常
-  （需 AMEND，参照 AMEND-006/007 格式）；② 在 `classify_failure` 里对
-  `OperationalError` 文本做关键字映射（不改错误码表，**不需 AMEND**）
+- **修复**（取建议 ②，最小改动、不用 AMEND）：`classifiers._KEYWORD_RULES` 新增
+  数据面 DDL 规则（`ddl` / `alter table` / `create table` / `drop table` /
+  `already exists` / `errcode` / `1105` / `数据面`）→ **ENGINE、可重试**。
+  **必须排在 CONNECTIVITY / SINK_WRITE 之前**：上游消息含「errCode = 2」这类
+  无意义提示词，落到连通族会误导重试决策。`1105` 是 Doris 常见
+  「存储/元数据不可用」码（run21 实测形态）。
+  建议 ①（新增 `BIZ_503_DATA_PLANE_UNAVAILABLE` 并包本域异常）留待真要改错误码表时再做。
 - **关联**：T-SHADOW-01（run21 暴露）；`execution/metrics.py`；SPEC 6.4 错误码体系
 
-### T-PUBLISH-01：发布四门禁散在三处（新，Open）
+### T-PUBLISH-01：发布四门禁散落在三处（新，Open）
 
-- **状态**：Open（低优先级，结构债）
+- **状态**：**已修（chore/M2-cleanup：第 4 道判据收拢 + 文档说真话）**
 - **发现**：T-SHADOW-01 PR-B 探查（2026-10-16）
 - **现象**：`publish.py` 模块 docstring 原称「四道门禁」都在 `evaluate_publish_gate`，
   实际只判 ①②；③（Schema 一致）在 `execute_atomic_swap` 内、④（幂等）在 `publish_run` 内。
   且 `evaluate_publish_gate` 白收了一个**未使用的 `executor` 参数**（执行通道依赖漏进了
   纯决策函数）
-- **PR-B 处置**：只做最小修正——删僵尸参数 + 把 docstring 改成「门禁分布表」让文档说真话。
-  **不**把 schema 校验挪进门禁函数（会让 Doris 被读两次，且属重构，不在「接线」范围内）
-- **修复方向**（待裁决）：把四道收拢到一个 `evaluate_publish_gate`（③ 的 schema 读取
-  作为其内部只读步骤，④ 的状态派生一并纳入），并删掉 `targets` 里当前也未使用的部分
+- **修复（本 PR）**：
+  1. **第 4 道收拢** —— `evaluate_publish_gate` 其实早已判幂等（PR-B 后留着），
+     但 `publish_run` 又**另查一次** `current_publish_state`，判据两处、事件流查询翻倍。
+     现把结论并入 `PublishDecision.already_published`，`publish_run` 直接取用
+     → 1/2/4 道同处判定，第 3 道仍是唯一外置判据（原因见下）。
+  2. **文档改真** —— 模块 docstring 的分布表改注「1/2/4 在 `evaluate_publish_gate`、
+     3 在 `execute_atomic_swap`」，并写清「③ 不挪」的理由（读两侧 `DESC` 属执行期动作，
+     挪进来会 Doris 被读两次）与本次收拢的范围。
+  3. **回归钉住** —— 新增 `test_gate_reports_idempotency`：未发布时
+     `already_published=False`，发布后 `True` 且 `reason` 以「幂等」开头；
+     既有 `test_atomic_swap_idempotent` 继续断言只 swap 一次。
+- **仍未做**：`PublishTargets.error_table` / `.quality_contract` 两个**未被
+  `publish_run` 读取**的字段（`resolve_targets` 填了没人用）没删——它们会牵动
+  `tests/execution/test_publish.py` 的构造与断言，属纯清理、与本次修的门禁无关，
+  按「最小改动」留给独立小 PR。
 - **关联**：T-SHADOW-01 PR-B；`execution/publish.py` / `atomic_swap.py`
 
 ### T-SWAP-01：Swap 失败的回退状态未区分（新，Open，低优先级）
@@ -476,16 +490,18 @@
 
 ### T-CONSOLE-01：控制台刷新后显示态未持久化
 
-- **状态**：Open（本 PR 已修 `actorName`；`actorRole` 待补）
+- **状态**：**已修（chore/M2-cleanup）**
 - **发现**：S10 场景 A 截图取证（2026-10-16，F5 刷新后顶部栏恒显「未登录」）
 - **现象**：`frontend/src/stores/actor.ts` 的 `actorName` 初值硬编码 `'未登录'`
   且不从 localStorage 恢复（只有 `actorId` / `projectId` 恢复）→ 刷新后身份显示
   丢失（`AppShell.vue` 顶部栏）；`actorRole` 同样未持久化（刷新后角色徽标为空）
 - **影响**：显示态不完整；鉴权**不受影响**（`X-Actor-ID` 由 `client.ts` 拦截器
   每次经 `getActorId()` 现读 localStorage）。截图/演示需手动 bind 才能显示身份
-- **处置**：本 PR（`fix/S10-console-refresh-defects`）修 `actorName`——刷新时从
-  `getActorId()` 恢复（1 行）；`actorRole` 需持久化方案（localStorage 增列或缓存
-  bootstrap 响应），另行排期
+- **处置**：`actorName` 已由 `fix/S10-console-refresh-defects` 修复；`actorRole`
+  由本 PR 补齐 —— `client.ts` 增 `ACTOR_ROLE_STORAGE_KEY` 读写，
+  `actor.ts` 的 `actorRole` 初值改从 `getActorRole()` 恢复、`bind()` 落库、
+  `clear()` 一并清除（职责来自 bootstrap 响应、不涉密，可随身份持久化）。
+  鉴权本就未受影响（`X-Actor-ID` 由拦截器现读 localStorage）。
 - **关联**：`fix/S10-console-refresh-defects`；`docs/demo/演示回放.md` §8.9
 
 ### T-TZ-01：引擎容器未设 TZ，与源库时区差 8h 导致水位谓词全量拒收

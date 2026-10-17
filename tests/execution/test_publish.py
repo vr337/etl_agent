@@ -169,6 +169,29 @@ async def test_atomic_swap_idempotent(db_session: AsyncSession, make_run) -> Non
     assert len(executor.swapped) == 1  # 只 swap 一次
 
 
+async def test_gate_reports_idempotency(db_session: AsyncSession, make_run) -> None:
+    """T-PUBLISH-01：第 4 道（幂等）判据随门禁裁决回传，`publish_run` 不再二次查询。
+
+    回归口径：`evaluate_publish_gate` 已能判幂等，但 `publish_run` 原先另查一次
+    `current_publish_state`（判据两处、事件流查询翻倍）。合并后 `already_published`
+    是唯一来源，且两次触发都只 swap 一次。
+    """
+    run = await make_run(status="RUNNING")
+    await _make_report(db_session, run.id, STATUS_PASSED)
+    report = await _report_of(db_session, run.id)
+    executor = LoggingSwapExecutor()
+
+    fresh = await evaluate_publish_gate(db_session, run, report=report, targets=TARGETS)
+    assert fresh.allowed is True and fresh.already_published is False
+
+    await publish_run(db_session, run, report=report, targets=TARGETS, executor=executor)
+
+    again = await evaluate_publish_gate(db_session, run, report=report, targets=TARGETS)
+    assert again.allowed is True
+    assert again.already_published is True, "已发布后门禁应带幂等结论"
+    assert again.reason.startswith("幂等")
+
+
 async def test_blocked_state_recorded(db_session: AsyncSession, make_run) -> None:
     """被阻断 → 事件流记 publish_blocked，派生状态 BLOCKED。"""
     run = await make_run(status="RUNNING")
