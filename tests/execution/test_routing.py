@@ -219,3 +219,45 @@ def test_report_view_never_includes_plaintext() -> None:
         "diagnostics",
         "generated_at",
     }
+
+
+def test_generated_contract_threshold_actually_gates() -> None:
+    """T-QUALITY-01 回归：**生成侧契约**必须真能卡住判定侧（防 fail-open 复发）。
+
+    判定侧 `classify_quality` 的语义是「未声明阈值 = 放行」，所以阈值必须由
+    生成侧（`llm/mock_provider.compliant_plan`）显式写进 `quality_contract`。
+    本用例走真实生成路径取契约，锁两条口径：
+
+    1. 演示 seed 的 3/1003 ≈ 0.30% 仍 **PASSED**（取证数字不变）；
+    2. 越过契约阈值 5% 必须 **FAILED**（不再靠「没声明阈值」蒙混过关）。
+    """
+    from etl_agent.llm.mock_provider import compliant_plan
+
+    columns = [
+        {"name": "order_id", "type": "bigint", "nullable": False},
+        {"name": "customer_id", "type": "bigint", "nullable": False},
+        {"name": "amount", "type": "decimal(18, 2)", "nullable": True},
+        {"name": "status", "type": "varchar(16)", "nullable": False},
+        {"name": "address", "type": "varchar(255)", "nullable": True},
+        {"name": "updated_at", "type": "datetime", "nullable": False},
+    ]
+
+    def profile(connector_type: str, table: str) -> dict[str, object]:
+        return {
+            "connector_type": connector_type,
+            "connection_id": "11111111-1111-1111-1111-111111111111",
+            "schema_name": "source_db",
+            "table_name": table,
+            "endpoint_role": "SOURCE",
+            "columns": columns,
+        }
+
+    contract = compliant_plan("需求", profile("MYSQL", "orders"), profile("DORIS", "order_wide"))[
+        "quality_contract"
+    ]
+    assert classify_quality(contract, QualityOutcome(total_rows=1003, rejected_rows=3))[0] == (
+        STATUS_PASSED
+    )
+    assert classify_quality(contract, QualityOutcome(total_rows=1003, rejected_rows=60))[0] == (
+        STATUS_FAILED
+    )

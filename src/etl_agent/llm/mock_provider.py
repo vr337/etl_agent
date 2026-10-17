@@ -128,6 +128,13 @@ def compliant_plan(
             # （与 execution.shadow 的派生名同源，消除契约与计划的漂移）
             "valid_sink": shadow,
             "error_sink": error,
+            # T-QUALITY-01 / fix-final-gate：**必须显式声明拒绝率阈值**。
+            # 缺了它 `classify_quality` 的两个超限判据（`max_rejected_rows` /
+            # `max_reject_rate`）同时不成立 → 直接落 PASSED，即 **fail-open**：
+            # 哪怕拒绝率 100% 也判通过、发布门禁第 2 道永远放行（追踪见 tracking.md）。
+            # 0.05 = 5%：演示 seed 的 3/1003 ≈ 0.30% 稳稳落在阈值内（仍 PASSED，
+            # 取证数字不变），而一旦拒绝率真超 5% 就 FAILED 并阻断发布。
+            "max_reject_rate": 0.05,
             "routing": [
                 *({"rule": rule["name"], "sink": shadow} for rule in rules),
                 {"rule": "default", "sink": error},

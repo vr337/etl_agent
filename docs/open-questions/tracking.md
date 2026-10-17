@@ -34,17 +34,17 @@
 | S10 | 5 | 质量契约 valid_sink 与派生影子表名漂移 | **已修（命名统一到 `_shadow`）** | ✅ **T-SHADOW-02 Closed** |
 | S10 | 6 | 控制台刷新后显示态未持久化（actorRole 空；name 已修） | **已修（actorRole 持久化）** | ✅ **T-CONSOLE-01 Closed** |
 | — | — | HOCON 的 sink/URL/driver 不应由 LLM 决定（真 LLM 接入前置） | 真 LLM 接入时 | **T-LLM-01** |
-| S10 | 9 | 引擎 metrics 跨 task 重试累加，失败作业行数虚高（4008=4×1002） | 独立排期 | **T-METRICS-01** |
-| S10 | 12 | 未覆盖脏行类型（类型不匹配/超长）仍可能毒化 batch | 独立排期 | **T-SHADOW-03** |
-| S10 | 10 | doris-init 注释与 PRD 10.5 #4 矛盾（本 PR 不动） | 独立排期 | **T-DOCS-01** |
-| S10 | 11 | etl_quality_summary 在 src/ 下零写入点（死表） | 独立排期 | **T-SHADOW-04** |
+| S10 | 9 | 引擎 metrics 跨 task 重试累加，失败作业行数虚高（4008=4×1002） | 独立排期 | **Closed (Won't Fix)** |
+| S10 | 12 | 未覆盖脏行类型（类型不匹配/超长）仍可能毒化 batch | 独立排期 | **Closed (Won't Fix)** |
+| S10 | 10 | doris-init 注释与 PRD 10.5 #4 矛盾（本 PR 不动） | **已修（fix/final-gate：注释改为 PRD 10.5 #4 例外条款口径）** | ✅ **T-DOCS-01 Closed** |
+| S10 | 11 | etl_quality_summary 在 src/ 下零写入点（死表） | **已修（fix/final-gate：删表定义，仅留 DROP 清理残留）** | ✅ **T-SHADOW-04 Closed** |
 | S10 | 12 | 数据面 DDL 失败未映射到 ENGINE 族（run21 暴露，本 PR 不动） | **已修（关键字映射 → ENGINE）** | ✅ **T-CLASSIFY-01 Closed** |
 | S10 | 13 | 发布四门禁散在三处 + 门禁函数曾有僵尸 `executor` 参数 | **已修（第 4 道判据收拢 + 文档改真）** | ✅ **T-PUBLISH-01 Closed** |
-| S10 | 14 | Swap 失败的回退状态未区分（swap 已执行 / 未执行） | 独立排期 | **T-SWAP-01** |
+| S10 | 14 | Swap 失败的回退状态未区分（swap 已执行 / 未执行） | 独立排期 | **Closed (Won't Fix)** |
 | S10 | 15 | publish 状态无可视化渠道（无字段 / 前端不渲染 events） | **已修（前端由 events[] 派生 + 角标）** | ✅ **T-OBS-01 Closed** |
 | S10 | 16 | 引擎容器（worker/seatunnel/doris）未设 TZ，与源库 CST 差 8h → 水位谓词全量拒收 | **已修（fix/infra-tz；run28 复验 1000/2）** | ✅ **T-TZ-01 Closed** |
-| S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | 独立排期 | **T-QUALITY-01** |
-| S10 | 18 | Pipeline Studio 门禁 14/14 / HOCON 正文 / 版本链 / 候选数为硬编码演示态，未标「示意」 | 独立排期 | **T-CONSOLE-02** |
+| S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | **已修（fix/final-gate：契约显式声明 `max_reject_rate: 0.05`）** | ✅ **T-QUALITY-01 Closed** |
+| S10 | 18 | Pipeline Studio 门禁 14/14 / HOCON 正文 / 版本链 / 候选数为硬编码演示态，未标「示意」 | 独立排期 | **Closed (Won't Fix)** |
 | S10 | 19 | Safety 页 Benchmark 六项门禁回落演示值 | **已修（fix/S10-console-contract-a，PR #27）** | ✅ **T-CONSOLE-03 Closed** |
 | S10 | 20 | Studio 读 `version_no`（实际 `version_number`）→ 渲染 `Vundefined` / `VNaN` / 版本链恒 `V7` | **已修（PR #25，5 处引用全修）** | ✅ **T-CONSOLE-04 Closed** |
 
@@ -185,9 +185,18 @@
   且**禁止**在 sink 段回退到 `query = "insert into <表>"` 形态（T-ENGINE-03 已证必败）。
 - **关联**：T-ENGINE-02（Closed）；T-ENGINE-03（Closed）；`llm/mock_provider.py`
 
-### T-METRICS-01：引擎 metrics 跨 task 重试累加，失败作业的行数虚高（新，Open）
+### T-METRICS-01：引擎 metrics 跨 task 重试累加，失败作业的行数虚高（**Closed (Won't Fix)**）
 
-- **状态**：Open（2026-10-16，T-ENGINE-03 run20 实证）
+- **状态**：**Closed (Won't Fix)**（2026-10-17，fix/final-gate，人类裁决不修直接关）
+- **不修原因**：
+  1. **只影响失败/重试作业**，成功作业（单次尝试）计数正确 → 演示与生产主链路无影响；
+  2. **取证口径已绕开**：AC-16 的权威行数改取 **Doris `count(*)`**，不再依赖 API 的
+     `source_rows/sink_rows`，本缺陷不再污染任何证据；
+  3. 修复需在 `execution/metrics.py` 引入 **task attempt 维度**（按 attempt 去重 / 取最新
+     快照），等于改「引擎指标 → 运行指标」的语义，收益（仅失败作业的诊断精度）不抵
+     改动面与回归风险，M2 收尾不做。
+- **遗留口径**：失败作业的 `source_rows` / `sink_rows` **不可当行数用**（会按尝试次数倍增），
+  排障时以 Doris 侧计数为准。此口径已写入本条，后续若接真 LLM / 生产排障面板再评估。
 - **现象**：run20 作业终态 FAILED，`execution_runs.source_rows = sink_rows = **4008**`，
   而源表实际只有 **1002** 行（Doris 实收 1000 行）。4008 = **4 × 1002** ——
   引擎（SeaTunnel Zeta）的 `SourceReceivedCount` / `SinkWriteCount` 是**跨 task 重试累加**的
@@ -195,8 +204,9 @@
 - **影响**：失败/重试作业下 `source_rows` / `sink_rows` **不可当行数用**（会按尝试次数倍增）；
   成功作业（单次尝试）不受影响。AC-16 的权威行数应取 **Doris `count(*)`**，
   不能只信 API 的 `source_rows/sink_rows`。
-- **修复方向**（待裁决）：metrics 只取**最终一次 task 尝试**的计数（取最新快照而非累计和），
-  或按 task 维度去重/标记 attempt；亦可改为在作业成功时以 `SinkCommittedCount` 为准。
+- **若将来要修的方向（本次未采纳）**：metrics 只取**最终一次 task 尝试**的计数
+  （取最新快照而非累计和），或按 task 维度去重/标记 attempt；亦可改为在作业成功时以
+  `SinkCommittedCount` 为准。
 - **关联**：T-ENGINE-02（缺陷 3 真实引擎 metrics 键映射，本项是其语义边界）；
   `execution/metrics.py`；AC-16（行数取证口径）
 
@@ -283,6 +293,8 @@
   PR-B（fix/T-SHADOW-01b）：`_finalize_run` 接线 `publish_run` + 注入 `DorisSwapExecutor`，
   四门禁 → 原子 Swap → 正式表发布（run25 实证 **order_wide=1000**）。
   **AC-16 真闭环**（SPEC 全段：连接→探查→生成→门禁→审批→执行→影子表→分流→Swap）
+- **状态口径澄清（2026-10-17）**：此前会话汇报中曾把本项说成「仍 Open」，**属口误**。
+  以本条为准：**T-SHADOW-01 自 PR #20 + PR-B 起已 Closed**，§二 汇总表亦为 Closed。
 - **发现**：S10 场景 A 修复后重跑（2026-10-16，execution.shadow_ready 事件只有日志、
   Doris 侧 `order_wide_shadow` 无任何 worker 侧 DDL 痕迹）
 - **现象**：`consume_outbox.scan_outbox_once` 的 `shadow_executor` 参数缺省为
@@ -380,15 +392,25 @@
   3. **回归钉住** —— 新增 `test_gate_reports_idempotency`：未发布时
      `already_published=False`，发布后 `True` 且 `reason` 以「幂等」开头；
      既有 `test_atomic_swap_idempotent` 继续断言只 swap 一次。
-- **仍未做**：`PublishTargets.error_table` / `.quality_contract` 两个**未被
-  `publish_run` 读取**的字段（`resolve_targets` 填了没人用）没删——它们会牵动
-  `tests/execution/test_publish.py` 的构造与断言，属纯清理、与本次修的门禁无关，
-  按「最小改动」留给独立小 PR。
+- **死字段已清（fix/final-gate 补做）**：`PublishTargets.error_table` /
+  `.quality_contract` 两个字段此前「填了没人读」（`resolve_targets` 赋值、`publish_run`
+  从不读取），本 PR 已删两字段并同步 `tests/execution/test_publish.py` 的构造与断言。
+  错误表由 `consume_outbox._ensure_error_table` 独立派生，质量契约由 `routing` 直接
+  消费，删除不影响任何链路。
 - **关联**：T-SHADOW-01 PR-B；`execution/publish.py` / `atomic_swap.py`
 
-### T-SWAP-01：Swap 失败的回退状态未区分（新，Open，低优先级）
+### T-SWAP-01：Swap 失败的回退状态未区分（**Closed (Won't Fix)**）
 
-- **状态**：Open（低优先级）
+- **状态**：**Closed (Won't Fix)**（2026-10-17，fix/final-gate，人类裁决不修直接关）
+- **不修原因**：
+  1. **失败窗口极窄**：swap 是 Doris 元数据级瞬时操作（`ALTER TABLE ... REPLACE`），
+     正常路径不会失败；run20~run28 十次真实运行**零发生**；
+  2. **人工判定成本很低**：真发生半提交时，`SHOW TABLES` + 两侧 `DESC` 即可判定
+     「表是否已换名」，运维侧不需要事件流提供这个信息；
+  3. **修它要动事件契约**：给 `execution.publish_failed` 增「未执行 / 已执行未确认」
+     状态位，属事件语义变更（需 AMEND 并同步前端/证据口径），收益不抵成本。
+- **遗留口径**：`publish_failed` 事件仍只记异常类型名；**排障时以 Doris 侧实际表名
+  与结构为准**，不要从事件反推「是否已 swap」。
 - **发现**：T-SHADOW-01 PR-B 探查（2026-10-16，人类裁决「本 PR 不做」）
 - **现象**：`publish_run` 在 `execute_atomic_swap` 抛异常时记 `execution.publish_failed`
   后原样抛出，`_finalize_run` 一律把运行置 FAILED（ENGINE / finalize）。但
@@ -396,13 +418,17 @@
   事件消息只记 `{type(exc).__name__}`，运维无法从事件反推「表是否已经换了名字」
 - **影响**：swap 是元数据级瞬时操作，失败窗口极窄；但一旦真发生（Doris 半提交），
   现状会让排障只能去 Doris 侧查 `SHOW TABLES` 人工比对
-- **修复方向**：在 `publish_failed` 事件里区分「未执行 / 已执行未确认」，或引入一次
-  执行后校验（`DESC` 两侧再比一次）
+- **若将来要修的方向（本次未采纳）**：在 `publish_failed` 事件里区分
+  「未执行 / 已执行未确认」，或引入一次执行后校验（`DESC` 两侧再比一次）
 - **关联**：T-SHADOW-01 PR-B；`execution/publish.py:205-221`
 
-### T-OBS-01：publish 状态无可视化渠道（新，Open）
+### T-OBS-01：publish 状态无可视化渠道（**Closed，PR #27**）
 
-- **状态**：Open（前端 + API 增强）
+- **状态**：**Closed（PR #27，fix/S10-console-contract-a）**——前端改为由
+  `ExecutionDetailView.events[]` 派生发布态（`execution.published` /
+  `execution.publish_blocked` → 角标），`events[]` 从「类型已定义无人消费」变为
+  运行中心真实渲染；同时删掉了「伪造正常状态」的魔法兜底。
+  **本条此前状态行误留 Open，本次（fix/final-gate）修正为 Closed。**
 - **发现**：T-SHADOW-01 PR-B 方案评审（2026-10-16，人类提问「blocked 时运维从哪看到」）
 - **现象**（三处缺口）：
   1. `ExecutionRun` **没有** publish / swap / 发布状态列（SPEC 5.2 未定义，属契约外）
@@ -417,9 +443,9 @@
 - **PR-B 的最小补偿**：`_finalize_run` 把「发布被阻断（原因）」写进
   `execution.succeeded` 事件的 message，让运维在**不需要翻事件流**的情况下
   从终态原因得知「成功但未发布」
-- **修复方向**（待裁决，属前端 + API 增强，超出 PR-B 范围）：① API-12 增
-  `publish_state` 派生字段（不改数据模型，纯派生）；② 前端运行中心渲染 `events[]`
-  或至少渲染 `publish_state` 徽标
+- **修复（已落，PR #27）**：走的是方向 ②——前端运行中心渲染 `events[]` 并派生
+  `execution.published` / `execution.publish_blocked` 角标；未做方向 ①（API-12 增
+  `publish_state` 派生字段），因为前端已能从事件流派生同一事实，加字段是冗余。
 - **关联**：T-SHADOW-01 PR-B；PRD US-11（实时看到执行健康度）/ FR-44；SPEC 6.1 API-12
 
 ### T-SHADOW-02：质量契约 valid_sink 与派生影子表名漂移
@@ -439,9 +465,13 @@
   一并统一，并补契约命名一致性断言防复发
 - **关联**：T-SHADOW-01（PR-A 内一并修）；S5 生成引擎质量契约口径
 
-### T-DOCS-01：doris-init 注释与 PRD 10.5 #4 矛盾（新，Open）
+### T-DOCS-01：doris-init 注释与 PRD 10.5 #4 矛盾（**Closed**）
 
-- **状态**：Open（**本 PR 不动**，另开 docs PR 修）
+- **状态**：**已修（fix/final-gate）**——`infra/e2e/doris-init/01-init.sql` 头部注释
+  改为「被拒行写数据面错误表 `<目标表>_error`，**保留原始值与违规原因**（PRD 10.5 第 4 条
+  例外条款 / AC-02）；仅报告 / 证据 / 快照只回聚合计数与错误码」，并注明错误表由
+  `execution/shadow.py::create_error_table_sql` 运行期幂等建、业务列全可空（不能
+  `LIKE` 主表，否则 `amount NOT NULL` 会把脏行再拒一次）
 - **发现**：T-SHADOW-01 步骤 1 探查（2026-10-16）
 - **现象**：`infra/e2e/doris-init/01-init.sql:9-13` 注释写「质量分流：被拒行只在
   quarantine 表留**聚集计数 + 错误码**，**不落原始敏感值**（与 M-K 边界一致）」——
@@ -454,9 +484,20 @@
   报告 / 证据 / 快照只回聚合，不回传错误表明文」，另开 docs PR
 - **关联**：T-SHADOW-01（PR-A 的错误表实现依据）；PRD FR-44 / 10.5 #4 / AC-02
 
-### T-SHADOW-03：未覆盖脏行类型 → batch 毒化风险（新，Open）
+### T-SHADOW-03：未覆盖脏行类型 → batch 毒化风险（**Closed (Won't Fix)**）
 
-- **状态**：Open（独立排期）
+- **状态**：**Closed (Won't Fix)**（2026-10-17，fix/final-gate，人类裁决不修直接关）
+- **不修原因**：
+  1. **已知毒化已被消除**：PR-A 的双路分流在路由层把演示的两条脏行（amount NULL /
+     未来水位）挡在影子表之外，run24 实证 1000 + 2，**不存在**已知的整批回滚；
+  2. **残余风险不可穷举**：本条担心的是「质量规则未覆盖的**未来**脏行类型」（类型不匹配 /
+     超长 / 精度溢出 / 字符集），**无法用枚举规则的方法一次性消灭**——扩规则只是把
+     未知往后推一格；
+  3. **根治属引擎能力**：真正的行级拒收要靠 SeaTunnel 的 `Assert` / save-mode 或
+     目标表列全可空 + 报告兜底，属引擎能力边界与数据模型变更，不是 M2 收尾能做的
+     缺陷修复。
+- **遗留口径**：规则覆盖面之外的数据问题仍会以「整批失败 + 无错误码」的形式出现，
+  排障走 Doris 侧错误日志；**这不影响已演示的 AC-10/AC-16 结论**（seed 脏行类型在覆盖内）。
 - **发现**：T-SHADOW-01 PR-A 收口（2026-10-16，人类裁决补充）
 - **现状**：PR-A 的双路分流在**路由层**消除了当前已知的 batch 毒化——valid 分支的
   `where <全部规则通过>` 已把演示的两条脏行（amount NULL / 未来水位）排除在影子表之外，
@@ -467,14 +508,22 @@
   影子表 → 整批回滚，症状与 run20 相同
 - **影响**：规则覆盖面之外的数据问题会以「整批失败」而非「单行分流」的形式出现，
   且**没有错误码**（不命中任何规则）→ 排障只能靠 Doris 侧错误日志
-- **修复方向**（待裁决）：① 扩大规则覆盖面（枚举目标表各列的约束类型）；② 目标表列
+- **若将来要修的方向（本次未采纳）**：① 扩大规则覆盖面（枚举目标表各列的约束类型）；② 目标表列
   放宽为可空 + 由报告兜底；③ 引入 SeaTunnel 的 `Assert` / save-mode 能力做行级拒收
 - **关联**：T-SHADOW-01（PR-A 已消除已知毒化）；T-DEMO-01（源端脏行口径）；
   T-METRICS-01；run20 的 1002→1000 教训
 
-### T-SHADOW-04：etl_quality_summary 在 src/ 下零写入点（新，Open）
+### T-SHADOW-04：etl_quality_summary 在 src/ 下零写入点（**Closed**）
 
-- **状态**：Open（独立排期）
+- **状态**：**已修（fix/final-gate，取建议 ②）**——从 `infra/e2e/doris-init/01-init.sql`
+  删除 `etl_quality_summary` 的建表定义（原 50-65 行），**只保留
+  `DROP TABLE IF EXISTS etl_quality_summary;`** 用于清理历史环境残留的幽灵表
+  （脚本仍幂等可重复执行）。表头注释改为「质量分流的聚合事实落控制面
+  `quality_reports`，Doris 侧不建聚合表」，并写明删表原因
+- **落点确认**：质量分流的聚合事实**唯一落点**是控制面 `quality_reports`
+  （含 `rules` / `diagnostics` / 错误码统计），Doris 侧无消费者；删除后
+  `SHOW TABLES FROM doris_dw` 只剩 `order_wide` / `order_wide_shadow`（+ 运行期
+  由执行通道建的 `order_wide_error`）
 - **发现**：T-SHADOW-01 步骤 1 探查（2026-10-16）
 - **现象**：`etl_quality_summary` 只在 `infra/e2e/doris-init/01-init.sql:50-65` 建表，
   全仓 `src/` **零写入点**（`grep -rn etl_quality_summary src/` 无命中）→ 演示库里恒空表
@@ -482,9 +531,9 @@
   （含 `rules` / `diagnostics` / 错误码统计），Doris 侧这张表目前无消费者。
   但它与 PRD 10.5 的口径（聚合可回传、明文不可回传）互为印证，留空会误导读者以为
   分流聚合走 Doris
-- **修复建议**（待裁决，二选一）：① 若要保留「Doris 侧聚合落表」能力，由执行通道在
-  终态写入聚合行（`run_id` / `error_code` / 计数）；② 若确认聚合只走控制面，则
-  从 init SQL 移除该表并更新注释（属 docs/init 改动，另开 PR）
+- **处置（已落，取建议 ②）**：删除表定义 + 更新注释（见上「状态」）。**未取建议 ①**
+  （让执行通道在终态写聚合行）——那会新增一条 Doris 写入链路与失败面，
+  而聚合事实在控制面已完整，属重复建设。
 - **关联**：T-SHADOW-01（分流聚合口径）；T-DOCS-01（同属 init SQL 口径问题）；
   PRD FR-44 / 10.5；`execution/routing.py`（聚合事实实际落点）
 
@@ -533,46 +582,78 @@
 
 ### T-QUALITY-01：质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open）
 
-- **状态**：Open（涉及质量判定口径，待裁决；本 PR 只登记，不改判定）
+- **状态**：**已修（fix/final-gate）**——契约侧显式声明 `max_reject_rate: 0.05`，
+  判定侧语义未动（见下「修法边界」）
 - **发现**：S10 补 Studio 截图取证复跑（2026-10-17，run27 暴露）
 - **现象**：run27 拒绝率 **100%**（1002/1002），质量报告仍 `status=PASSED`，
   第 2 道发布门禁据此放行 → `execution.published` 事件照发、swap 真执行
   （Doris FE `fe.audit.log` 有 `ALTER TABLE order_wide REPLACE WITH TABLE
   order_wide_shadow PROPERTIES('swap'='true')`，`State=OK`）
-- **根因（读码确认）**：`execution/routing.py::classify_quality`
-  - `max_rows = contract.get("max_rejected_rows")` → `None`
-  - `max_rate = contract.get("max_reject_rate")` → `None`
-  - `over_rows` / `over_rate` 用 `isinstance(..., (int, float))` 判类型 → `None`
-    直接短路为 `False` → 既不入 FAILED 也不入 WARNING → **落 `STATUS_PASSED`（第 126 行）**
-  即：**阈值缺失 = 放行**（fail-open），且不区分「未声明」与「声明为 0」
-- **契约侧确认**：演示契约由 `llm/mock_provider.py:126-145` 生成，只声明
+- **根因（两层，缺一不可）**：
+  - **第 1 层（直接原因，判定侧）**：`execution/routing.py::classify_quality`
+    - `max_rows = contract.get("max_rejected_rows")` → `None`
+    - `max_rate = contract.get("max_reject_rate")` → `None`
+    - `over_rows` / `over_rate` 用 `isinstance(..., (int, float))` 判类型 → `None`
+      直接短路为 `False` → 既不入 FAILED 也不入 WARNING → **落 `STATUS_PASSED`（第 126 行）**
+    即：**阈值缺失 = 放行**（fail-open），且不区分「未声明」与「声明为 0」
+  - **第 2 层（为什么另一套阈值没兜住，监督侧）**：系统里**其实有**阈值，但长在别处——
+    监督域 `DEFAULT_SUPERVISION_CONTRACT`（`harness/prepare/service.py:37-45`，
+    `max_reject_rate: 0.5`）与 `supervision/contracts.py:35/84` 都定义了
+    `max_reject_rate`，却**从未参与质量判定**：
+    ① `worker/tasks/consume_outbox.py:735` 调 `generate_quality_report(...)`
+    **不传 `quarantined=`**（恒 `False`）；② `supervision_snapshot` 恒 `None`。
+    **根本原因是 S7 没有产出监督事实源**（`execution/router.py` 详情端
+    `supervision_snapshot` 硬编码 None，见 T-AUDIT-01「遗留观察」）——没有事实源就
+    无从判隔离，也就传不出 `quarantined=True`。**把监督判决接到质量判定属 S8
+    （监督域闭环）的接线范围**，不在 M2 收尾内；本条只修第 1 层。
+- **契约侧确认**：演示契约由 `llm/mock_provider.py:126-145` 生成，此前只声明
   `valid_sink` / `error_sink` / `routing` / `traceability` / `predicates`，
   **不含任何阈值字段**；而 14 项门禁的「质量契约四要素」
   （`gate/rules/quality_contract.py` GATE-004~007 = sink / routing / traceability /
   predicates，FR-19）**本就不含阈值** → 无阈值仍 14/14 合规。
   **故这不是生成侧或门禁越界，而是判定侧的默认值口径问题**
-- **系统里其实有阈值，但长在别处**：监督域 `DEFAULT_SUPERVISION_CONTRACT`
-  （`harness/prepare/service.py:37-45`，`max_reject_rate: 0.5`）与
-  `supervision/contracts.py:35/84` 定义了 `max_reject_rate`，但
-  ① `worker/tasks/consume_outbox.py:735` 调 `generate_quality_report(...)`
-  **不传 `quarantined=`**（恒 `False`）；② `supervision_snapshot` 恒 `None`
-  （S7 遗留）→ 监督阈值**从未参与质量判定**，两套契约互不接线
+- **修法（fix/final-gate，只动契约、不动判定语义）**：
+  1. `llm/mock_provider.compliant_plan` 的 `quality_contract` **显式声明
+     `max_reject_rate: 0.05`**（5%）；`tests/conftest.py` 的 `S6_TEST_PLAN`
+     同口径声明，避免测试夹具走 fail-open；
+  2. **修掉误导性测试**：`tests/worker/test_consume_outbox.py` 的
+     `test_shadow_executor_factory_is_used_for_data_plane` 原用
+     **100/1000 = 10% 拒绝率却断言 PASSED**，且注释写「拒绝率 10% 未超阈值」——
+     这是 fail-open 的产物。现改为 **2/1000 = 0.2%** 干净样本（`sink_rows` 900→998），
+     PASSED 是**真判出来的**，并补断言 `reject_rate ≈ 0.002`；
+     `tests/helpers.py::FakeSeaTunnelClient` 的默认 metrics 同步改干净；
+  3. **补回归**：`tests/llm/test_mock_provider.py` 断言生成契约必含 (0,1) 区间的
+     `max_reject_rate`；`tests/execution/test_routing.py` 走**真实生成路径**取契约，
+     断言 **3/1003 ≈ 0.30% 仍 PASSED**（取证数字不变）且 **60/1003 ≈ 5.98% FAILED**；
+  4. **门禁四要素未动**（仍是 sink/routing/traceability/predicates）→ **不涉 AMEND**。
+- **修法边界（必须说清）**：本次是**在生成侧把阈值声明出来**，`classify_quality`
+  的「未声明 = 放行」语义**原样保留**。故对外部/未来契约仍可能 fail-open；
+  要根治需给未声明阈值取保守默认（SPEC 冻结预算 `max_reject_rate=0.5`），
+  那是**判定语义变更 → 需 AMEND**，不在本 PR。
 - **影响**：数据面全量失败（下游一行没进）时系统仍判「质量通过」并发布空表，
   运行终态是 `SUCCEEDED` —— 对运维是**静默的成功**；生产后果比 run27 更重
-- **修复方向（待裁决，三选一）**：
-  1. `classify_quality` 对**未声明**阈值取保守默认（沿用 SPEC 冻结预算
-     `max_reject_rate=0.5` / `min_quality_rows=100`），「声明为 0」才表示零容忍
-  2. 生成侧把监督契约阈值**写进 `quality_contract`**（并同步 FR-19 四要素口径 → 涉 AMEND）
-  3. 把监督域的隔离判决**接线**到质量判定（把 `quarantined` 传入）
-  —— 三项都动契约 / 门禁语义，属**必须停**范围，故本 PR 只登记
+  （**注**：本次修后，演示契约下已不再出现；判定侧兜底仍未做，见「修法边界」）
 - **关联**：`execution/routing.py:113-126`、`execution/publish.py:163-169`、
   `worker/tasks/consume_outbox.py:735`、`llm/mock_provider.py:126-145`、
   `harness/prepare/service.py:37-45`、`supervision/contracts.py:35`；
   `docs/stages/assets/S10-e2e/demo-a-run27-20261017.log`
 
-### T-CONSOLE-02：Pipeline Studio 多处演示态数据未标注（新，Open）
+### T-CONSOLE-02：Pipeline Studio 多处演示态数据未标注（**Closed (Won't Fix)**）
 
-- **状态**：Open（前端；第 1 项可能需后端补出参）
+- **状态**：**Closed (Won't Fix)**（2026-10-17，fix/final-gate，人类裁决「不修」）
+- **不修原因（为什么不改代码）**：
+  1. **门禁 `14 / 14` 是前端本地清单**：`DEFAULT_GATES` 是 SPEC 冻结的 14 项静态清单
+     （结构校验项），页面展示它就是「清单全项通过」的语义，**不是伪造后端结果**；
+     真要做成「取真实门禁结果」需后端补出参 + 落库回传（`freeze` 已收 `gate_results`
+     入参但未回传），属**功能增量**，不是 M2 收尾的缺陷修复；
+  2. **HOCON 正文 / 版本链 / 候选数**三处同理：缺的是后端出参与真实数据源，
+     前端只能回落原型图口径的样例；改前端标记不解决「无数据源」本身；
+  3. **已由文档覆盖**：`docs/demo/演示回放.md` §8.9 的「演示值注记」表逐项标注了
+     哪些是演示值、哪些是真实数据，**截图取证的读者不会被误导**——这就是本项要
+     防的唯一后果；
+  4. **终极取证（§8.9）会再明确一次**：门禁 14/14 为前端本地清单、非后端结果。
+- **遗留口径**：Pipeline Studio 的「门禁 14/14」**不代表本次运行通过了后端门禁校验**，
+  仅代表前端静态清单全项展示；真实门禁结论以 API-05/06 与执行运行的门禁事件为准。
 - **发现**：S10 补 Studio 截图取证（2026-10-17，A5 采集时逐项读码核对）
 - **现象（同一页四处）**：
   1. **门禁 `14 / 14`**：`PipelineStudio.vue:77-92` 的 `DEFAULT_GATES`（14 项恒
@@ -586,26 +667,34 @@
 - **影响**：控制台把演示值当真实治理事实展示 → 截图取证必须人工注记
   （见 `演示回放.md` §8.9「演示值注记」表）；`GateChecklist.vue:12-15` 的 `GateItem`
   只有 `{key,label,passed}`，**无 live / 示意 概念** → 无法在组件层标注
-- **修复方向**（待裁决）：① 后端补「版本门禁结果」出参（`freeze` 已收 `gate_results`
-  入参，但未落库回传）→ 前端改真实取数；② 或统一给 `GateChecklist` 加 `live` 徽标，
-  演示态一律标「示意」（与 `SafetyGovernance.vue` 的 PDP 静态渲染口径一致）
+- **若将来要真修的方向（本次未采纳）**：① 后端补「版本门禁结果」出参（`freeze` 已收
+  `gate_results` 入参，但未落库回传）→ 前端改真实取数；② 或统一给 `GateChecklist`
+  加「示意」徽标，演示态一律标注（与 `SafetyGovernance.vue` 的 PDP 静态渲染口径一致）
 - **关联**：`frontend/src/views/PipelineStudio.vue:70/77-92/96/152/336/417-439`、
   `frontend/src/components/GateChecklist.vue:12-15`；`docs/demo/演示回放.md` §8.9
 
-### T-CONSOLE-03：Safety 页 Benchmark 六项门禁回落演示值，未标「示意」（新，Open）
+### T-CONSOLE-03：Safety 页 Benchmark 六项门禁回落演示值，未标「示意」（**Closed，PR #27**）
 
-- **状态**：Open（前端，最小改动）
+- **状态**：**Closed（PR #27，fix/S10-console-contract-a）**——`gateRows` 不再回落
+  fallback 实测值：`latestRun` 为空时**直接返回空数组**，模板显示「无评测运行」空态；
+  页头的魔法兜底（`report_sha256 ?? '9b602'`）一并删除。演示值不再以「真实值」面貌出现。
+  **本条此前状态行误留 Open，本次（fix/final-gate）修正为 Closed。**
+- **死字段已清（fix/final-gate）**：`gateRows` 曾算出 `live: Boolean(found)` 但
+  **模板从未消费**——`latestRun` 为空即返回 `[]` 后，`found` 恒存在、`live` 恒 `true`，
+  该字段已完全无意义，本次删除。
 - **发现**：S10 补 Studio 截图取证（2026-10-17，A4 观察点复核时读码确认）
 - **现象**：`SafetyGovernance.vue:65-88` 的 `gateRows` 在 `latestRun` 为空时回落到
   fallback 实测值（1.00 / 0.97 / 0.02 / 1.00 / 1.00 / 0.05）且 `passed: true`；
   本机 `GET /projects/{id}/benchmark-runs` 实测为空 `{runs: [], total: 0}` → 页面恒显
   **`6 / 6 PASS`**。页头 `report_sha256` 亦有硬编码兜底（`?? '9b602'`）
-- **关键点**：`gateRows` 已算出 `live: Boolean(found)`（L85），但**模板从未使用该字段**
-  （表格列只有 门禁指标 / 阈值 / 实测 / 结论）→ 演示值与真实值在视觉上不可区分
+- **关键点（历史）**：`gateRows` 曾算出 `live: Boolean(found)`（L85），但**模板从未使用
+  该字段**（表格列只有 门禁指标 / 阈值 / 实测 / 结论）→ 演示值与真实值在视觉上不可区分。
+  PR #27 改成「无运行即空态」后 `live` 彻底无意义，**该字段已在 fix/final-gate 删除**。
 - **影响**：与 T-CONSOLE-02 同类；A4 截图里「Benchmark 6/6 · 证据覆盖率 100%」是演示值，
   而同屏「证据时间线 7 事件」是真的 —— 二者混排易被误读为同一来源
-- **修复方向**（待裁决）：模板消费 `live` 字段，对回落行加「示意」徽标（最小改动，
-  与 PDP 策略包「示意」徽标 L308 同口径）
+  （**注**：PR #27 修后已不出现演示值；A4 旧截图的该现象属修复前画面）
+- **修复（已落）**：不引入 `live` 徽标，而是**彻底去掉演示回落**——无运行数据即空态，
+  视觉上不存在「演示值冒充真实值」的可能（比加徽标更彻底）
 - **关联**：`frontend/src/views/SafetyGovernance.vue:65-88/196-235/308`；
   `docs/demo/演示回放.md` §8.9
 

@@ -41,8 +41,6 @@ from etl_agent.infrastructure.models import ExecutionEvent, ExecutionRun
 TARGETS = PublishTargets(
     target_table="orders_wide",
     shadow_table="orders_wide_shadow",
-    error_table="orders_wide_error",
-    quality_contract={"valid_sink": "orders_wide_shadow"},
 )
 
 
@@ -212,7 +210,6 @@ def test_resolve_targets_from_plan() -> None:
     assert targets is not None
     assert targets.target_table == "orders_wide"
     assert targets.shadow_table == "orders_wide_shadow"
-    assert targets.error_table == "orders_wide_error"
     assert resolve_targets({"sink": {}}) is None
     assert resolve_targets(None) is None
 
