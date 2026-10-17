@@ -1,0 +1,21 @@
+{
+  "_note": [
+    "已知未修的「前端多出字段」漂移指纹（METHOD path → Interface）。",
+    "命中本文件的漂移只报告、不计失败；任何【新增】漂移立即让 `npm run check:contract` 红灯。",
+    "修完一项就从 known 删掉对应行 —— 目标：本文件清空（PR-B + 后续）。",
+    "指纹格式：`<HTTP METHOD> <归一化路径> → <前端 interface 名>`，由 check-contract.mjs 输出。",
+    "当前 10 项均为 P2 低影响（见 PR fix/S10-console-contract-b / tracking.md T-CONSOLE-02）。"
+  ],
+  "known": [
+    "POST /bootstrap → BootstrapResponse",
+    "GET /projects/{}/members → MemberView",
+    "GET /projects/{}/role-grants → RoleGrantView",
+    "POST /projects/{}/role-grants → RoleGrantView",
+    "POST /projects/{}/connections/{}/test → ConnectionTestResponse",
+    "POST /projects/{}/connections/{}/rotations → RotationView",
+    "POST /projects/{}/file-assets → FileAssetView",
+    "POST /projects/{}/preparations → PreparationView",
+    "POST /preparations/{}/decisions → PreparationView",
+    "POST /projects/{}/profiles → ProfileView"
+  ]
+}
