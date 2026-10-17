@@ -1,0 +1,10 @@
+{
+  "_note": [
+    "已知未修的「前端多出字段」漂移指纹（METHOD path → Interface）。",
+    "命中本文件的漂移只报告、不计失败；任何【新增】漂移立即让 `npm run check:contract` 红灯。",
+    "指纹格式：`<HTTP METHOD> <归一化路径> → <前端 interface 名>`，由 check-contract.mjs 输出。",
+    "本文件已于 fix/S10-console-contract-b 清空 —— 44 个调用点 / 34 个 interface 全部对齐。",
+    "若之后又出现已知欠账，把条目加回 known 并在 PR 说明里承诺偿还计划（勿无期限挂账）。"
+  ],
+  "known": []
+}

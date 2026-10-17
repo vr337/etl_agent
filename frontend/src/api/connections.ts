@@ -10,6 +10,7 @@ import type {
   ConnectionCreateRequest,
   ConnectionTestResponse,
   ConnectionView,
+  RotationResponseView,
   RotationView,
 } from './types'
 
@@ -40,8 +41,8 @@ export async function startRotation(
   projectId: string,
   connectionId: string,
   payload: { new_username: string; new_password: string; reason: string },
-): Promise<RotationView> {
-  const { data } = await client.post<RotationView>(
+): Promise<RotationResponseView> {
+  const { data } = await client.post<RotationResponseView>(
     `/projects/${projectId}/connections/${connectionId}/rotations`,
     payload,
   )

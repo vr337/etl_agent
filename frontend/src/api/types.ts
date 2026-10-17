@@ -21,25 +21,32 @@ export interface BootstrapRequest {
   admin_subject: string
 }
 
+/**
+ * Bootstrap 响应（对齐后端 `BootstrapResponse`：只有 `project_id` / `admin_user_id`）。
+ *
+ * 曾多声明 `project_name` / `created` —— 后端不返回。
+ */
 export interface BootstrapResponse {
   project_id: string
-  project_name: string
   admin_user_id: string
-  created: boolean
 }
 
+/** 项目成员（对齐后端 `MemberResponse`：含 `display_name`，无 `created_at`）。 */
 export interface MemberView {
   user_id: string
   subject: string
+  display_name: string
   role: string
-  created_at: string
 }
 
+/** 角色授予（对齐后端 `RoleGrantResponse`；时间字段叫 `created_at`，非 `granted_at`）。 */
 export interface RoleGrantView {
   id: string
   user_id: string
+  subject: string
   role: string
-  granted_at: string
+  granted_by: string | null
+  created_at: string
 }
 
 /* ---- 连接与凭据 ---- */
@@ -82,12 +89,22 @@ export interface ConnectionCreateRequest {
   password: string
 }
 
+/**
+ * 连通性测试受理响应（对齐后端 `ConnectionTestResponse`：后台异步执行，只回 `status` + `started_at`）。
+ *
+ * 曾多声明 `message` / `latency_ms` —— 后端不同步这两项（后台执行，无耗时回传）。
+ */
 export interface ConnectionTestResponse {
   status: ConnectionStatus
-  message: string
-  latency_ms: number | null
+  started_at: string
 }
 
+/**
+ * 凭据轮换**列表**项（对齐后端 `RotationListView`）。
+ *
+ * 轮换**操作**出参是另一套模型 `RotationResponseView`（`new_secret_ref` /
+ * `requested_by` / `approved_by` / `failure_reason` / `created_at`），不可混用。
+ */
 export interface RotationView {
   id: string
   connection_id: string
@@ -97,6 +114,18 @@ export interface RotationView {
   validated_at: string | null
   activated_at: string | null
   rolled_back_at: string | null
+}
+
+/** 轮换**操作**出参（对齐后端 `RotationResponse`）。 */
+export interface RotationResponseView {
+  id: string
+  connection_id: string
+  status: string
+  new_secret_ref: string | null
+  requested_by: string
+  approved_by: string | null
+  failure_reason: string | null
+  created_at: string
 }
 
 /* ---- 探查与文件 ---- */
@@ -115,6 +144,12 @@ export interface ProfileView {
   created_at: string
 }
 
+/**
+ * 文件资产（对齐后端 `FileAssetListView`）。
+ *
+ * 注意上传接口（`POST /file-assets`）回的是 `FileAssetDetailView`（无
+ * `filename` / `upload_status`），不要混用。
+ */
 export interface FileAssetView {
   id: string
   filename: string
@@ -123,6 +158,48 @@ export interface FileAssetView {
   format: string
   upload_status: string
   created_at: string
+}
+
+/** 上传出参（对齐后端 `FileAssetResponse`：无文件名 / 状态字段）。 */
+export interface FileAssetDetailView {
+  id: string
+  format: string
+  size_bytes: number
+  row_count: number | null
+  created_at: string
+}
+
+/**
+ * 探查**创建**出参（对齐后端 `ProfileResponse`；含列定义 / 脱敏样本 / 行数估计）。
+ *
+ * 与列表项 `ProfileView`（= 后端 `ProfileSummaryView`）是两套模型：
+ * 列表只回摘要（`column_count` / `report_sha256` / `classifications`），
+ * 创建回全量（`columns` / `masked_samples` / `approximate_row_count`）。
+ */
+export interface ProfileResponseView {
+  id: string
+  connection_id: string
+  endpoint_role: 'SOURCE' | 'SINK'
+  schema_name: string
+  table_name: string
+  columns: ProfileColumnView[]
+  masked_samples: Record<string, unknown> | null
+  approximate_row_count: number | null
+  classification_report_sha256: string | null
+  expires_at: string | null
+  created_at: string
+}
+
+/** 列画像（对齐后端 `ProfileColumn`）。 */
+export interface ProfileColumnView {
+  name: string
+  type: string
+  nullable: boolean
+  is_primary_key: boolean
+  null_rate: number | null
+  distinct_estimate: number | null
+  classification: string | null
+  effective_classification: string | null
 }
 
 /* ---- 生成与版本 ---- */
@@ -284,6 +361,12 @@ export interface HoconChangeView {
 
 /* ---- Harness（准备单 / 审批 / 提交） ---- */
 
+/**
+ * 准备单**列表**项（对齐后端 `PreparationListView`；前端审批台消费此口径）。
+ *
+ * 同一资源另有创建出参 `PreparationCreateResponseView` 与决策出参
+ * `DecisionResponseView` —— 三套模型字段集不同，不可混用。
+ */
 export interface PreparationView {
   id: string
   pipeline_version_id: string
@@ -295,8 +378,8 @@ export interface PreparationView {
   approvals: ApprovalSlotView[]
   impact_report: Record<string, unknown> | null
   rollback_plan: string | null
-  expires_at: string
-  created_at: string
+  expires_at: string | null
+  created_at: string | null
 }
 
 export interface ApprovalSlotView {
@@ -312,6 +395,34 @@ export interface DecisionRequest {
   role: string
   decision: 'APPROVE' | 'REJECT'
   reason: string
+}
+
+/** 准备单**创建**出参（对齐后端 `PreparationResponse`；不含审批槽位 / PDP 判决）。 */
+export interface PreparationCreateResponseView {
+  id: string
+  status: string
+  risk_level: RiskLevel
+  artifact_sha256: string | null
+  input_fingerprint: string
+  resource_fingerprint: string
+  required_roles: string[]
+  required_approvals: number
+  environment: string
+  tool_name: string | null
+  tool_version: string | null
+  expires_at: string | null
+  outcome: string | null
+}
+
+/** 审批**决策**出参（对齐后端 `DecisionResponse`）。 */
+export interface DecisionResponseView {
+  preparation_id: string
+  role: string
+  decision: string
+  decided_by: string | null
+  status: string
+  approvals_received: number
+  approvals_required: number
 }
 
 export interface CommitResponse {
