@@ -144,6 +144,15 @@ def test_rule_unsupported_connector() -> None:
     assert check_one("GATE-002", base_plan()).passed
 
 
+def test_rule_clickhouse_connector_supported() -> None:
+    """S11 T-21：CLICKHOUSE 在 GATE-002 / GATE-011 白名单内（源与目标端均可）。"""
+    for role in ("source", "sink"):
+        plan = base_plan()
+        plan[role]["connector_type"] = "CLICKHOUSE"
+        assert check_one("GATE-002", plan).passed, role
+        assert check_one("GATE-011", plan).passed, role
+
+
 def test_rule_unsupported_transform() -> None:
     """GATE-003：白名单外转换 → fail。"""
     plan = base_plan()

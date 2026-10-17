@@ -13,6 +13,7 @@ from etl_agent.connections.probes.base import (
     ProbeUnsupported,
     probe_connection,
 )
+from etl_agent.connections.probes.clickhouse_probe import probe_clickhouse
 from etl_agent.connections.probes.local_file_probe import probe_local_file
 from etl_agent.connections.probes.mysql_probe import probe_mysql
 from etl_agent.connections.probes.postgres_probe import probe_postgres
@@ -27,10 +28,12 @@ __all__ = [
     "probe_for",
 ]
 
-# S3 实装的探针（禁止事项 15：Oracle/SQLServer/Doris/Hive/HDFS 走 unsupported）
+# 实装的探针（禁止事项 15：Oracle/SQLServer/Doris/Hive/HDFS 走 unsupported）
+# S11 T-21：ClickHouse 走 HTTP 接口（8123）实探，见 clickhouse_probe 的选型说明。
 _PROBES = {
     "POSTGRESQL": probe_postgres,
     "MYSQL": probe_mysql,
+    "CLICKHOUSE": probe_clickhouse,
     "LOCAL_FILE": probe_local_file,
 }
 

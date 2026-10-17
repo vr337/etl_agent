@@ -11,9 +11,20 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-# 8 类连接器（FR-04 / SPEC 5.2 data_connections.connector_type）
+# 连接器类型白名单（FR-04 / SPEC 5.2 data_connections.connector_type）。
+# 基线 8 类 + S11 T-21 追加 CLICKHOUSE（第 9 类，契约扩展登记见 AMEND-011）。
 CONNECTOR_TYPES = frozenset(
-    {"MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER", "DORIS", "HIVE", "HDFS", "LOCAL_FILE"}
+    {
+        "MYSQL",
+        "POSTGRESQL",
+        "ORACLE",
+        "SQL_SERVER",
+        "DORIS",
+        "HIVE",
+        "HDFS",
+        "LOCAL_FILE",
+        "CLICKHOUSE",
+    }
 )
 
 # 连接状态机（FR-05）

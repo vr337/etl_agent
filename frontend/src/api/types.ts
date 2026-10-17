@@ -51,7 +51,14 @@ export interface RoleGrantView {
 
 /* ---- 连接与凭据 ---- */
 
-export type ConnectionType = 'MYSQL' | 'POSTGRESQL' | 'DORIS' | 'HIVE' | 'SQL_SERVER' | 'LOCAL_FILE'
+export type ConnectionType =
+  | 'MYSQL'
+  | 'POSTGRESQL'
+  | 'DORIS'
+  | 'HIVE'
+  | 'SQL_SERVER'
+  | 'LOCAL_FILE'
+  | 'CLICKHOUSE'
 export type ConnectionStatus = 'UNTESTED' | 'TESTING' | 'READY' | 'FAILED'
 
 /**

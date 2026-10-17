@@ -36,6 +36,20 @@ FROM information_schema.tables
 WHERE table_schema = %s AND table_name = %s
 """
 
+# ClickHouse：`system.parts` 的 active 分片行数之和（系统表，O(分片数)，
+# 不触碰业务表 —— 与 FR-12「绝不扫描业务表」的红线一致）。
+CH_APPROX_ROWS_SQL = """
+SELECT COALESCE(sum(rows), 0) AS approximate_rows
+FROM system.parts
+WHERE database = {p1:String} AND table = {p2:String} AND active
+"""
+
+# 连接器类型 → 近似行数语句（缺省按 MySQL 通道）
+_APPROX_ROWS_SQL_BY_TYPE: dict[str, str] = {
+    "POSTGRESQL": PG_APPROX_ROWS_SQL,
+    "CLICKHOUSE": CH_APPROX_ROWS_SQL,
+}
+
 
 @dataclass(frozen=True)
 class ColumnStat:
@@ -83,14 +97,23 @@ async def collect_statistics(
         ConnectorUnsupported: 连接器类型无探查通道。
         ValidationError:      标识符非法。
     """
-    is_postgres = connection.connector_type == "POSTGRESQL"
+    connector = connection.connector_type
+    is_postgres = connector == "POSTGRESQL"
+    is_clickhouse = connector == "CLICKHOUSE"
+    # ClickHouse 的标识符包裹与 MySQL 同形（反引号），故复用 mysql 方言
     dialect = "postgres" if is_postgres else "mysql"
-    # 采样查询只有 1 个绑定参数（行数上限）；PG 占位符从 $1 起编号
-    limit_placeholder = "$1" if is_postgres else "%s"
+    # 采样查询只有 1 个绑定参数（行数上限）：
+    # PG 用 $1、MySQL 用 %s、ClickHouse HTTP 用命名参数 {p1:UInt32}
+    if is_postgres:
+        limit_placeholder = "$1"
+    elif is_clickhouse:
+        limit_placeholder = "{p1:UInt32}"
+    else:
+        limit_placeholder = "%s"
 
     async with open_source(connection, credentials) as source:
         row_count_rows = await source.fetch(
-            PG_APPROX_ROWS_SQL if is_postgres else MYSQL_APPROX_ROWS_SQL,
+            _APPROX_ROWS_SQL_BY_TYPE.get(connector, MYSQL_APPROX_ROWS_SQL),
             schema_name,
             table_name,
         )
