@@ -133,9 +133,9 @@ onMounted(() => {
       <div>
         <h2 class="card__title">不可变版本 Diff</h2>
         <p class="card__subtitle">
-          {{ baseVersion ? `V${baseVersion.version_no}` : baseId.slice(0, 8) }}
+          {{ baseVersion ? `V${baseVersion.version_number}` : baseId.slice(0, 8) }}
           （{{ baseVersion?.status ?? '—' }}）→
-          {{ targetVersion ? `V${targetVersion.version_no}` : targetId.slice(0, 8) }}
+          {{ targetVersion ? `V${targetVersion.version_number}` : targetId.slice(0, 8) }}
           （{{ targetVersion?.status ?? '—' }}）· Schema / HOCON / 质量规则
         </p>
       </div>

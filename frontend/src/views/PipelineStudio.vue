@@ -369,9 +369,9 @@ onMounted(load)
       <div>
         <h2 class="card__title">不可变版本 Diff</h2>
         <p class="card__subtitle">
-          {{ currentVersion ? `V${currentVersion.version_no}` : 'V—' }}
+          {{ currentVersion ? `V${currentVersion.version_number}` : 'V—' }}
           （{{ currentVersion?.status ?? '—' }}）→
-          {{ currentVersion ? `V${currentVersion.version_no + 1}` : 'V—' }}（DRAFT）· Schema / HOCON / 质量规则
+          {{ currentVersion ? `V${currentVersion.version_number + 1}` : 'V—' }}（DRAFT）· Schema / HOCON / 质量规则
         </p>
       </div>
       <span class="badge badge--warn">{{ diffRows.length }} 处变更</span>
@@ -408,7 +408,7 @@ onMounted(load)
       <div v-if="versionChain.length === 0" class="chain">
         <div class="chain__card">
           <div class="chain__top">
-            <span class="chain__v">V{{ currentVersion?.version_no ?? 7 }}</span>
+            <span class="chain__v">V{{ currentVersion?.version_number ?? 7 }}</span>
             <StatusBadge :status="currentVersion?.status ?? 'DRAFT'" />
           </div>
           <div class="chain__meta">未冻结 · 当前编辑</div>
