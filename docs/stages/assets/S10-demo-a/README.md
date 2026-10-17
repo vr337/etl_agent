@@ -28,10 +28,10 @@
 | `A5` | 门禁 `14 / 14` 清单 | `PipelineStudio.vue:77-92` `DEFAULT_GATES`（无条件赋值，非后端结果） | **T-CONSOLE-02** |
 | `A5` | HOCON 正文（回落 `SAMPLE_HOCON`）、版本链 `V4`~`V6` 静态卡、候选 `2 / 3` 徽标 | 同页演示态兜底 | 同 **T-CONSOLE-02** |
 
-## 已知画面缺陷（如实保留，未修饰）
+## 重截记录
 
-- `A5`：Diff 标题渲染为 **`Vundefined（VALIDATED）→ VNaN（DRAFT）`**、版本链卡恒显 `V7`
-  —— 前端读 `version_no`，而后端该端点回的是 `version_number`（**T-CONSOLE-04**）。
+- `A5` 已重截一次：**PR #25**（T-CONSOLE-04，版本号字段名对齐后端）修复后，按同一 run28
+  数据重截替换 —— 版本号为真实值（`V1（VALIDATED）→ V2（DRAFT）`），版本链首卡 `V1`。
 
 ## 数据口径
 
@@ -45,4 +45,4 @@
 绑定：`localStorage.setItem('actor_id','admin@demo.local')` + `project_id`；项目已存在时
 **不要**走 Bootstrap 表单（会 409）。
 
-缺陷详情与修法见 `演示回放.md` §8.9 的「缺陷详情备查 1 / 2」。
+缺陷详情与修法见 `演示回放.md` §8.9 的「缺陷详情备查 1」（版本 id 404，PR #15 已修）。
