@@ -234,15 +234,19 @@ class FakeSeaTunnelClient:
         self._check_ok = check_ok
         self._job_id = job_id
         # 默认样本量 >= SPEC 5.2 冻结预算的「最低质量行数 100」——
-        # 样本不足 100 行按 INCOMPLETE 处理（判不了通过），故 happy path 必须用足量样本
+        # 样本不足 100 行按 INCOMPLETE 处理（判不了通过），故 happy path 必须用足量样本。
+        # 拒绝行数取 2（拒绝率 0.2%）：与真实 seed 同量级，且**稳稳落在
+        # `max_reject_rate: 0.05` 之内**。历史上这里是 100/1000 = 10%，
+        # 靠契约 fail-open（无阈值）才判成 PASSED —— T-QUALITY-01 已修，
+        # 现在它会被真实判为 FAILED，故一并改成干净样本。
         self.metrics: dict[str, object] = {
             "source_rows": 1000,
-            "sink_rows": 900,
+            "sink_rows": 998,
             "source_bytes": 102_400,
             "sink_bytes": 90_000,
-            "tables": [{"table": "orders_wide", "rows": 900, "bytes": 90_000}],
-            "quality": {"total_rows": 1000, "passed_rows": 900, "rejected_rows": 100,
-                        "error_codes": {"NULL_ID": 100}},
+            "tables": [{"table": "orders_wide", "rows": 998, "bytes": 90_000}],
+            "quality": {"total_rows": 1000, "passed_rows": 998, "rejected_rows": 2,
+                        "error_codes": {"NULL_ID": 2}},
         }
 
     async def submit_job(self, hocon: str, *, job_name: str = "") -> str:

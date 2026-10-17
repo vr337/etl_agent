@@ -82,7 +82,6 @@ const gateRows = computed(() => {
       threshold: GATE_LABELS[key].threshold,
       actual: found ? String(found.actual) : '—',
       passed: found ? found.passed : false,
-      live: Boolean(found),
     }
   })
 })

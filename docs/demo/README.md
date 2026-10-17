@@ -65,7 +65,7 @@ docker compose -f infra/docker-compose.yml --profile e2e up -d
 | 文件 | 作用 |
 | --- | --- |
 | `infra/e2e/mysql-init/01-seed.sql` | 建 `source_db.orders`，灌 1,000 行干净数据 + 3 行故意脏数据（NULL 金额、未来水位、400 字符超长地址）。源表 `address` 已加宽至 VARCHAR(500)（fix/T-COMMIT-01 / T-DEMO-01），**三条脏行全部落库，实际 1003 行** |
-| `infra/e2e/doris-init/01-init.sql` | 建 `doris_dw.order_wide`（唯一键）+ `order_wide_shadow` + `etl_quality_summary`（幂等：DROP IF EXISTS + CREATE，可重复执行） |
+| `infra/e2e/doris-init/01-init.sql` | 建 `doris_dw.order_wide`（唯一键）+ `order_wide_shadow`（幂等：DROP IF EXISTS + CREATE，可重复执行）。错误表 `order_wide_error` 由执行通道运行期幂等建（业务列全可空），不在此预建。质量分流的聚合事实落控制面 `quality_reports`，Doris 侧不再建 `etl_quality_summary`（T-SHADOW-04 已删表定义，脚本仅留 `DROP` 清理历史残留） |
 
 > 为什么种子数据里要有脏数据？因为演示的价值一半在「错误分流」——
 > 拒绝率非零但可控（3 / 1003 ≈ 0.30%），质量报告才会呈现真实的四态而非永远 PASSED。

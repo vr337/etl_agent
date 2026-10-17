@@ -305,6 +305,10 @@ S6_TEST_PLAN: dict[str, object] = {
         # 的派生名同源），否则发布链路会把 swap 指向不存在的表
         "valid_sink": "orders_wide_shadow",
         "error_sink": "orders_wide_error",
+        # T-QUALITY-01 / fix-final-gate：与 `llm/mock_provider.py` 同口径显式声明阈值。
+        # 此前**两个**测试夹具都没有 `max_reject_rate` → 契约走 fail-open，
+        # 拒绝率 10% 也能判 PASSED（`test_consume_outbox_happy_path` 正是靠这个活的）。
+        "max_reject_rate": 0.05,
         "routing": [{"rule": "not_null_id", "sink": "orders_wide_shadow"}],
         "traceability": {
             "source_row_id_column": "id",

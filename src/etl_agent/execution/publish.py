@@ -67,12 +67,15 @@ ACTION_QUARANTINE = "QUARANTINE"
 
 @dataclass(frozen=True)
 class PublishTargets:
-    """发布目标（正式表 / 影子表 / 错误表 + 质量契约）。"""
+    """发布目标（正式表 / 影子表）。
+
+    T-PUBLISH-01 清理：原 `error_table` / `quality_contract` 两个字段从构造起
+    **无任何读取点**（错误表由 `worker/tasks/consume_outbox._ensure_error_table`
+    独立派生，质量契约由 `routing` 直接消费），属死字段，已删。
+    """
 
     target_table: str
     shadow_table: str
-    error_table: str | None
-    quality_contract: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -109,12 +112,9 @@ def resolve_targets(plan: dict[str, Any] | None) -> PublishTargets | None:
     contract = plan.get("quality_contract")
     contract_dict = contract if isinstance(contract, dict) else {}
     valid_sink = contract_dict.get("valid_sink")
-    error_sink = contract_dict.get("error_sink")
     return PublishTargets(
         target_table=str(target),
         shadow_table=str(valid_sink) if valid_sink else f"{target}_shadow",
-        error_table=str(error_sink) if error_sink else None,
-        quality_contract=contract_dict,
     )
 
 

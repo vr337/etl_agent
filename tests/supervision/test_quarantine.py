@@ -75,8 +75,6 @@ async def test_quarantine_blocks_swap(db_session, make_run) -> None:
     targets = PublishTargets(
         target_table="orders_wide",
         shadow_table="orders_wide_shadow",
-        error_table="orders_wide_error",
-        quality_contract={},
     )
     decision = await evaluate_publish_gate(
         db_session, run, report=report, targets=targets

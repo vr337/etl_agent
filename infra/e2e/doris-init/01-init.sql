@@ -6,11 +6,16 @@
 -- 覆盖 FR：FR-39（原子 Swap）/ FR-43（质量报告）/ FR-46（回滚）
 -- 对应 AC：**AC-10**（端到端演示链路）
 --
--- 用途：在 Doris 上准备「宽表 + 影子表 + 质量表」三件套，支撑：
+-- 用途：在 Doris 上准备「宽表 + 影子表」两件套，支撑：
 --   - 增量 upsert 写入 order_wide（唯一键模型，故用 UNIQUE KEY）；
---   - 原子 Swap：先写 order_wide_shadow，校验通过后 `ALTER TABLE ... REPLACE`；
---   - 质量分流：被拒行只在 quarantine 表留**聚集计数 + 错误码**，
---     不落原始敏感值（与 M-K 边界一致）。
+--   - 原子 Swap：先写 order_wide_shadow，校验通过后 `ALTER TABLE ... REPLACE`。
+--
+-- 质量分流的落点（T-DOCS-01 修正，原注释与 PRD 矛盾）：
+--   **被拒行写数据面错误表 `<目标表>_error`，保留原始值与违规原因**
+--   （PRD 10.5 第 4 条「错误表例外条款」/ AC-02）；仅**报告 / 证据 / 快照**
+--   只回聚合计数与错误码，不回传错误表明文（M-K 边界）。
+--   错误表由运行期幂等建表（`execution/shadow.py::create_error_table_sql`），
+--   不在此初始化——其业务列须全可空，不能 `LIKE` 主表（`amount NOT NULL`）。
 --
 -- 说明：Doris 建表为同步 DDL；`REPLACE`（原子替换）要求两表结构严格一致，
 --   故 shadow 表用 `CREATE TABLE ... LIKE` 派生，避免结构漂移。
@@ -43,26 +48,12 @@ PROPERTIES (
 DROP TABLE IF EXISTS order_wide_shadow;
 CREATE TABLE order_wide_shadow LIKE order_wide;
 
--- ---- 质量分流表：只存聚合事实，不回原始值（M-K 边界） ----
--- 注意：DUPLICATE KEY (run_id, error_code) 要求 KEY 列是 schema 的有序前缀，
---   故 error_code 必须排在第 2 位（Doris 报错 1105 Key columns should be a
---   ordered prefix of the schema），调整列序时勿把 error_code 移出前两列。
+-- ---- 质量分流的聚合事实落控制面 `quality_reports`，Doris 侧不建聚合表 ----
+-- 历史：此处曾有 `etl_quality_summary`（run_id + error_code 聚合），但全仓 `src/`
+--   零写入点、零消费者 → 演示库恒空表，且易被误读为「分流聚合走 Doris」。
+--   T-SHADOW-04 已删表定义（聚合事实的唯一落点是控制面 `quality_reports`）。
+--   保留下面的 DROP 只为清理历史环境残留的幽灵表（本脚本幂等可重复执行）。
 DROP TABLE IF EXISTS etl_quality_summary;
-
-CREATE TABLE etl_quality_summary (
-  run_id        VARCHAR(64)  NOT NULL COMMENT '执行标识',
-  error_code    VARCHAR(64)  NOT NULL COMMENT '错误码（如 QUALITY_NOT_NULL_AMOUNT）',
-  total_rows    BIGINT       NOT NULL COMMENT '总行数',
-  passed_rows   BIGINT       NOT NULL COMMENT '通过行数',
-  rejected_rows BIGINT       NOT NULL COMMENT '拒绝行数',
-  reject_rate   DOUBLE       NOT NULL COMMENT '拒绝率 = rejected / total',
-  error_count   BIGINT       NOT NULL COMMENT '该错误码命中行数',
-  occurred_at   DATETIME     NOT NULL COMMENT '报告时间'
-)
-ENGINE = OLAP
-DUPLICATE KEY (run_id, error_code)
-DISTRIBUTED BY HASH (run_id) BUCKETS 2
-PROPERTIES ("replication_num" = "1");
 
 -- ---- 演示账号：最小权限（只写 doris_dw） ----
 -- 注意：Doris 的 GRANT 语法与 MySQL 不同（`GRANT ... ON db.* TO 'user'@'%'`）。

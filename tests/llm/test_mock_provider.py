@@ -177,3 +177,22 @@ def test_plan_contract_uses_unified_names_and_codes() -> None:
     # routing 的 sink 必须落在已声明的 valid/error 之内（GATE-005）
     declared = {contract["valid_sink"], contract["error_sink"]}
     assert all(item["sink"] in declared for item in contract["routing"])
+
+
+def test_plan_contract_declares_reject_threshold() -> None:
+    """T-QUALITY-01：契约**必须**显式声明 `max_reject_rate`，否则质量判定 fail-open。
+
+    回归口径：`classify_quality` 只在 `max_rejected_rows` / `max_reject_rate`
+    至少一个成立时才可能判 FAILED/WARNING；两者都缺 → 永远 PASSED，
+    发布门禁第 2 道形同虚设。此前 `mock_provider` 与 `tests/conftest.py` 的
+    `S6_TEST_PLAN` 都没声明，`test_consume_outbox_happy_path` 那句
+    「拒绝率 10% 未超阈值」的注释是靠这个缺口活的（见 fix/final-gate）。
+    """
+    plan = compliant_plan("需求", _profile("MYSQL", "orders"), _profile("DORIS", "order_wide"))
+    contract = plan["quality_contract"]
+    rate = contract.get("max_reject_rate")
+    assert isinstance(rate, (int, float)) and not isinstance(rate, bool)
+    assert 0 < float(rate) < 1, f"阈值应在 (0,1) 开区间，实际 {rate!r}"
+
+    # 演示 seed 的拒绝率（3/1003 ≈ 0.30%）必须落在阈值内，取证口径才不变
+    assert float(rate) > 3 / 1003 * 2, "阈值应显著高于演示 seed 的拒绝率"
