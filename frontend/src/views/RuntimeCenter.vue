@@ -27,6 +27,7 @@ import type {
   ExecutionRunView,
   PreparationView,
   QualityReportView,
+  RiskLevel,
 } from '@/api/types'
 import ApprovalCard from '@/components/ApprovalCard.vue'
 import DataTable, { type Column } from '@/components/DataTable.vue'
@@ -34,7 +35,6 @@ import QualityReportCard from '@/components/QualityReportCard.vue'
 import RiskBadge from '@/components/RiskBadge.vue'
 import StatCard from '@/components/StatCard.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
-import SupervisionTimeline, { type BudgetRow } from '@/components/SupervisionTimeline.vue'
 import { useActorStore } from '@/stores/actor'
 import { useNotificationStore } from '@/stores/notification'
 
@@ -78,26 +78,17 @@ function isSelfApproval(slotRole: string): boolean {
   return false
 }
 
-/** 监督快照（6 条确定性规则）：仅当执行详情带 supervision 指标时展示真实值，否则演示态。 */
-const budgetRows = computed<BudgetRow[]>(() => {
-  const run = executions.value.find((item) => item.supervision_action)
-  const snapshot = (run?.snapshot_sha256 ? run : null) as ExecutionRunView | null
-  const payload = (snapshot as unknown as { supervision_metrics?: Record<string, number> } | null)
-    ?.supervision_metrics
-  return [
-    { label: '记录 ≤10M', display: payload?.records ? `${payload.records}` : '4.21M', ratio: payload?.records ? 0.42 : 0.42 },
-    { label: '字节 ≤10 GiB', display: '3.2GB', ratio: 0.32 },
-    { label: '时长 ≤3600s', display: '21m40s', ratio: 0.59 },
-    { label: '拒绝率 ≤0.5', display: '0.62', ratio: 1, hit: true },
-    { label: '放大比 ≤2.0', display: '1.42', ratio: 0.71 },
-  ]
-})
-
-const supervisionAction = computed(
-  () => executions.value.find((run) => run.supervision_action)?.supervision_action ?? 'THROTTLE',
+/**
+ * 监督结论（真实字段：`ExecutionRunListView.supervision_action` / `supervision_risk`）。
+ *
+ * **不再给假默认值**：历史实现是 `?? 'THROTTLE'` / `?? 'P1'`，把「无监督结论」伪装成
+ * 「已命中 THROTTLE / P1」——`fix/S10-console-contract-a` 起改为 `null` + 空态。
+ */
+const supervisionAction = computed<string | null>(
+  () => executions.value.find((run) => run.supervision_action)?.supervision_action ?? null,
 )
-const supervisionRisk = computed(
-  () => executions.value.find((run) => run.supervision_risk)?.supervision_risk ?? 'P1',
+const supervisionRisk = computed<RiskLevel | null>(
+  () => executions.value.find((run) => run.supervision_risk)?.supervision_risk ?? null,
 )
 
 const failedRun = computed(() => executions.value.find((run) => run.status === 'FAILED') ?? null)
@@ -143,7 +134,7 @@ async function onCommit() {
   try {
     const result = await commitPreparation(prep.id)
     notifications.success(
-      `Commit 完成：ExecutionRun ${result.execution_run_id.slice(0, 8)}… · Capability TTL 至 ${result.capability_expires_at.slice(11, 19)}`,
+      `Commit 完成：ExecutionRun ${result.run_id.slice(0, 8)}… · Capability ${result.token_id.slice(0, 8)}… TTL 至 ${result.expires_at.slice(11, 19)}`,
     )
     await load()
   } catch {
@@ -286,14 +277,22 @@ onMounted(load)
             <h2 class="card__title">运行监督快照</h2>
             <p class="card__subtitle">冻结预算 · 6 条确定性规则</p>
           </div>
-          <RiskBadge :level="supervisionRisk" suffix="命中" />
+          <RiskBadge v-if="supervisionRisk" :level="supervisionRisk" suffix="命中" />
+          <span v-else class="badge badge--neutral">无监督结论</span>
         </div>
         <div class="card__body">
-          <SupervisionTimeline
-            :rows="budgetRows"
-            :action="supervisionAction"
-            :risk="String(supervisionRisk)"
-          />
+          <p v-if="!supervisionAction" class="card__subtitle" style="margin: 0">
+            该运行未回传监督结论。后端 <span class="mono">ExecutionRunListView</span> 仅提供
+            <span class="mono">supervision_action</span> / <span class="mono">supervision_risk</span>
+            / <span class="mono">snapshot_sha256</span>，**不含预算消耗明细** —— 此处不展示数值，
+            不以演示值代替。
+          </p>
+          <p v-else class="card__subtitle" style="margin: 0">
+            监督动作 <b class="mono">{{ supervisionAction }}</b>
+            <template v-if="supervisionRisk"> · 风险 <b class="mono">{{ supervisionRisk }}</b></template>
+            <br />
+            预算消耗明细（<span class="mono">supervision_metrics</span>）后端未回传，故不展示数值。
+          </p>
         </div>
       </section>
 
@@ -304,19 +303,26 @@ onMounted(load)
             <h2 class="card__title">失败诊断与受管回滚</h2>
             <p class="card__subtitle">9 类失败分类 · 阶段 · 可重试性</p>
           </div>
-          <StatusBadge :status="failedRun ? 'FAILED' : 'QUARANTINED'" />
+          <StatusBadge v-if="failedRun" status="FAILED" />
+          <span v-else class="badge badge--success">无失败运行</span>
         </div>
         <div class="card__body stack-sm">
           <div class="diagnosis">
             <div class="diagnosis__label">根因诊断</div>
-            <p class="diagnosis__text">
-              {{ failedRun?.pipeline_name ? `${failedRun.pipeline_name}：` : '' }}
-              SeaTunnel 提交阶段连接超时，未产生副作用；建议重试并校验引擎可达性。
+            <p v-if="failedRun" class="diagnosis__text">
+              {{ failedRun.pipeline_name ? `${failedRun.pipeline_name}：` : '' }}
+              运行 {{ failedRun.id.slice(0, 8) }} 失败。失败分类 / 阶段 / 可重试性由
+              <span class="mono">GET /executions/{id}</span>（API-12）的
+              <span class="mono">failure_category</span> / <span class="mono">failure_stage</span> /
+              <span class="mono">retryable</span> 回传。
             </p>
-            <div class="row" style="margin-top: 6px">
-              <span v-if="failedRun" class="badge badge--outline">run {{ failedRun.id.slice(0, 8) }}</span>
-              <span class="badge badge--warn">可重试</span>
-              <span class="badge badge--neutral">未产生副作用</span>
+            <p v-else class="diagnosis__text">
+              当前项目无失败运行。失败分类 / 阶段 / 可重试性只在运行失败后由
+              <span class="mono">GET /executions/{id}</span>（API-12）回传 ——
+              此处不预填诊断结论。
+            </p>
+            <div v-if="failedRun" class="row" style="margin-top: 6px">
+              <span class="badge badge--outline">run {{ failedRun.id.slice(0, 8) }}</span>
             </div>
           </div>
 

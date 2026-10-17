@@ -9,7 +9,7 @@
  * 前端不在本地判断角色，由后端裁决（前端判断只是提前反馈，不是授权）。
  */
 import client from './client'
-import type { BenchmarkRunView } from './types'
+import type { BenchmarkRunDetailView, BenchmarkRunView } from './types'
 
 export async function listBenchmarkRuns(projectId: string): Promise<BenchmarkRunView[]> {
   const { data } = await client.get<{ runs: BenchmarkRunView[]; total: number }>(
@@ -18,11 +18,18 @@ export async function listBenchmarkRuns(projectId: string): Promise<BenchmarkRun
   return data.runs
 }
 
+/**
+ * 单次运行详情。
+ *
+ * 注意出参是 `BenchmarkRunDetailView`（= 后端 `BenchmarkRunDetailView`）：**不含**
+ * `gates` / `failures` / `layers` / `trace_id`。要门禁明细请用 `listBenchmarkRuns`
+ * （其 `runs` 元素是 `BenchmarkRunResponse`，带 `gates`）。
+ */
 export async function getBenchmarkRun(
   projectId: string,
   runId: string,
-): Promise<BenchmarkRunView> {
-  const { data } = await client.get<BenchmarkRunView>(
+): Promise<BenchmarkRunDetailView> {
+  const { data } = await client.get<BenchmarkRunDetailView>(
     `/projects/${projectId}/benchmark-runs/${runId}`,
   )
   return data

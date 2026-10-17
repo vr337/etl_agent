@@ -92,20 +92,18 @@ const alerts = computed(() => {
       hint: `P0 级 ${p0} · P1 级 ${waiting.length - p0}`,
     })
   }
-  const expiring = connections.value.filter((item) => item.expiry_warning)
-  if (expiring.length) {
-    list.push({
-      tone: 'warn',
-      title: `凭据到期预警 · ${expiring.length}`,
-      hint: '14 天内到期 · WARNING',
-    })
-  }
+  // 凭据到期预警：后端 `ConnectionResponse` 不含「最后轮换时间 / 到期预警」字段
+  // （只有 credential_max_age_days / credential_warning_days 策略值），无法据实计算 →
+  // 不再展示该告警项（历史上恒为 0，属空转；不以推算值冒充）。
   const supervised = executions.value.filter((item) => item.supervision_action)
   if (supervised.length) {
+    const actions = Array.from(
+      new Set(supervised.map((item) => item.supervision_action).filter(Boolean)),
+    ).join(' / ')
     list.push({
       tone: 'warn',
       title: `监督告警 · ${supervised.length}`,
-      hint: '拒绝率超冻结预算 0.5',
+      hint: `监督动作：${actions}`,
     })
   }
   const failed = executions.value.filter((item) => item.status === 'FAILED')
@@ -113,7 +111,7 @@ const alerts = computed(() => {
     list.push({
       tone: 'danger',
       title: `失败待诊断 · ${failed.length}`,
-      hint: '引擎连接类 · 可重试',
+      hint: '详见运行中心的事件流与 failure_* 字段',
     })
   }
   if (!list.length) {

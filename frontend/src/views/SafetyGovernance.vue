@@ -62,26 +62,26 @@ const GATE_LABELS: Record<string, { label: string; threshold: string }> = {
   non_llm_p95_regression: { label: 'non_llm_p95_regression', threshold: '≤ 0.20' },
 }
 
-/** 门禁行：无后端运行时回落到冻结清单口径的演示值（页面标注「示意」）。 */
+/**
+ * 门禁行：**只取真实运行数据**（`BenchmarkRunResponse.gates`，列表端点 `runs[]` 元素）。
+ *
+ * 历史坑（T-CONSOLE-03，`fix/S10-console-contract-a` 修）：无运行数据时回落到
+ * 冻结清单口径的演示值（1.00 / 0.97 / 0.02 / 1.00 / 1.00 / 0.05）且 `passed: true`
+ * → 页面恒显「6 / 6 PASS」，与「本机从未跑过评测」的事实相反。现返回空数组，
+ * 由模板显示「无评测运行」空态。
+ */
 const gateRows = computed(() => {
   const run = latestRun.value
+  if (!run) return []
   const keys = Object.keys(GATE_LABELS)
   return keys.map((key) => {
-    const found = run?.gates.find((gate) => gate.key === key)
-    const fallback: Record<string, number> = {
-      p0_p1_block_rate: 1.0,
-      legitimate_success_rate: 0.97,
-      false_positive_rate: 0.02,
-      evidence_coverage_rate: 1.0,
-      reproducibility_rate: 1.0,
-      non_llm_p95_regression: 0.05,
-    }
+    const found = run.gates.find((gate) => gate.key === key)
     return {
       key,
       label: GATE_LABELS[key].label,
       threshold: GATE_LABELS[key].threshold,
-      actual: found ? String(found.actual) : String(fallback[key]),
-      passed: found ? found.passed : true,
+      actual: found ? String(found.actual) : '—',
+      passed: found ? found.passed : false,
       live: Boolean(found),
     }
   })
@@ -114,11 +114,14 @@ const RELEASE_STAGES = ['SHADOW', 'CANARY', 'PROMOTION', 'ROLLBACK']
 const activeRelease = computed<ReleaseView | null>(() => releases.value[0] ?? null)
 
 function stageStateOf(stage: string): 'done' | 'active' | 'idle' {
-  const current = activeRelease.value?.release_stage ?? 'CANARY'
+  // 无发布记录时不给假默认阶段（历史实现是 `?? 'CANARY'`，会把「无数据」显示成 CANARY 阶段）
+  const current = activeRelease.value?.stage
+  if (!current) return 'idle'
   const order = ['SHADOW_RUNNING', 'CANARY', 'PROMOTION_APPROVED', 'ROLLED_BACK']
   const indexOf = (name: string) => order.findIndex((item) => item.startsWith(name))
   const currentIndex = indexOf(current)
   const targetIndex = indexOf(stage)
+  if (currentIndex < 0) return 'idle'
   if (targetIndex < currentIndex) return 'done'
   if (targetIndex === currentIndex) return 'active'
   return 'idle'
@@ -197,15 +200,23 @@ onMounted(load)
           <div>
             <h2 class="card__title">Benchmark 六项门禁</h2>
             <p class="card__subtitle">
-              套件 harness-v2 · manifest v1（冻结）· report_sha256 {{ (latestRun?.report_sha256 ?? '9b602').slice(0, 8) }}…
+              套件 harness-v2 · manifest v1（冻结）
+              <template v-if="latestRun?.report_sha256">
+                · report_sha256 {{ latestRun.report_sha256.slice(0, 8) }}…
+              </template>
             </p>
           </div>
-          <span class="badge" :class="gatesPassed === 6 ? 'badge--success' : 'badge--danger'">
-            {{ gatesPassed }} / 6 PASS
+          <span v-if="gateRows.length" class="badge" :class="gatesPassed === gateRows.length ? 'badge--success' : 'badge--danger'">
+            {{ gatesPassed }} / {{ gateRows.length }} PASS
           </span>
+          <span v-else class="badge badge--neutral">无评测运行</span>
         </div>
         <div class="card__body" style="padding: 0">
-          <table class="table">
+          <p v-if="!gateRows.length" class="card__subtitle" style="padding: 12px 14px; margin: 0">
+            本项目尚无 Benchmark 运行记录（<span class="mono">GET /projects/{id}/benchmark-runs</span>
+            返回空）。门禁结论只能来自真实运行 —— 不再以冻结清单口径的演示值填充。
+          </p>
+          <table v-else class="table">
             <thead>
               <tr>
                 <th>门禁指标</th>
@@ -345,30 +356,32 @@ onMounted(load)
             <h2 class="card__title">安全改进提案与受控发布</h2>
             <p class="card__subtitle">提案为不可执行写文种：状态机不可跳跃</p>
           </div>
-          <span class="badge badge--info">{{ latestProposal?.status ?? 'IN_REVIEW' }}</span>
+          <span class="badge badge--info">{{ latestProposal?.status ?? '—' }}</span>
         </div>
         <div class="card__body">
           <table class="table plain">
             <tbody>
               <tr>
-                <td class="k">proposal_type</td>
-                <td class="mono">{{ latestProposal?.proposal_type ?? 'POLICY' }}</td>
+                <td class="k">type</td>
+                <td class="mono">{{ latestProposal?.type ?? '—' }}</td>
               </tr>
               <tr>
                 <td class="k">status</td>
-                <td class="mono">DRAFT → IN_REVIEW</td>
+                <td class="mono">{{ latestProposal?.status ?? '—' }}</td>
               </tr>
               <tr>
                 <td class="k">裁决人</td>
-                <td class="mono">SECURITY_APPROVER（人类）</td>
+                <td class="mono">{{ latestProposal?.decided_by ?? '—' }}</td>
               </tr>
               <tr>
-                <td class="k">release_stage</td>
-                <td class="mono">{{ activeRelease?.release_stage ?? 'CANARY' }}</td>
+                <td class="k">stage</td>
+                <td class="mono">{{ activeRelease?.stage ?? '—' }}</td>
               </tr>
               <tr>
                 <td class="k">canary_percent</td>
-                <td class="mono">{{ activeRelease?.canary_percent ?? 5 }}%（1%–10%）</td>
+                <td class="mono">
+                  {{ activeRelease?.canary_percent != null ? `${activeRelease.canary_percent}%` : '—' }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -384,15 +397,17 @@ onMounted(load)
             <tbody>
               <tr>
                 <td class="k">manifest_sha256</td>
-                <td class="mono">{{ (activeRelease?.manifest_sha256 ?? '9b62.c8').slice(0, 10) }}</td>
+                <td class="mono">
+                  {{ activeRelease?.manifest_sha256 ? `${activeRelease.manifest_sha256.slice(0, 10)}…` : '—' }}
+                </td>
               </tr>
               <tr>
-                <td class="k">release_signature</td>
-                <td class="mono">Ed25519</td>
+                <td class="k">signature_key_id</td>
+                <td class="mono">{{ activeRelease?.signature_key_id ?? '—' }}</td>
               </tr>
               <tr>
-                <td class="k">rollback_hook</td>
-                <td class="mono">CANARY → ROLLED_BACK</td>
+                <td class="k">updated_at</td>
+                <td class="mono">{{ activeRelease?.updated_at ?? '—' }}</td>
               </tr>
             </tbody>
           </table>
