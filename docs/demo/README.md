@@ -64,11 +64,15 @@ docker compose -f infra/docker-compose.yml --profile e2e up -d
 
 | 文件 | 作用 |
 | --- | --- |
-| `infra/e2e/mysql-init/01-seed.sql` | 建 `source_db.orders`，灌 1,000 行干净数据 + 2 行故意脏数据（NULL 金额、未来水位；第 3 行脏数据因源列宽报错不可落库，见 T-DEMO-01，实际落库 1,002 行） |
+| `infra/e2e/mysql-init/01-seed.sql` | 建 `source_db.orders`，灌 1,000 行干净数据 + 3 行故意脏数据（NULL 金额、未来水位、400 字符超长地址）。源表 `address` 已加宽至 VARCHAR(500)（fix/T-COMMIT-01 / T-DEMO-01），**三条脏行全部落库，实际 1003 行** |
 | `infra/e2e/doris-init/01-init.sql` | 建 `doris_dw.order_wide`（唯一键）+ `order_wide_shadow` + `etl_quality_summary`（幂等：DROP IF EXISTS + CREATE，可重复执行） |
 
 > 为什么种子数据里要有脏数据？因为演示的价值一半在「错误分流」——
-> 拒绝率非零但可控（2 / 1002），质量报告才会呈现真实的四态而非永远 PASSED。
+> 拒绝率非零但可控（3 / 1003 ≈ 0.30%），质量报告才会呈现真实的四态而非永远 PASSED。
+>
+> ⚠️ **mock 引擎口径未同步**：`MockSeaTunnelClient.demo_metrics()` 仍硬编码
+> `1002/1000/2`，故 `ETL_AGENT_ENGINE_MODE=mock` 下的演示态指标与真跑
+> （1003/1000/3）不一致 —— 待独立小修（不属本次范围）。
 
 ### 3. 后端环境
 
