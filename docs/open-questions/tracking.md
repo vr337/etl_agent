@@ -46,7 +46,7 @@
 | S10 | 17 | 质量契约未声明阈值 → 拒绝率 100% 仍判 PASSED（fail-open） | 独立排期 | **T-QUALITY-01** |
 | S10 | 18 | Pipeline Studio 门禁 14/14 / HOCON 正文 / 版本链 / 候选数为硬编码演示态，未标「示意」 | 独立排期 | **T-CONSOLE-02** |
 | S10 | 19 | Safety 页 Benchmark 六项门禁回落演示值，`live` 字段算了但模板未用 | 独立排期 | **T-CONSOLE-03** |
-| S10 | 20 | Studio 读 `version_no`（实际 `version_number`）→ 渲染 `Vundefined` / `VNaN` / 版本链恒 `V7` | 独立排期 | **T-CONSOLE-04** |
+| S10 | 20 | Studio 读 `version_no`（实际 `version_number`）→ 渲染 `Vundefined` / `VNaN` / 版本链恒 `V7` | **已修（PR #25，5 处引用全修）** | ✅ **T-CONSOLE-04 Closed** |
 
 ## 三、独立运维事项
 
@@ -580,9 +580,13 @@
 - **关联**：`frontend/src/views/SafetyGovernance.vue:65-88/196-235/308`；
   `docs/demo/演示回放.md` §8.9
 
-### T-CONSOLE-04：Studio 读 `version_no`，后端回 `version_number` → 渲染 `Vundefined` / `VNaN`（新，Open）
+### T-CONSOLE-04：Studio 读 `version_no`，后端回 `version_number` → 渲染 `Vundefined` / `VNaN`（**已修，PR #25**）
 
-- **状态**：Open（前端字段名 / 取数路径）
+- **状态**：**已修（`fix/S10-console-version-no` / PR #25）** —— 前端统一改读
+  `version_number`（`types.ts` 类型 + `PipelineStudio.vue` 3 处 + `VersionDiff.vue` 2 处，
+  共 6 处 / 3 文件）；`vue-tsc` / `eslint` / `vite build` 全绿，playwright 实跑确认
+  `/studio` 不再出现 `Vundefined` / `VNaN`（Diff 标题 = `V1（VALIDATED）→ V2（DRAFT）`）。
+  遗留 `?? 7` 魔法兜底归 T-CONSOLE-02。
 - **发现**：S10 补 Studio 截图取证（2026-10-17，A5 画面出现 `VNaN` 后读码定位）
 - **现象（A5 截图可见）**：
   - Diff 标题渲染为 **`Vundefined（VALIDATED）→ VNaN（DRAFT）`**
