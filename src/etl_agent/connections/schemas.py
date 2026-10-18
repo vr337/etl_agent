@@ -12,7 +12,10 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 # 连接器类型白名单（FR-04 / SPEC 5.2 data_connections.connector_type）。
-# 基线 8 类 + S11 T-21 追加 CLICKHOUSE（第 9 类，契约扩展登记见 AMEND-011）。
+# 基线 8 类 + S11 T-21 追加 CLICKHOUSE（第 9 类）与 S3（对象存储，第 10 类）；
+# 契约扩展登记见 tracking.md §四 AMEND-011（Draft）。
+# 注意：S3 目前**只支持登记 / 探针 / 前缀列举**，尚未接入生成引擎的 HOCON 渲染，
+# 故**不进** GATE-002 的可生成白名单（`gate/rules/supported_connectors.py`）。
 CONNECTOR_TYPES = frozenset(
     {
         "MYSQL",
@@ -24,6 +27,7 @@ CONNECTOR_TYPES = frozenset(
         "HDFS",
         "LOCAL_FILE",
         "CLICKHOUSE",
+        "S3",
     }
 )
 
@@ -179,3 +183,20 @@ class DestructionResponse(BaseModel):
     status: str
     destroyed_at: datetime | None
     created_at: datetime
+
+
+class S3ObjectView(BaseModel):
+    """对象存储中的单个对象元数据（S11 T-21；**不含对象正文**）。"""
+
+    key: str
+    size: int
+    etag: str | None = None
+    last_modified: str | None = None
+
+
+class S3ObjectListView(BaseModel):
+    """对象前缀列举结果（只读；凭据绝不出现在响应中，AC-02）。"""
+
+    prefix: str
+    objects: list[S3ObjectView]
+    next_continuation_token: str | None = None

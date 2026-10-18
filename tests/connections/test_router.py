@@ -84,3 +84,17 @@ async def test_router_connection_not_found_404(
         )
     assert response.status_code == 404
     assert response.json()["code"] == "BIZ_404_CONNECTION_NOT_FOUND"
+
+
+async def test_list_objects_rejects_non_s3_connection(
+    app: FastAPI, seeded: SeededWorkspace, seeded_connection: tuple
+) -> None:
+    """对象前缀列举仅支持 S3 连接；其它类型 → 422 明确错误（非静默空列表）。"""
+    connection, _ = seeded_connection
+    async with make_client(app) as client:
+        response = await client.get(
+            f"/api/v1/projects/{seeded.project_a_id}/connections/{connection.id}/objects",  # type: ignore[attr-defined]
+            headers={"X-Actor-ID": SeededWorkspace.ADMIN_A},
+        )
+    assert response.status_code == 422
+    assert response.json()["code"] == "BIZ_422_CONNECTOR_UNSUPPORTED"
