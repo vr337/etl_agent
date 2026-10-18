@@ -1,14 +1,14 @@
 """LLM Provider 测试（T-09；S5 提示词第十二节 test_llm_provider）。
 
 覆盖：mock 固定响应；无 API Key 时真实 Provider 用例 skip（不 fail）；
-超时 / HTTP 错误 / 坏载荷三类失败均收敛为 BIZ_422_LLM_PROVIDER_ERROR。
+超时 → SYS_503_LLM_UNAVAILABLE（T-LLM-01 分级）；HTTP 错误 / 坏载荷 → BIZ_422。
 """
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from etl_agent.llm.errors import LLMProviderError, MockProviderForbidden
+from etl_agent.llm.errors import LLMProviderError, LLMProviderUnavailable, MockProviderForbidden
 from etl_agent.llm.mock_provider import MockProvider
 from etl_agent.llm.openai_provider import OpenAICompatibleProvider
 from tests.helpers import make_settings
@@ -77,16 +77,16 @@ def _provider_with(handler: object) -> OpenAICompatibleProvider:
 
 
 async def test_llm_timeout() -> None:
-    """超时 → BIZ_422_LLM_PROVIDER_ERROR，摘要只含失败分类（不落 Prompt，FR-67）。"""
+    """超时 → SYS_503_LLM_UNAVAILABLE（T-LLM-01：基础设施不可用，非 422）。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out", request=request)
 
     provider = _provider_with(handler)
-    with pytest.raises(LLMProviderError) as excinfo:
+    with pytest.raises(LLMProviderUnavailable) as excinfo:
         await provider.generate_etl_plan("REQ-MARKER-超时用例", SOURCE_PROFILE, SINK_PROFILE)
-    assert excinfo.value.code == "BIZ_422_LLM_PROVIDER_ERROR"
-    assert excinfo.value.http_status == 422
+    assert excinfo.value.code == "SYS_503_LLM_UNAVAILABLE"
+    assert excinfo.value.http_status == 503
     assert "LLM_TIMEOUT" in excinfo.value.message
     # 摘要不含需求正文
     assert "REQ-MARKER" not in excinfo.value.message
