@@ -163,6 +163,10 @@ _JDBC_CONNECTORS: dict[str, tuple[str, str]] = {
     "MYSQL": ("jdbc:mysql://", "com.mysql.cj.jdbc.Driver"),
     "DORIS": ("jdbc:mysql://", "com.mysql.cj.jdbc.Driver"),
     "POSTGRESQL": ("jdbc:postgresql://", "org.postgresql.Driver"),
+    # S11 T-21：ClickHouse 走官方 JDBC（HTTP 8123 / native 9000 由驱动自行选择）。
+    # 注意：引擎侧需 clickhouse-jdbc 与依赖包在 lib/，真跑 ClickHouse 前须核对
+    # worker 镜像插件索引（T-ENGINE-02 教训：驱动缺失只在真跑时炸）。
+    "CLICKHOUSE": ("jdbc:clickhouse://", "com.clickhouse.jdbc.ClickHouseDriver"),
 }
 _DEFAULT_JDBC = _JDBC_CONNECTORS["POSTGRESQL"]
 

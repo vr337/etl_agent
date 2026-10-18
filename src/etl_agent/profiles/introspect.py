@@ -29,7 +29,8 @@ from etl_agent.infrastructure.models import DataConnection
 # Doris FE（3.x）对外讲 MySQL 协议（含 information_schema 查询），元数据探查走
 # MySQL 通道；**最小实现**（fix/S10-demo-script）：正式版需补 Doris 特有 catalog
 # （comment / 分区 / 视图）测试，另行排期。
-INTROSPECTABLE_TYPES = frozenset({"POSTGRESQL", "MYSQL", "DORIS"})
+# ClickHouse（S11 T-21）走 HTTP 接口 + `system.columns`，见 `_open_clickhouse`。
+INTROSPECTABLE_TYPES = frozenset({"POSTGRESQL", "MYSQL", "DORIS", "CLICKHOUSE"})
 
 # 标识符白名单：库名 / 表名来自请求体，必须以白名单校验后双引号包裹，
 # 杜绝通过 schema_name 注入 SQL（参数占位符无法覆盖标识符位置）。
@@ -74,10 +75,41 @@ WHERE table_schema = %s AND table_name = %s AND constraint_name = 'PRIMARY'
 ORDER BY ordinal_position
 """
 
+# ClickHouse：走 `system.columns`（等价于 information_schema.columns，且带
+# `is_in_primary_key`，可避免解析 system.tables.primary_key 的逗号串）。
+# 占位符用 ClickHouse HTTP 的命名参数 `{pN:Type}`，由 `_ClickHouseSession.fetch`
+# 按位置映射到 `param_pN`（参数值永不拼进 SQL 文本）。
+CH_COLUMNS_SQL = """
+SELECT name AS column_name,
+       type AS data_type,
+       startsWith(type, 'Nullable(') AS nullable
+FROM system.columns
+WHERE database = {p1:String} AND table = {p2:String}
+ORDER BY position
+"""
+
+CH_PRIMARY_KEY_SQL = """
+SELECT name AS column_name
+FROM system.columns
+WHERE database = {p1:String} AND table = {p2:String} AND is_in_primary_key = 1
+ORDER BY position
+"""
+
 # 供 FR-12 红线做静态核对（S4 提示词第十一节命令 9）：以下语句集中声明只读契约，
 # 任何新增查询都必须落在这里，避免「顺手写个 COUNT」绕过评审。
 PG_CATALOG_STATEMENTS: tuple[str, ...] = (PG_COLUMNS_SQL, PG_PRIMARY_KEY_SQL)
 MYSQL_CATALOG_STATEMENTS: tuple[str, ...] = (MYSQL_COLUMNS_SQL, MYSQL_PRIMARY_KEY_SQL)
+CLICKHOUSE_CATALOG_STATEMENTS: tuple[str, ...] = (CH_COLUMNS_SQL, CH_PRIMARY_KEY_SQL)
+
+# 连接器类型 → 只读目录语句（缺省按 MySQL 通道）
+_COLUMNS_SQL_BY_TYPE: dict[str, str] = {
+    "POSTGRESQL": PG_COLUMNS_SQL,
+    "CLICKHOUSE": CH_COLUMNS_SQL,
+}
+_PRIMARY_KEY_SQL_BY_TYPE: dict[str, str] = {
+    "POSTGRESQL": PG_PRIMARY_KEY_SQL,
+    "CLICKHOUSE": CH_PRIMARY_KEY_SQL,
+}
 
 
 @dataclass(frozen=True)
@@ -170,6 +202,11 @@ async def open_source(
         async with _open_mysql(connection, credentials) as session:
             yield session
         return
+    # ClickHouse：HTTP 接口（8123）+ 命名参数，见 connections/clickhouse.py 选型说明
+    if connection.connector_type == "CLICKHOUSE":
+        async with _open_clickhouse(connection, credentials) as session:
+            yield session
+        return
     raise ConnectorUnsupported(
         f"connector type not yet supported for metadata introspection: {connection.connector_type}"
     )
@@ -257,6 +294,57 @@ class _MySQLSession:
         self._raw.close()
 
 
+@asynccontextmanager
+async def _open_clickhouse(
+    connection: DataConnection, credentials: Mapping[str, str]
+) -> AsyncIterator[SourceSession]:
+    """ClickHouse 只读会话（HTTP 接口 + Basic 认证，零新增依赖）。"""
+    import httpx
+
+    from etl_agent.connections.clickhouse import clickhouse_base_url
+
+    base_url = clickhouse_base_url(connection.host or "", connection.port)
+    client = httpx.AsyncClient(
+        timeout=10,
+        auth=(credentials.get("username", ""), credentials.get("password", "")),
+    )
+    try:
+        yield _ClickHouseSession(client, base_url, connection.database_name)
+    finally:
+        await client.aclose()
+
+
+class _ClickHouseSession:
+    """ClickHouse HTTP 只读封装（`{pN:Type}` 命名参数 → 查询串 `param_pN`）。
+
+    ClickHouse 的 HTTP 接口**不支持**位置占位符（`?` / `$1` / `%s`），只支持
+    `{name:Type}` + 查询串 `param_name=value`。为让上层沿用统一的
+    `fetch(sql, *params)` 契约，这里按**位置**把第 i 个参数映射为 `p{i}`，
+    故 ClickHouse 专用 SQL 必须以 `{p1:...}` / `{p2:...}` 顺序声明。
+    """
+
+    def __init__(self, client: Any, base_url: str, database: str | None) -> None:
+        self._client = client
+        self._base_url = base_url
+        self._database = database
+
+    async def fetch(self, sql: str, *params: object) -> list[dict[str, Any]]:
+        query: dict[str, str] = {"query": sql, "default_format": "JSON"}
+        if self._database:
+            query["database"] = self._database
+        for index, value in enumerate(params, start=1):
+            # 查询串只接受字符串；具体类型由 SQL 里的 `{pN:Type}` 声明决定
+            query[f"param_p{index}"] = "" if value is None else str(value)
+        response = await self._client.post(self._base_url, params=query)
+        response.raise_for_status()
+        rows = response.json().get("data", [])
+        # 列名统一小写，与 MySQL 通道口径一致（消费方不关心服务端大小写）
+        return [{str(key).lower(): value for key, value in row.items()} for row in rows]
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
 async def read_table_schema(
     connection: DataConnection,
     credentials: Mapping[str, str],
@@ -275,9 +363,11 @@ async def read_table_schema(
     quote_identifier(table_name, dialect="postgres")
 
     async with open_source(connection, credentials) as source:
-        is_postgres = connection.connector_type == "POSTGRESQL"
-        columns_sql = PG_COLUMNS_SQL if is_postgres else MYSQL_COLUMNS_SQL
-        primary_key_sql = PG_PRIMARY_KEY_SQL if is_postgres else MYSQL_PRIMARY_KEY_SQL
+        # 未在映射表声明的类型（MYSQL / DORIS）按 MySQL 通道取目录语句
+        columns_sql = _COLUMNS_SQL_BY_TYPE.get(connection.connector_type, MYSQL_COLUMNS_SQL)
+        primary_key_sql = _PRIMARY_KEY_SQL_BY_TYPE.get(
+            connection.connector_type, MYSQL_PRIMARY_KEY_SQL
+        )
         column_rows = await source.fetch(columns_sql, schema_name, table_name)
         if not column_rows:
             raise TableNotFound(
@@ -300,7 +390,9 @@ async def read_table_schema(
 
 
 def _as_bool(value: object) -> bool:
-    """可空标记归一化（PG bool / MySQL 'YES'|'NO'）。"""
+    """可空标记归一化（PG bool / MySQL 'YES'|'NO' / ClickHouse 1|0）。"""
     if isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return value != 0
     return str(value).strip().upper() == "YES"

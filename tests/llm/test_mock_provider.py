@@ -196,3 +196,15 @@ def test_plan_contract_declares_reject_threshold() -> None:
 
     # 演示 seed 的拒绝率（3/1003 ≈ 0.30%）必须落在阈值内，取证口径才不变
     assert float(rate) > 3 / 1003 * 2, "阈值应显著高于演示 seed 的拒绝率"
+
+
+def test_hocon_clickhouse_uses_clickhouse_driver() -> None:
+    """S11 T-21：CLICKHOUSE 渲染 clickhouse JDBC，不再回落 POSTGRESQL。
+
+    `_JDBC_CONNECTORS` 未覆盖的类型会**回落 POSTGRESQL 并 warning**（T-ENGINE-01
+    的教训：静默用错 driver 只在真跑时炸），故新类型必须显式入表。
+    """
+    hocon = compliant_hocon(_profile("CLICKHOUSE"), _profile("CLICKHOUSE", "order_wide"))
+    assert 'jdbc:clickhouse://${SRC_HOST}:${SRC_PORT}/${SRC_DB}' in hocon
+    assert 'com.clickhouse.jdbc.ClickHouseDriver' in hocon
+    assert "jdbc:postgresql://" not in hocon

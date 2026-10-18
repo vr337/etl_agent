@@ -43,6 +43,7 @@ const CONNECTOR_TYPES: ConnectionType[] = [
   'HIVE',
   'SQL_SERVER',
   'LOCAL_FILE',
+  'CLICKHOUSE',
 ]
 
 const form = ref({

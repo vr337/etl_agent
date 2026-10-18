@@ -5,8 +5,9 @@ SPEC 依据：etl_agent-SPEC_v1.0.3-Baseline 第 3.2 章 M-G / 第 5.2 章 data_
 对应 AC：AC-04（不合规候选被拦截）
 
 判定：
-- GATE-002：来源端 / 目标端 connector_type 必须落在 8 类受支持连接器白名单内
-  （与 SPEC 5.2 `data_connections.connector_type` 枚举一致，ADR-07 字符串化）；
+- GATE-002：来源端 / 目标端 connector_type 必须落在受支持连接器白名单内
+  （与 SPEC 5.2 `data_connections.connector_type` 枚举一致，ADR-07 字符串化；
+  基线 8 类 + S11 T-21 追加的 CLICKHOUSE，见 AMEND-011）；
 - GATE-003：`transforms[].type` 必须落在转换白名单内，白名单外一律拦截，
   避免生成任意转换语义。
 """
@@ -15,7 +16,17 @@ from __future__ import annotations
 from etl_agent.gate.contracts import SEVERITY_ERROR, Context, Plan, RuleResult
 
 SUPPORTED_CONNECTORS = frozenset(
-    {"MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER", "DORIS", "HIVE", "HDFS", "LOCAL_FILE"}
+    {
+        "MYSQL",
+        "POSTGRESQL",
+        "ORACLE",
+        "SQL_SERVER",
+        "DORIS",
+        "HIVE",
+        "HDFS",
+        "LOCAL_FILE",
+        "CLICKHOUSE",
+    }
 )
 
 SUPPORTED_TRANSFORMS = frozenset(

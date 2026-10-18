@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from etl_agent.gate.contracts import SEVERITY_ERROR, Context, Plan, RuleResult
 
-DATABASE_CONNECTORS = frozenset({"MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER", "DORIS", "HIVE"})
+DATABASE_CONNECTORS = frozenset(
+    {"MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER", "DORIS", "HIVE", "CLICKHOUSE"}
+)
 
 
 class DatabaseEndpoints:

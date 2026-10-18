@@ -738,6 +738,7 @@
 | AMEND-008 | 审计证据与评测安全进化域错误码补充 | Accepted | SPEC v1.0.3-Baseline 6.4 |
 | AMEND-009 | 生成运行响应追加 pipeline_version_id（API-05/06 出参） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05/06） |
 | AMEND-010 | 生成运行**列表**出参追加 pipeline_version_id（API-05 列表） | Accepted | SPEC v1.0.3-Baseline 6.1（API-05 列表） |
+| AMEND-011 | 连接器枚举扩展：新增 `CLICKHOUSE`（第 9 类）与 `S3`（第 10 类，S11 T-21）；正文 `docs/spec/amendments/AMEND-011-connector-clickhouse-s3.md`（含 Pencil 原型图 `docs/prototype/S11-*.png`） | **Draft（待人类审核）** | SPEC v1.0.3-Baseline 5.2 / 3.2 M-C / M-E（FR-04 连接登记、FR-05 探针、FR-12 探查、FR-13 文件资产） |
 
 ## 五、操作日志（破例与流程偏差）
 

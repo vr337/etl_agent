@@ -17,10 +17,10 @@ from etl_agent.infrastructure.models import DataConnection
 
 
 def validate_connector_type(connector_type: str) -> str:
-    """校验连接器类型（8 类，FR-04）。
+    """校验连接器类型（`CONNECTOR_TYPES` 白名单，基线 8 类 + S11 追加 CLICKHOUSE）。
 
     Raises:
-        ValidationError: 类型不在 8 类之内。
+        ValidationError: 类型不在白名单之内。
     """
     from etl_agent.auth.errors import ValidationError
 

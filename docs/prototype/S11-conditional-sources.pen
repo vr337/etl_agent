@@ -1,0 +1,719 @@
+{
+  "version": "2.21",
+  "children": [
+    {
+      "type": "frame",
+      "id": "ZXj5t",
+      "x": 80,
+      "y": 80,
+      "name": "S3 Form Board",
+      "width": 504,
+      "fill": "#F7F8FA",
+      "cornerRadius": 20,
+      "layout": "vertical",
+      "padding": 32,
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "fFBda",
+          "name": "新建 S3 / MinIO 连接",
+          "width": 440,
+          "fill": "#FFFFFF",
+          "cornerRadius": 14,
+          "stroke": "#E5E7EB",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 28,
+          "children": [
+            {
+              "type": "text",
+              "id": "gWeuu",
+              "name": "Title",
+              "fill": "#111827",
+              "content": "新建 S3 / MinIO 连接",
+              "fontFamily": "Inter",
+              "fontSize": 18,
+              "fontWeight": "600"
+            },
+            {
+              "type": "text",
+              "id": "TTfHJ",
+              "name": "Subtitle",
+              "fill": "#6B7280",
+              "content": "对象存储 · 只读凭据托管 · ListObjectsV2 前缀列举",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "ED4gY",
+              "name": "Divider",
+              "width": "fill_container",
+              "height": 1,
+              "fill": "#E5E7EB"
+            },
+            {
+              "type": "frame",
+              "id": "I5FI2B",
+              "name": "Endpoint Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "jRnWc",
+                  "name": "Endpoint Label",
+                  "fill": "#374151",
+                  "content": "Endpoint",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "cRZdN",
+                  "name": "Endpoint Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "JQzK2",
+                      "name": "Endpoint Value",
+                      "fill": "#9CA3AF",
+                      "content": "https://minio.internal:9000",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "gzhMR",
+              "name": "Access Key Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "ctyUK",
+                  "name": "Access Key Label",
+                  "fill": "#374151",
+                  "content": "Access Key",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "PDVnK",
+                  "name": "Access Key Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "m6LoAx",
+                      "name": "Access Key Value",
+                      "fill": "#9CA3AF",
+                      "content": "AKIA4T7Q2FEXAMPLE",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "X7HeX",
+              "name": "Secret Key Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "eSWCO",
+                  "name": "Secret Key Label",
+                  "fill": "#374151",
+                  "content": "Secret Key",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "V6es6",
+                  "name": "Secret Key Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "wGxTW",
+                      "name": "Secret Key Value",
+                      "fill": "#111827",
+                      "content": "••••••••••••••",
+                      "fontFamily": "Inter",
+                      "fontSize": 15,
+                      "fontWeight": "normal",
+                      "letterSpacing": 2
+                    },
+                    {
+                      "type": "text",
+                      "id": "fD218",
+                      "name": "Reveal",
+                      "fill": "#2563EB",
+                      "content": "显示",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "K5TB5",
+              "name": "Bucket Name Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Q9IxZ",
+                  "name": "Bucket Name Label",
+                  "fill": "#374151",
+                  "content": "Bucket Name",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "gJXn0",
+                  "name": "Bucket Name Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "gxZWD",
+                      "name": "Bucket Name Value",
+                      "fill": "#9CA3AF",
+                      "content": "raw-orders",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "O3VYFG",
+              "name": "Actions",
+              "width": "fill_container",
+              "gap": 12,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "gQTHr",
+                  "name": "测试连通性",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#2563EB",
+                  "cornerRadius": 8,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "OuLqT",
+                      "name": "CTA",
+                      "fill": "#FFFFFF",
+                      "content": "测试连通性",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "vrP99",
+                  "name": "Cancel",
+                  "width": 112,
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "h9ROg",
+                      "name": "Cancel Label",
+                      "fill": "#374151",
+                      "content": "取消",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "Y0ZSO6",
+              "name": "Footnote",
+              "fill": "#6B7280",
+              "content": "凭据经 SecretProvider 加密托管，响应与日志零明文（AC-02）",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "normal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "Kqr7r",
+      "x": 640,
+      "y": 80,
+      "name": "ClickHouse Form Board",
+      "width": 504,
+      "fill": "#F7F8FA",
+      "cornerRadius": 20,
+      "layout": "vertical",
+      "padding": 32,
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "qsjFr",
+          "name": "新建 ClickHouse 连接",
+          "width": 440,
+          "fill": "#FFFFFF",
+          "cornerRadius": 14,
+          "stroke": "#E5E7EB",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 28,
+          "children": [
+            {
+              "type": "text",
+              "id": "tLauK",
+              "name": "Title",
+              "fill": "#111827",
+              "content": "新建 ClickHouse 连接",
+              "fontFamily": "Inter",
+              "fontSize": 18,
+              "fontWeight": "600"
+            },
+            {
+              "type": "text",
+              "id": "iOpOf",
+              "name": "Subtitle",
+              "fill": "#6B7280",
+              "content": "列式分析库 · HTTP 8123 · system.columns 元数据探查",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "CbBtQ",
+              "name": "Divider",
+              "width": "fill_container",
+              "height": 1,
+              "fill": "#E5E7EB"
+            },
+            {
+              "type": "frame",
+              "id": "PJbLX",
+              "name": "Host Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Gz2dD",
+                  "name": "Host Label",
+                  "fill": "#374151",
+                  "content": "Host",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "fdKIQ",
+                  "name": "Host Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "AXvDg",
+                      "name": "Host Value",
+                      "fill": "#9CA3AF",
+                      "content": "ch-analytics.internal",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ClWIg",
+              "name": "Port Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "HL8wU",
+                  "name": "Port Label",
+                  "fill": "#374151",
+                  "content": "Port",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "jP0Uw",
+                  "name": "Port Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "bCtSj",
+                      "name": "Port Value",
+                      "fill": "#9CA3AF",
+                      "content": "8123",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "VjABU",
+              "name": "Database Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "hdU13",
+                  "name": "Database Label",
+                  "fill": "#374151",
+                  "content": "Database",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "rMWuV",
+                  "name": "Database Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "apHwo",
+                      "name": "Database Value",
+                      "fill": "#9CA3AF",
+                      "content": "analytics",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "vvpnm",
+              "name": "Username Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "tB1bd",
+                  "name": "Username Label",
+                  "fill": "#374151",
+                  "content": "Username",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "ftcxo",
+                  "name": "Username Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "MeU0d",
+                      "name": "Username Value",
+                      "fill": "#9CA3AF",
+                      "content": "etl_reader",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "B4Nl8",
+              "name": "Password Field",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 6,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "LvdkQ",
+                  "name": "Password Label",
+                  "fill": "#374151",
+                  "content": "Password",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "500"
+                },
+                {
+                  "type": "frame",
+                  "id": "UZ719",
+                  "name": "Password Input",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "VzFJH",
+                      "name": "Password Value",
+                      "fill": "#111827",
+                      "content": "••••••••••",
+                      "fontFamily": "Inter",
+                      "fontSize": 15,
+                      "fontWeight": "normal",
+                      "letterSpacing": 2
+                    },
+                    {
+                      "type": "text",
+                      "id": "Cy9Ul",
+                      "name": "Reveal",
+                      "fill": "#2563EB",
+                      "content": "显示",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "w2upq",
+              "name": "Actions",
+              "width": "fill_container",
+              "gap": 12,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "zjOyh",
+                  "name": "测试连通性",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#2563EB",
+                  "cornerRadius": 8,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "c7nc1",
+                      "name": "CTA",
+                      "fill": "#FFFFFF",
+                      "content": "测试连通性",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "o4ncr",
+                  "name": "Cancel",
+                  "width": 112,
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 8,
+                  "stroke": "#D1D5DB",
+                  "strokeWidth": 1,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "LrxUl",
+                      "name": "Cancel Label",
+                      "fill": "#374151",
+                      "content": "取消",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "UdvkD",
+              "name": "Footnote",
+              "fill": "#6B7280",
+              "content": "凭据经 SecretProvider 加密托管，响应与日志零明文（AC-02）",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "normal"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "fileToken": "d509c4a1-d054-44df-a255-1693f6a77926"
+}
