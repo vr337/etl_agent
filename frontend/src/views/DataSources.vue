@@ -45,6 +45,7 @@ const CONNECTOR_TYPES: ConnectionType[] = [
   'LOCAL_FILE',
   'CLICKHOUSE',
   'S3',
+  'REST_API',
 ]
 
 const form = ref({

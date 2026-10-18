@@ -17,6 +17,7 @@ from etl_agent.connections.probes.clickhouse_probe import probe_clickhouse
 from etl_agent.connections.probes.local_file_probe import probe_local_file
 from etl_agent.connections.probes.mysql_probe import probe_mysql
 from etl_agent.connections.probes.postgres_probe import probe_postgres
+from etl_agent.connections.probes.rest_api_probe import probe_rest_api
 from etl_agent.connections.probes.s3_probe import probe_s3
 from etl_agent.connections.probes.unsupported import probe_unsupported
 
@@ -37,6 +38,8 @@ _PROBES = {
     "CLICKHOUSE": probe_clickhouse,
     # S11 T-21：对象存储以 ListObjectsV2（max-keys=1）实探
     "S3": probe_s3,
+    # S11 T-21：REST API 以一次 GET 实探（只判状态码）
+    "REST_API": probe_rest_api,
     "LOCAL_FILE": probe_local_file,
 }
 

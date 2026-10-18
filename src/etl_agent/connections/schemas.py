@@ -12,10 +12,10 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 # 连接器类型白名单（FR-04 / SPEC 5.2 data_connections.connector_type）。
-# 基线 8 类 + S11 T-21 追加 CLICKHOUSE（第 9 类）与 S3（对象存储，第 10 类）；
-# 契约扩展登记见 tracking.md §四 AMEND-011（Draft）。
-# 注意：S3 目前**只支持登记 / 探针 / 前缀列举**，尚未接入生成引擎的 HOCON 渲染，
-# 故**不进** GATE-002 的可生成白名单（`gate/rules/supported_connectors.py`）。
+# 基线 8 类 + S11 T-21 追加 CLICKHOUSE（第 9 类）、S3（对象存储，第 10 类）、
+# REST_API（HTTP 数据源，第 11 类）；契约扩展登记见 AMEND-011（Draft）。
+# 注意：S3 / REST_API 目前只支持**登记 / 探针 / 只读取数**，尚未接入生成引擎的
+# HOCON 渲染，故**不进** GATE-002 的可生成白名单（`gate/rules/supported_connectors.py`）。
 CONNECTOR_TYPES = frozenset(
     {
         "MYSQL",
@@ -28,6 +28,7 @@ CONNECTOR_TYPES = frozenset(
         "LOCAL_FILE",
         "CLICKHOUSE",
         "S3",
+        "REST_API",
     }
 )
 

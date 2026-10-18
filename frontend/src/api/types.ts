@@ -60,6 +60,7 @@ export type ConnectionType =
   | 'LOCAL_FILE'
   | 'CLICKHOUSE'
   | 'S3'
+  | 'REST_API'
 export type ConnectionStatus = 'UNTESTED' | 'TESTING' | 'READY' | 'FAILED'
 
 /**
