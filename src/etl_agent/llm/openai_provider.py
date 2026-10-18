@@ -86,6 +86,7 @@ _FEW_SHOT_HOCON = """env {
 }
 source {
   Jdbc {
+    driver = "com.mysql.cj.jdbc.Driver"
     url = "jdbc:mysql://${SRC_HOST}:${SRC_PORT}/${SRC_DB}"
     user = "${SRC_USER}"
     password = "${SRC_PASSWORD}"
@@ -108,17 +109,25 @@ transform {
 sink {
   Jdbc {
     plugin_input = "valid"
+    driver = "com.mysql.cj.jdbc.Driver"
     url = "jdbc:mysql://${SINK_HOST}:${SINK_PORT}/${SINK_DB}"
     user = "${SINK_USER}"
     password = "${SINK_PASSWORD}"
     table = "order_wide_shadow"
+    database = "${SINK_DB}"
+    generate_sink_sql = true
+    enable_upsert = false
   }
   Jdbc {
     plugin_input = "error"
+    driver = "com.mysql.cj.jdbc.Driver"
     url = "jdbc:mysql://${SINK_HOST}:${SINK_PORT}/${SINK_DB}"
     user = "${SINK_USER}"
     password = "${SINK_PASSWORD}"
     table = "order_wide_error"
+    database = "${SINK_DB}"
+    generate_sink_sql = true
+    enable_upsert = false
   }
 }
 """
@@ -160,11 +169,21 @@ SYSTEM_PROMPT = (
     "- 不得把 profile 里的样本值、统计值写进 hocon。\n"
     "\n"
     "【HOCON 结构约定】\n"
+    "- **每个 Jdbc 块都必须写 driver**（漏了会在提交时报\n"
+    "  API-02 \"the options('driver') are required\"，run31 实证）。按 connector_type 取：\n"
+    "    MYSQL / DORIS → com.mysql.cj.jdbc.Driver\n"
+    "    POSTGRESQL    → org.postgresql.Driver\n"
+    "    CLICKHOUSE    → com.clickhouse.jdbc.ClickHouseDriver\n"
     "- source 用 Jdbc 块，带 plugin_output = \"src\"\n"
     "- transform 用两个 Sql 块：valid（质量通过）与 error（质量不通过），\n"
     "  各自 plugin_input = \"src\"、plugin_output = \"valid\" / \"error\"\n"
     "- sink 用两个 Jdbc 块：plugin_input = \"valid\" → <目标表>_shadow；\n"
     "  plugin_input = \"error\" → <目标表>_error（error 路多两列 error_code / error_reason）\n"
+    "- **sink 块必须同时写齐四选项，缺一即提交失败**（T-ENGINE-03 真引擎逐级实测）：\n"
+    "    table              = \"<目标表>\"\n"
+    "    database           = \"${SINK_DB}\"\n"
+    "    generate_sink_sql  = true    // 缺它 → API-02 the options('query') are required\n"
+    "    enable_upsert      = false   // 缺它默认 true → 追加 ON DUPLICATE KEY UPDATE，Doris 不支持\n"
     "- error 分支必须写直接否定态（X IS NULL、X > CURRENT_TIMESTAMP），\n"
     "  禁止写 not (X IS NOT NULL) —— SeaTunnel 不支持该表达式。\n"
     "\n"
