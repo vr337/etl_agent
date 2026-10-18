@@ -59,6 +59,7 @@ export type ConnectionType =
   | 'SQL_SERVER'
   | 'LOCAL_FILE'
   | 'CLICKHOUSE'
+  | 'S3'
 export type ConnectionStatus = 'UNTESTED' | 'TESTING' | 'READY' | 'FAILED'
 
 /**

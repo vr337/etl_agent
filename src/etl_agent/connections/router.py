@@ -22,6 +22,8 @@ from etl_agent.connections import policy as policy_service
 from etl_agent.connections import probe as probe_service
 from etl_agent.connections import register as register_service
 from etl_agent.connections import service as connection_service
+from etl_agent.connections.errors import ConnectorUnsupported, ProbeFailed
+from etl_agent.connections.s3 import S3ListError, list_objects_v2, parse_endpoint
 from etl_agent.connections.schemas import (
     ConnectionPolicyUpdateRequest,
     ConnectionRegisterRequest,
@@ -35,6 +37,8 @@ from etl_agent.connections.schemas import (
     RotationCreateRequest,
     RotationListView,
     RotationResponse,
+    S3ObjectListView,
+    S3ObjectView,
 )
 from etl_agent.infrastructure.database import get_session
 from etl_agent.infrastructure.models import DataConnection, SecretRotationRequest
@@ -132,6 +136,70 @@ def _settings_of(request: Request) -> Settings:
     from typing import cast
 
     return cast(Settings, request.app.state.settings)
+
+
+@router.get(
+    "/projects/{project_id}/connections/{connection_id}/objects",
+    response_model=S3ObjectListView,
+)
+async def list_connection_objects(
+    project_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    request: Request,
+    prefix: str = Query(default="", max_length=1024),
+    limit: int = Query(default=100, ge=1, le=1000),
+    continuation_token: str | None = Query(default=None, max_length=2048),
+    actor: ActorContext = Depends(require_project_member),
+    session: AsyncSession = Depends(get_session),
+) -> S3ObjectListView:
+    """对象存储前缀列举（S11 T-21 / FR-13）：只读元数据，**不下载对象正文**。
+
+    凭据经 SecretProvider 解密后只在内存中短暂持有（AC-02），响应体只含
+    key / size / etag / last_modified —— 绝不含 Access Key / Secret Key。
+    """
+    connection = await connection_service.load_connection(session, project_id, connection_id)
+    if connection.connector_type != "S3":
+        raise ConnectorUnsupported(
+            f"对象前缀列举仅支持 S3 连接，当前为 {connection.connector_type}"
+        )
+
+    credentials: dict[str, str] = {}
+    if connection.secret_ref is not None:
+        from etl_agent.secrets.factory import create_provider
+
+        provider = create_provider(session, _settings_of(request))
+        credentials = await provider.read(connection.secret_ref)
+
+    try:
+        endpoint = parse_endpoint(
+            connection.host or "", connection.port, connection.database_name
+        )
+        objects, next_token = await list_objects_v2(
+            endpoint,
+            (credentials.get("username", ""), credentials.get("password", "")),
+            prefix=prefix,
+            max_keys=limit,
+            continuation_token=continuation_token,
+        )
+    except ValueError as exc:
+        # 定位参数缺失/非法（bucket 未登记等）→ 422，与探针失败同族
+        raise ProbeFailed(str(exc)) from exc
+    except S3ListError as exc:
+        raise ProbeFailed(str(exc)) from exc
+
+    return S3ObjectListView(
+        prefix=prefix,
+        objects=[
+            S3ObjectView(
+                key=item.key,
+                size=item.size,
+                etag=item.etag,
+                last_modified=item.last_modified,
+            )
+            for item in objects
+        ],
+        next_continuation_token=next_token,
+    )
 
 
 @router.post(

@@ -44,6 +44,7 @@ const CONNECTOR_TYPES: ConnectionType[] = [
   'SQL_SERVER',
   'LOCAL_FILE',
   'CLICKHOUSE',
+  'S3',
 ]
 
 const form = ref({
