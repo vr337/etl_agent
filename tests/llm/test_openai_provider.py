@@ -90,12 +90,29 @@ async def test_generate_success_and_payload_shape() -> None:
 
 
 def test_system_prompt_guards() -> None:
-    """System Prompt 必须写死四条：禁解释文字、占位符、禁 not(...)、修复模式。"""
+    """System Prompt 必须写死：禁解释文字、占位符、禁 not(...)、修复模式、driver 必填。"""
     assert "禁止任何解释性文字" in SYSTEM_PROMPT
     assert "${SRC_PASSWORD}" in SYSTEM_PROMPT
     assert "禁止写 not (X IS NOT NULL)" in SYSTEM_PROMPT
     assert "gate_feedback" in SYSTEM_PROMPT
     assert "max_reject_rate" in SYSTEM_PROMPT
+    # run31 实证：漏 driver 会在提交时被 SeaTunnel 拒（API-02 the options('driver') are required）
+    assert "每个 Jdbc 块都必须写 driver" in SYSTEM_PROMPT
+    assert "com.mysql.cj.jdbc.Driver" in SYSTEM_PROMPT
+    assert "org.postgresql.Driver" in SYSTEM_PROMPT
+    # run32 实证：sink 用 table 形态时缺 generate_sink_sql → 报 options('query') are required
+    assert "generate_sink_sql" in SYSTEM_PROMPT
+    assert "enable_upsert" in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.count("generate_sink_sql = true") >= 2  # 约定段 1 + 示例 2 个 sink
+
+
+def test_few_shot_contains_driver() -> None:
+    """few-shot 示例本身必须含 driver —— 模型会照抄示例，示例缺什么它就缺什么。
+
+    注意：示例经 `json.dumps` 序列化进 Prompt，引号会转义成 `\\"`，
+    故按类名匹配，不按 `driver = "..."` 字面量匹配。
+    """
+    assert SYSTEM_PROMPT.count("com.mysql.cj.jdbc.Driver") >= 3  # 约定段 1 + 示例 source/sink 3
 
 
 async def test_parse_markdown_fence() -> None:
