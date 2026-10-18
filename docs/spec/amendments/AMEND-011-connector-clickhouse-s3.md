@@ -49,8 +49,9 @@
 > 「凭据经 SecretProvider 加密托管，响应与日志零明文（AC-02）」对应既有安全约束，
 > 不引入新要求。
 >
-> 原型源文件：绘制于 Pencil（pen.dev）画布，导出 PNG 已入档；`.pen` 源文件随
-> 本地画布保存，不入库（体积大且含会话态），如需归档由人类在 Pencil 中另存。
+> **设计源文件**：`docs/prototype/S11-conditional-sources.pen`（Pencil 2.21 格式，
+> 含 `S3 Form Board` / `ClickHouse Form Board` 两个画板）。PNG 由该源文件导出，
+> 两者同源，改稿请改 `.pen` 后重新导出，避免图与源漂移。
 
 ### 4. 门禁白名单的**非对称**取舍（需注意）
 
