@@ -13,10 +13,25 @@ from etl_agent.auth.errors import BizError
 
 
 class LLMProviderError(BizError):
-    """LLM Provider 调用失败（超时 / HTTP 错误 / 响应不可解析）。"""
+    """LLM Provider 调用失败（HTTP 错误 / 响应不可解析）。"""
 
     code = "BIZ_422_LLM_PROVIDER_ERROR"
     http_status = 422
+
+
+class LLMProviderUnavailable(LLMProviderError):
+    """LLM 基础设施不可用（T-LLM-01）：超时 / 连接失败 / 额度耗尽（429）。
+
+    与 `LLMProviderError` 分开命名并升为 **503**：这三类都是「Provider 暂时用不了」，
+    不是「这次生成的内容有问题」。混进 422 会让调用方误以为需要改输入，
+    也会让 SRE 把配额/网络问题当成业务错误排。
+
+    红线：**绝不静默回落到 mock_provider** —— 回落会让一次「没生成」伪装成
+    「生成了一份固定配置」，是本项目最不能接受的那类欺骗。
+    """
+
+    code = "SYS_503_LLM_UNAVAILABLE"
+    http_status = 503
 
 
 class LLMBudgetExhausted(BizError):

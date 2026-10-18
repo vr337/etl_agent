@@ -158,8 +158,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
-    # 单次生成请求超时（SPEC 8「性能 · LLM 生成」：≤180s 可配置）
-    llm_timeout_seconds: int = 180
+    # 单次生成请求超时（T-LLM-01 定为 120s；原 180s 属历史遗留，已按任务书下调）
+    llm_timeout_seconds: int = 120
     # 有限修复预算（FR-21）：含初始候选，硬上限 3（validate_llm 越界即拒绝启动）
     llm_max_candidates: int = LLM_MAX_CANDIDATES_HARD_CAP
 
